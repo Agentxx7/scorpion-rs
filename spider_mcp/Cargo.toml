@@ -39,9 +39,13 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["chrome", "spider_cloud"]
+default = ["chrome", "chrome_screenshot", "spider_cloud"]
 chrome = ["spider/chrome"]
-chrome_screenshot = ["chrome"]
+# Enables spider_transformations' own `screenshot` feature, which is what
+# turns `ReturnFormat::Screenshot` from a hardcoded empty string into a real
+# base64 encode of the captured screenshot bytes. Previously this flag was
+# declared but unused — no code in this crate referenced it.
+chrome_screenshot = ["chrome", "spider_transformations/screenshot"]
 smart = ["spider/smart"]
 spider_cloud = ["spider/spider_cloud"]
 search = []

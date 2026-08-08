@@ -11,7 +11,9 @@ use spider_transformations::transformation::content::{
 pub struct ScrapeParams {
     /// The URL to scrape
     pub url: String,
-    /// Output format: raw, markdown, text, or xml (default: markdown)
+    /// Output format: raw, markdown, text, xml, or screenshot (default: markdown).
+    /// "screenshot" returns a base64-encoded image and implies Chrome
+    /// rendering even if `headless` is unset.
     pub return_format: Option<String>,
     /// Use Chrome for JavaScript rendering (requires chrome feature)
     pub headless: Option<bool>,
@@ -61,11 +63,14 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
     website.configuration.return_page_links = true;
     website.with_limit(1);
 
+    let format_str = params.return_format.as_deref().unwrap_or("markdown");
+    let wants_screenshot = super::apply_screenshot_options(&mut website, format_str);
+
     let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
 
     let mut rx = website.subscribe(0);
 
-    let use_headless = params.headless.unwrap_or(false);
+    let use_headless = params.headless.unwrap_or(false) || wants_screenshot;
 
     tokio::spawn(async move {
         #[cfg(feature = "chrome")]
@@ -83,7 +88,6 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
         }
     });
 
-    let format_str = params.return_format.as_deref().unwrap_or("markdown");
     let transform_conf = TransformConfig {
         return_format: ReturnFormat::from_str(format_str),
         ..Default::default()
@@ -95,12 +99,13 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
         let input = TransformInput {
             url: page.get_url_parsed_ref().as_ref(),
             content: page.get_html_bytes_u8(),
-            screenshot_bytes: None,
+            screenshot_bytes: super::page_screenshot_bytes(&page),
             encoding: None,
             selector_config: None,
             ignore_tags: None,
         };
         let content = transform_content_input(input, &transform_conf);
+        let content = super::screenshot_content_or_error(wants_screenshot, content)?;
         let links: Vec<String> = page
             .page_links
             .as_ref()

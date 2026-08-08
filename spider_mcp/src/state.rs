@@ -141,7 +141,6 @@ fn running_session_ttl() -> Option<Duration> {
 pub enum CrawlSessionStatus {
     Running,
     Complete,
-    #[allow(dead_code)]
     Failed,
 }
 

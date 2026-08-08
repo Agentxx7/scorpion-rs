@@ -19,7 +19,9 @@ pub struct CrawlParams {
     pub limit: Option<u32>,
     /// Maximum crawl depth (default: 25)
     pub depth: Option<usize>,
-    /// Output format: raw, markdown, text, or xml (default: markdown)
+    /// Output format: raw, markdown, text, xml, or screenshot (default: markdown).
+    /// "screenshot" returns each page's base64-encoded image and implies
+    /// Chrome rendering even if `headless` is unset.
     pub return_format: Option<String>,
     /// Honor robots.txt (default: true)
     pub respect_robots_txt: Option<bool>,
@@ -98,11 +100,12 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
 
     let format_str = params.return_format.as_deref().unwrap_or("markdown");
     let return_format = ReturnFormat::from_str(format_str);
+    let wants_screenshot = super::apply_screenshot_options(&mut website, format_str);
 
     let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
     let mut rx = website.subscribe(16);
 
-    let use_headless = params.headless.unwrap_or(false);
+    let use_headless = params.headless.unwrap_or(false) || wants_screenshot;
 
     // Keep the crawl's abort handle so an inline request dropped by the client can
     // cancel it, and a session can cancel it on eviction. Dropping the JoinHandle
@@ -142,12 +145,13 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
             let input = TransformInput {
                 url: page.get_url_parsed_ref().as_ref(),
                 content: page.get_html_bytes_u8(),
-                screenshot_bytes: None,
+                screenshot_bytes: super::page_screenshot_bytes(&page),
                 encoding: None,
                 selector_config: None,
                 ignore_tags: None,
             };
             let content = transform_content_input(input, &transform_conf);
+            let content = super::screenshot_content_or_error(wants_screenshot, content)?;
             let links: Vec<String> = page
                 .page_links
                 .as_ref()
@@ -187,16 +191,35 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
                 ..Default::default()
             };
 
+            // Set on a fail-closed screenshot rejection so the loop's normal
+            // exit (channel closed) doesn't overwrite Failed with Complete.
+            let mut failed = false;
+
             while let Ok(page) = rx.recv().await {
                 let input = TransformInput {
                     url: page.get_url_parsed_ref().as_ref(),
                     content: page.get_html_bytes_u8(),
-                    screenshot_bytes: None,
+                    screenshot_bytes: super::page_screenshot_bytes(&page),
                     encoding: None,
                     selector_config: None,
                     ignore_tags: None,
                 };
                 let content = transform_content_input(input, &transform_conf);
+                let content = match super::screenshot_content_or_error(wants_screenshot, content) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        // Same fail-closed rule as the inline path: a
+                        // screenshot request that produced no bytes must not
+                        // surface as a silent success — mark the session
+                        // failed and stop, rather than completing with a
+                        // page missing its requested screenshot.
+                        if let Some(mut session) = state2.sessions.get_mut(&id2) {
+                            session.status = CrawlSessionStatus::Failed;
+                        }
+                        failed = true;
+                        break;
+                    }
+                };
                 let links: Vec<String> = page
                     .page_links
                     .as_ref()
@@ -213,8 +236,10 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
                 }
             }
 
-            if let Some(mut session) = state2.sessions.get_mut(&id2) {
-                session.status = CrawlSessionStatus::Complete;
+            if !failed {
+                if let Some(mut session) = state2.sessions.get_mut(&id2) {
+                    session.status = CrawlSessionStatus::Complete;
+                }
             }
         });
 

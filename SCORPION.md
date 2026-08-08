@@ -205,6 +205,14 @@ follow-up to it.
 
 ---
 
+## Self-Hosting Contract
+
+Scorpion core must remain independently self-hostable. Core functionality
+must not require a spider.cloud account, a spider.cloud API key, or any other
+proprietary Spider hosted service. Hosted/external providers (Spider Cloud,
+third-party search APIs, etc.) may exist only as explicit, optional
+integrations layered on top of a core that already works without them.
+
 ## 8. Upstream Strategy
 
 - `origin` = Scorpion (this repository)

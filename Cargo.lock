@@ -9600,6 +9600,7 @@ checksum = "05602e3cd6fe2cfcddb053cb20d308862677748fb0bfeb17d6c4af20e5dca34f"
 dependencies = [
  "aho-corasick",
  "auto_encoder 0.2.4",
+ "base64 0.22.1",
  "fast_html2md",
  "html5ever",
  "indexmap",

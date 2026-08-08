@@ -5,7 +5,8 @@ use std::sync::Arc;
 use crate::state::SharedState;
 use crate::tools::{
     crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
-    scrape::ScrapeParams, search::SearchParams, transform::TransformParams,
+    media_search::MediaSearchParams, scrape::ScrapeParams, search::SearchParams,
+    transform::TransformParams,
 };
 
 #[derive(Clone)]
@@ -83,6 +84,17 @@ impl SpiderMcpServer {
     ) -> Result<String, String> {
         crate::tools::search::run(params).await
     }
+
+    #[tool(
+        name = "spider_media_search",
+        description = "Search a media category (video or image) via a configured search provider and return structured candidates (title/url/thumbnail/description/etc.) for a downstream agent to evaluate. Does not fetch, download, or open any result. Currently supports provider=\"searxng\" against a self-hosted SearXNG instance — base_url is required, no public instance is assumed, and no API key is used."
+    )]
+    async fn media_search(
+        &self,
+        Parameters(params): Parameters<MediaSearchParams>,
+    ) -> Result<String, String> {
+        crate::tools::media_search::run(params).await
+    }
 }
 
 #[tool_handler]
@@ -142,6 +154,16 @@ mod tests {
         assert!(
             router.list_all().iter().any(|t| t.name == "spider_search"),
             "spider_search must be registered in the tool router"
+        );
+    }
+
+    /// 1. spider_media_search is registered in MCP.
+    #[test]
+    fn spider_media_search_tool_is_registered() {
+        let router = SpiderMcpServer::tool_router();
+        assert!(
+            router.list_all().iter().any(|t| t.name == "spider_media_search"),
+            "spider_media_search must be registered in the tool router"
         );
     }
 }

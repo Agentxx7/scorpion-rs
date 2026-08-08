@@ -19,7 +19,7 @@ pub use bing::BingProvider;
 #[cfg(feature = "search_brave")]
 pub use brave::BraveProvider;
 #[cfg(feature = "search_searxng")]
-pub use searxng::SearxngProvider;
+pub use searxng::{ImageResult as SearxngImageResult, SearxngProvider, VideoResult as SearxngVideoResult};
 #[cfg(feature = "search_serper")]
 pub use serper::SerperProvider;
 #[cfg(feature = "search_tavily")]

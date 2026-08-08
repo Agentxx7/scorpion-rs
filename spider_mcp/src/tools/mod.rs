@@ -1,6 +1,7 @@
 pub mod crawl;
 pub mod crawl_status;
 pub mod links;
+pub mod media_search;
 pub mod scrape;
 pub mod search;
 pub mod transform;

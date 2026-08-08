@@ -88,6 +88,68 @@ impl SearxngProvider {
             .map_err(|e| SearchError::ProviderError(format!("Failed to parse response: {e}")))
     }
 
+    /// Perform the actual HTTP GET against the configured instance's
+    /// `/search` endpoint, with `extra_params` appended beyond the always-
+    /// present `q`/`format=json`, returning the raw parsed JSON. Shared by
+    /// text, video, and image search so the request/status/parse handling
+    /// exists exactly once — text search's behavior is unchanged by this:
+    /// same params, same status handling, same error mapping.
+    async fn fetch_json(
+        &self,
+        query: &str,
+        extra_params: &[(&str, String)],
+        client: Option<&reqwest::Client>,
+    ) -> Result<serde_json::Value, SearchError> {
+        let endpoint = self.search_endpoint()?.to_string();
+
+        let mut params = vec![("q", query.to_string()), ("format", "json".to_string())];
+        params.extend(extra_params.iter().cloned());
+
+        // reqwest's `.query()` percent-encodes each pair via the `url`
+        // crate's `form_urlencoded` — the same mechanism every other
+        // provider in this module relies on for safe query construction.
+        let response = if let Some(c) = client {
+            c.get(&endpoint)
+                .header("Accept", "application/json")
+                .query(&params)
+                .send()
+                .await
+        } else {
+            let c = reqwest::ClientBuilder::new()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+
+            c.get(&endpoint)
+                .header("Accept", "application/json")
+                .query(&params)
+                .send()
+                .await
+        };
+
+        let response = response.map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(SearchError::AuthenticationFailed);
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(SearchError::RateLimited);
+        }
+        if !status.is_success() {
+            return Err(SearchError::ProviderError(format!(
+                "HTTP {} from SearXNG instance",
+                status
+            )));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+        Self::parse_json_body(&bytes)
+    }
+
     /// Map an already-parsed SearXNG JSON response into Spider's canonical
     /// [`SearchResults`]. Pure and deterministic — no network — so result
     /// mapping (field presence, ordering, `limit` truncation) is directly
@@ -156,70 +218,278 @@ impl SearchProvider for SearxngProvider {
         options: &SearchOptions,
         client: Option<&reqwest::Client>,
     ) -> Result<SearchResults, SearchError> {
-        let endpoint = self.search_endpoint()?.to_string();
-
         // Standard SearXNG JSON search API params. `format=json` requires
         // the instance to have the JSON output format enabled (a normal,
-        // documented SearXNG setting — not a bespoke auth scheme). Only
-        // params SearXNG's documented API actually supports are sent;
+        // documented SearXNG setting — not a bespoke auth scheme).
         // `options.limit` has no server-side equivalent, so it is applied
         // client-side in `map_results` instead of guessing at a nonexistent
         // param.
-        let mut params = vec![("q", query.to_string()), ("format", "json".to_string())];
-
+        let mut extra_params = Vec::new();
         if let Some(ref language) = options.language {
-            params.push(("language", language.clone()));
+            extra_params.push(("language", language.clone()));
         }
 
-        // reqwest's `.query()` percent-encodes each pair via the `url`
-        // crate's `form_urlencoded` — the same mechanism every other
-        // provider in this module relies on for safe query construction.
-        let response = if let Some(c) = client {
-            c.get(&endpoint)
-                .header("Accept", "application/json")
-                .query(&params)
-                .send()
-                .await
-        } else {
-            let c = reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
-
-            c.get(&endpoint)
-                .header("Accept", "application/json")
-                .query(&params)
-                .send()
-                .await
-        };
-
-        let response = response.map_err(|e| SearchError::RequestFailed(e.to_string()))?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(SearchError::AuthenticationFailed);
-        }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(SearchError::RateLimited);
-        }
-        if !status.is_success() {
-            return Err(SearchError::ProviderError(format!(
-                "HTTP {} from SearXNG instance",
-                status
-            )));
-        }
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
-        let json = Self::parse_json_body(&bytes)?;
-
+        let json = self.fetch_json(query, &extra_params, client).await?;
         Ok(Self::map_results(query, json, options.limit))
     }
 
     fn provider_name(&self) -> &'static str {
         "searxng"
+    }
+}
+
+/// A discovered video result — the SearXNG-backed instance of the
+/// `VideoResult` concept locked in `SCORPION.md` §9.3. Only fields SearXNG
+/// actually supplied in the response are populated; nothing here is
+/// fabricated. `provenance` is intentionally omitted from this struct —
+/// SCORPION.md §3 has not yet locked a representation for it, and adding an
+/// always-`None` placeholder field would invent one prematurely.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VideoResult {
+    /// Result title.
+    pub title: String,
+    /// Video page/watch URL.
+    pub url: String,
+    /// Thumbnail image URL, if the source provided one.
+    pub thumbnail_url: Option<String>,
+    /// Snippet/description, if provided.
+    pub description: Option<String>,
+    /// Uploader, channel, or author, if provided.
+    pub creator_or_channel: Option<String>,
+    /// Publish date as reported by the source (opaque string — not
+    /// reparsed/reformatted, to avoid inventing a value the source didn't
+    /// actually state in that form).
+    pub published_at: Option<String>,
+    /// Duration as reported by the source (opaque string).
+    pub duration: Option<String>,
+    /// Which underlying engine/site surfaced this result (e.g. "youtube").
+    pub source: Option<String>,
+}
+
+/// A discovered image result — the SearXNG-backed instance of the
+/// `ImageResult` concept locked in `SCORPION.md` §9.3. Distinct from a
+/// Scorpion-captured `PAGE_SCREENSHOT`: this is a result Scorpion *found*,
+/// not evidence Scorpion *produced*. `provenance` is intentionally omitted
+/// for the same reason as [`VideoResult`].
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ImageResult {
+    /// Result title, if provided.
+    pub title: Option<String>,
+    /// Direct URL to the image file itself.
+    pub image_url: String,
+    /// Thumbnail/preview URL, if the source provided one.
+    pub thumbnail_url: Option<String>,
+    /// The page the image was found on (distinct from `image_url`, the
+    /// image file itself).
+    pub source_page: Option<String>,
+    /// Pixel width, only when the source reported a parseable resolution.
+    pub width: Option<u32>,
+    /// Pixel height, only when the source reported a parseable resolution.
+    pub height: Option<u32>,
+    /// MIME type, only derived from a recognized `img_format` value —
+    /// never guessed for an unrecognized one.
+    pub mime_type: Option<String>,
+    /// Snippet/description, if provided.
+    pub description: Option<String>,
+}
+
+/// Map a SearXNG `img_format` value (e.g. `"png"`, `"jpeg"`) to its
+/// standard MIME type. Unrecognized formats deliberately map to `None`
+/// rather than guessing.
+fn image_format_to_mime(fmt: &str) -> Option<&'static str> {
+    match fmt.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpeg" | "jpg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg+xml" | "svg" => Some("image/svg+xml"),
+        "bmp" => Some("image/bmp"),
+        "x-icon" | "ico" => Some("image/x-icon"),
+        "tiff" => Some("image/tiff"),
+        _ => None,
+    }
+}
+
+/// Parse a SearXNG `resolution` string (documented shape: `"{width} x
+/// {height}"`) into `(width, height)`. Any other shape yields `None` rather
+/// than a guessed value.
+fn parse_resolution(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.split_once('x').or_else(|| s.split_once('×'))?;
+    let w: u32 = w.trim().parse().ok()?;
+    let h: u32 = h.trim().parse().ok()?;
+    Some((w, h))
+}
+
+/// SearXNG's `length` field is a Python `timedelta` server-side; its JSON
+/// wire shape isn't pinned down by the docs, so this accepts either a
+/// string or a number rather than assuming one — either way, it passes
+/// through the raw value verbatim instead of inventing formatting.
+fn json_value_to_display_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+impl SearxngProvider {
+    /// Search SearXNG's `videos` category (`categories=videos`, confirmed
+    /// against SearXNG's own `settings.yml` — see module docs). Returns
+    /// Spider's canonical `VideoResult` shape, ordering preserved from the
+    /// source response, truncated to `options.limit` client-side (SearXNG
+    /// has no server-side result-count param).
+    pub async fn search_videos(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+        client: Option<&reqwest::Client>,
+    ) -> Result<Vec<VideoResult>, SearchError> {
+        let mut extra_params = vec![("categories", "videos".to_string())];
+        if let Some(ref language) = options.language {
+            extra_params.push(("language", language.clone()));
+        }
+
+        let json = self.fetch_json(query, &extra_params, client).await?;
+        Ok(Self::map_video_results(json, options.limit))
+    }
+
+    /// Search SearXNG's `images` category (`categories=images`, confirmed
+    /// against SearXNG's own `settings.yml`). Returns Spider's canonical
+    /// `ImageResult` shape.
+    pub async fn search_images(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+        client: Option<&reqwest::Client>,
+    ) -> Result<Vec<ImageResult>, SearchError> {
+        let mut extra_params = vec![("categories", "images".to_string())];
+        if let Some(ref language) = options.language {
+            extra_params.push(("language", language.clone()));
+        }
+
+        let json = self.fetch_json(query, &extra_params, client).await?;
+        Ok(Self::map_image_results(json, options.limit))
+    }
+
+    /// Pure, deterministic mapping from a `categories=videos` JSON response
+    /// into `VideoResult`s. No network — directly unit-testable.
+    fn map_video_results(json: serde_json::Value, limit: Option<usize>) -> Vec<VideoResult> {
+        let mut out = Vec::new();
+
+        if let Some(items) = json.get("results").and_then(|v| v.as_array()) {
+            for item in items {
+                let title = item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+
+                if url.is_empty() {
+                    continue;
+                }
+
+                out.push(VideoResult {
+                    title: title.to_string(),
+                    url: url.to_string(),
+                    thumbnail_url: item
+                        .get("thumbnail")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    description: item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    creator_or_channel: item
+                        .get("author")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    published_at: item
+                        .get("publishedDate")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    duration: item.get("length").and_then(json_value_to_display_string),
+                    source: item
+                        .get("engine")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                });
+            }
+        }
+
+        if let Some(limit) = limit {
+            out.truncate(limit);
+        }
+
+        out
+    }
+
+    /// Pure, deterministic mapping from a `categories=images` JSON response
+    /// into `ImageResult`s. No network — directly unit-testable.
+    fn map_image_results(json: serde_json::Value, limit: Option<usize>) -> Vec<ImageResult> {
+        let mut out = Vec::new();
+
+        if let Some(items) = json.get("results").and_then(|v| v.as_array()) {
+            for item in items {
+                let image_url = item
+                    .get("img_src")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+
+                if image_url.is_empty() {
+                    continue;
+                }
+
+                let (width, height) = item
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_resolution)
+                    .unzip();
+
+                out.push(ImageResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    image_url: image_url.to_string(),
+                    thumbnail_url: item
+                        .get("thumbnail_src")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    source_page: item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                    width,
+                    height,
+                    mime_type: item
+                        .get("img_format")
+                        .and_then(|v| v.as_str())
+                        .and_then(image_format_to_mime)
+                        .map(str::to_string),
+                    description: item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string),
+                });
+            }
+        }
+
+        if let Some(limit) = limit {
+            out.truncate(limit);
+        }
+
+        out
     }
 }
 
@@ -448,5 +718,219 @@ mod tests {
         let body = json!({"query": "q"});
         let results = SearxngProvider::map_results("q", body, None);
         assert!(results.is_empty());
+    }
+
+    // --- video results (SCORPION_MEDIA_DISCOVERY_001) ---
+
+    #[test]
+    fn test_map_video_results_basic_shape_and_order() {
+        let body = json!({
+            "results": [
+                {
+                    "title": "Rust in 100 Seconds",
+                    "url": "https://www.youtube.com/watch?v=abc123",
+                    "thumbnail": "https://img.youtube.com/vi/abc123/hq.jpg",
+                    "content": "A quick tour of Rust.",
+                    "author": "Fireship",
+                    "publishedDate": "2023-05-01T00:00:00",
+                    "length": "0:02:20",
+                    "engine": "youtube"
+                },
+                {
+                    "title": "Second Video",
+                    "url": "https://example.test/v2"
+                }
+            ]
+        });
+
+        let results = SearxngProvider::map_video_results(body, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust in 100 Seconds");
+        assert_eq!(results[0].url, "https://www.youtube.com/watch?v=abc123");
+        assert_eq!(
+            results[0].thumbnail_url.as_deref(),
+            Some("https://img.youtube.com/vi/abc123/hq.jpg")
+        );
+        assert_eq!(results[0].description.as_deref(), Some("A quick tour of Rust."));
+        assert_eq!(results[0].creator_or_channel.as_deref(), Some("Fireship"));
+        assert_eq!(results[0].published_at.as_deref(), Some("2023-05-01T00:00:00"));
+        assert_eq!(results[0].duration.as_deref(), Some("0:02:20"));
+        assert_eq!(results[0].source.as_deref(), Some("youtube"));
+
+        // Order preserved, and a second, sparse item follows.
+        assert_eq!(results[1].title, "Second Video");
+    }
+
+    #[test]
+    fn test_map_video_results_missing_optional_fields_stay_none() {
+        let body = json!({
+            "results": [{"title": "Bare", "url": "https://bare.example/v"}]
+        });
+        let results = SearxngProvider::map_video_results(body, None);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.thumbnail_url, None);
+        assert_eq!(r.description, None);
+        assert_eq!(r.creator_or_channel, None);
+        assert_eq!(r.published_at, None);
+        assert_eq!(r.duration, None);
+        assert_eq!(r.source, None);
+    }
+
+    #[test]
+    fn test_map_video_results_skips_items_without_url() {
+        let body = json!({
+            "results": [
+                {"title": "No URL"},
+                {"title": "Has URL", "url": "https://real.example/v"}
+            ]
+        });
+        let results = SearxngProvider::map_video_results(body, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://real.example/v");
+    }
+
+    #[test]
+    fn test_map_video_results_respects_limit_truncation() {
+        let body = json!({
+            "results": [
+                {"title": "One", "url": "https://1.example/v"},
+                {"title": "Two", "url": "https://2.example/v"},
+                {"title": "Three", "url": "https://3.example/v"}
+            ]
+        });
+        let results = SearxngProvider::map_video_results(body, Some(2));
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "One");
+        assert_eq!(results[1].title, "Two");
+    }
+
+    #[test]
+    fn test_map_video_results_length_accepts_numeric_value() {
+        let body = json!({
+            "results": [{"title": "T", "url": "https://e.example/v", "length": 140}]
+        });
+        let results = SearxngProvider::map_video_results(body, None);
+        assert_eq!(results[0].duration.as_deref(), Some("140"));
+    }
+
+    // --- image results (SCORPION_MEDIA_DISCOVERY_001) ---
+
+    #[test]
+    fn test_map_image_results_basic_shape_and_order() {
+        let body = json!({
+            "results": [
+                {
+                    "title": "A Cat",
+                    "url": "https://example.test/page-with-cat",
+                    "img_src": "https://example.test/cat.png",
+                    "thumbnail_src": "https://example.test/cat_thumb.png",
+                    "resolution": "1920 x 1080",
+                    "img_format": "png",
+                    "content": "A photo of a cat."
+                },
+                {
+                    "img_src": "https://example.test/second.jpg"
+                }
+            ]
+        });
+
+        let results = SearxngProvider::map_image_results(body, None);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title.as_deref(), Some("A Cat"));
+        assert_eq!(results[0].image_url, "https://example.test/cat.png");
+        assert_eq!(
+            results[0].thumbnail_url.as_deref(),
+            Some("https://example.test/cat_thumb.png")
+        );
+        assert_eq!(
+            results[0].source_page.as_deref(),
+            Some("https://example.test/page-with-cat")
+        );
+        assert_eq!(results[0].width, Some(1920));
+        assert_eq!(results[0].height, Some(1080));
+        assert_eq!(results[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(results[0].description.as_deref(), Some("A photo of a cat."));
+
+        // Order preserved.
+        assert_eq!(results[1].image_url, "https://example.test/second.jpg");
+    }
+
+    #[test]
+    fn test_map_image_results_missing_optional_fields_stay_none() {
+        let body = json!({
+            "results": [{"img_src": "https://bare.example/i.png"}]
+        });
+        let results = SearxngProvider::map_image_results(body, None);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.title, None);
+        assert_eq!(r.thumbnail_url, None);
+        assert_eq!(r.source_page, None);
+        assert_eq!(r.width, None);
+        assert_eq!(r.height, None);
+        assert_eq!(r.mime_type, None);
+        assert_eq!(r.description, None);
+    }
+
+    #[test]
+    fn test_map_image_results_skips_items_without_img_src() {
+        let body = json!({
+            "results": [
+                {"title": "No image URL"},
+                {"img_src": "https://real.example/i.png"}
+            ]
+        });
+        let results = SearxngProvider::map_image_results(body, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].image_url, "https://real.example/i.png");
+    }
+
+    #[test]
+    fn test_map_image_results_respects_limit_truncation() {
+        let body = json!({
+            "results": [
+                {"img_src": "https://1.example/i.png"},
+                {"img_src": "https://2.example/i.png"},
+                {"img_src": "https://3.example/i.png"}
+            ]
+        });
+        let results = SearxngProvider::map_image_results(body, Some(2));
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_map_image_results_unrecognized_format_not_guessed() {
+        let body = json!({
+            "results": [{"img_src": "https://e.example/i.xyz", "img_format": "xyz"}]
+        });
+        let results = SearxngProvider::map_image_results(body, None);
+        assert_eq!(results[0].mime_type, None);
+    }
+
+    #[test]
+    fn test_map_image_results_unparseable_resolution_not_guessed() {
+        let body = json!({
+            "results": [{"img_src": "https://e.example/i.png", "resolution": "huge"}]
+        });
+        let results = SearxngProvider::map_image_results(body, None);
+        assert_eq!(results[0].width, None);
+        assert_eq!(results[0].height, None);
+    }
+
+    #[test]
+    fn test_parse_resolution_handles_expected_shape() {
+        assert_eq!(parse_resolution("1920 x 1080"), Some((1920, 1080)));
+        assert_eq!(parse_resolution("640x480"), Some((640, 480)));
+        assert_eq!(parse_resolution("not a resolution"), None);
+    }
+
+    #[test]
+    fn test_image_format_to_mime_known_and_unknown() {
+        assert_eq!(image_format_to_mime("png"), Some("image/png"));
+        assert_eq!(image_format_to_mime("JPEG"), Some("image/jpeg"));
+        assert_eq!(image_format_to_mime("made-up-format"), None);
     }
 }

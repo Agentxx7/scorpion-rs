@@ -29,6 +29,60 @@ pub struct ScrapeParams {
     pub cookie: Option<String>,
     /// Proxy URL
     pub proxy: Option<String>,
+    /// Opt-in: return an EvidenceBundle (requested/final URL, retrieved_at,
+    /// status_code, content_type, content, links, screenshot) instead of
+    /// the normal {url, status_code, content, links} shape. Default false —
+    /// normal output is unaffected either way.
+    pub evidence: Option<bool>,
+}
+
+/// Build the evidence-mode result for one fetched page. Reuses the same
+/// `content`/`wants_screenshot` values `run()` already computed — no
+/// duplicate text-extraction or screenshot logic. Content and screenshot
+/// are kept mutually exclusive (never both `Some`): whichever the caller's
+/// `return_format` actually produced is the one that's real.
+fn build_evidence(
+    page: &spider::page::Page,
+    content: String,
+    wants_screenshot: bool,
+) -> crate::evidence::EvidenceBundle {
+    let content_type = page
+        .headers
+        .as_ref()
+        .and_then(|h| h.get("content-type"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let links = page.page_links.as_ref().map(|s| {
+        s.iter()
+            .map(|l| l.inner().to_string())
+            .collect::<Vec<String>>()
+    });
+
+    crate::evidence::EvidenceBundle {
+        requested_url: Some(page.get_url().to_string()),
+        final_url: Some(page.get_url_final().to_string()),
+        // Always `None`: no canonical retrieval wall-clock timestamp exists
+        // anywhere in the reachable scrape path today. `Page` only carries
+        // a private, monotonic `Instant` (elapsed-time measurement, not a
+        // point in time, and inaccessible from this crate regardless). An
+        // MCP-side `SystemTime::now()` taken here would only mark when
+        // this function got scheduled to run — not when the network
+        // fetch actually completed — and was reverted for exactly that
+        // reason (SCORPION_EVIDENCE_BUNDLE_001A). Populating this field
+        // honestly requires Spider core to capture the timestamp at fetch
+        // completion, which is out of scope here.
+        retrieved_at: None,
+        status_code: Some(page.status_code.as_u16()),
+        content_type,
+        content: if wants_screenshot { None } else { Some(content.clone()) },
+        links,
+        source: None,
+        provider: None,
+        query: None,
+        screenshot: if wants_screenshot { Some(content) } else { None },
+        metadata: None,
+    }
 }
 
 pub async fn run(params: ScrapeParams) -> Result<String, String> {
@@ -106,18 +160,26 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
         };
         let content = transform_content_input(input, &transform_conf);
         let content = super::screenshot_content_or_error(wants_screenshot, content)?;
-        let links: Vec<String> = page
-            .page_links
-            .as_ref()
-            .map(|s| s.iter().map(|l| l.inner().to_string()).collect())
-            .unwrap_or_default();
 
-        results.push(json!({
-            "url": page.get_url(),
-            "status_code": page.status_code.as_u16(),
-            "content": content,
-            "links": links,
-        }));
+        let result = if params.evidence.unwrap_or(false) {
+            let evidence = build_evidence(&page, content, wants_screenshot);
+            serde_json::to_value(&evidence).map_err(|e| e.to_string())?
+        } else {
+            let links: Vec<String> = page
+                .page_links
+                .as_ref()
+                .map(|s| s.iter().map(|l| l.inner().to_string()).collect())
+                .unwrap_or_default();
+
+            json!({
+                "url": page.get_url(),
+                "status_code": page.status_code.as_u16(),
+                "content": content,
+                "links": links,
+            })
+        };
+
+        results.push(result);
     }
 
     if results.is_empty() {

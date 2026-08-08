@@ -3,6 +3,7 @@ extern crate env_logger;
 use clap::Parser;
 use rmcp::ServiceExt;
 
+mod evidence;
 mod server;
 mod state;
 mod tools;

@@ -3033,6 +3033,9 @@ pub enum SearchProviderType {
     Bing,
     /// Tavily AI Search (optimized for LLMs).
     Tavily,
+    /// SearXNG - self-hosted metasearch engine. Requires `api_url` to be
+    /// set to the operator's own instance; no public instance is assumed.
+    Searxng,
 }
 
 // ─── Spider Cloud ───────────────────────────────────────────────────────────

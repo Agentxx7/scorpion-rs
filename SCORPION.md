@@ -225,3 +225,204 @@ integrations layered on top of a core that already works without them.
   side effect of unrelated feature work.
 - No unnecessary bulk crate rename. Spider's crate names and structure stay
   as-is unless a specific, justified reason requires otherwise.
+
+---
+
+## 9. Media & Content Discovery
+
+This section locks *concepts*, not implementation — same status as §3's
+identifier concepts. Nothing here is built yet; it fixes vocabulary and a
+canonical shape so that movie/series/book/video/image discovery, and future
+provider adapters, land against one model instead of several incompatible
+ones.
+
+**Architecture rule — the core model is source-neutral.** Scorpion does not
+bake a fixed provider allow-list, a fixed provider deny-list, or any
+provider-specific policy into the canonical content model, and no named
+media/catalog/streaming service is ever a hard dependency of Scorpion core.
+A source discovered through the configured search/discovery path is
+represented as source/provenance data attached to a result — it is never
+part of the identity of the content itself, and it is never singled out by
+name in this contract. This is the same posture the Self-Hosting Contract
+(above) already takes toward hosted services generally; this section
+extends it to media/content discovery specifically.
+
+### 9.1 `MediaType` vs. `ContentKind`
+
+Two separate concepts, not to be collapsed:
+
+- **`MediaType`** — the technical representation: `WEB`, `IMAGE`, `VIDEO`,
+  `PDF`, `DOCUMENT`.
+- **`ContentKind`** — the semantic classification: `MOVIE`, `TV_SERIES`,
+  `BOOK`, `ARTICLE`, `VIDEO`, `IMAGE`, `DOCUMENT`, `OTHER`.
+
+A single piece of content commonly spans several `MediaType`s under one
+`ContentKind`. Example: a `MOVIE` may have an `IMAGE` poster, a `VIDEO`
+trailer, a `WEB` metadata page, and one or more discovered source/
+availability locations — one content identity, several associated
+artifacts.
+
+### 9.2 Content result shapes (conceptual only)
+
+No final Rust serialization or canonical IDs are defined here — see §3's
+`ArtifactId`/`EvidenceId` status for the precedent.
+
+```
+MovieResult {
+    title, original_title?, year?, description?, genres?, creators?,
+    cast?, runtime?, rating?, poster_url?, backdrop_url?, trailer_url?,
+    source_page?, provenance?
+}
+
+SeriesResult {
+    title, year_or_period?, description?, genres?, creators?, cast?,
+    seasons?, poster_url?, trailer_url?, source_page?, provenance?
+}
+
+BookResult {
+    title, subtitle?, authors?, publication_year?, description?, isbn?,
+    publisher?, cover_url?, source_page?, provenance?
+}
+```
+
+Books may be discovered through general web search, dedicated providers,
+catalogs, indexed pages, or future provider adapters — no single commercial
+book service may be required by Scorpion core.
+
+### 9.3 Video and image discovery
+
+```
+VideoResult {
+    title, url, thumbnail_url?, description?, creator_or_channel?,
+    published_at?, duration?, source?, provenance?
+}
+
+ImageResult {
+    title?, image_url, thumbnail_url?, source_page?, width?, height?,
+    mime_type?, description?, provenance?
+}
+```
+
+First-class video discovery must be supported, including video-hosting
+platforms as one discoverable source among others — never a hardcoded
+requirement. Self-hosted SearXNG media/video search is the preferred initial
+direction where practical, matching the Self-Hosting Contract; provider-
+specific adapters may be added later without changing the canonical
+`VideoResult` shape.
+
+Image discovery explicitly distinguishes two different artifact/evidence
+concepts that must not be merged: a **`PAGE_SCREENSHOT`** (Scorpion's own
+capture of a page it rendered — see the MCP screenshot capability) versus a
+**`DISCOVERED_IMAGE`** (an image found via search/discovery, not captured by
+Scorpion). One is evidence Scorpion produced; the other is a result Scorpion
+found.
+
+### 9.4 Source / availability discovery
+
+Content identity and discovered source locations are separate concepts —
+this mirrors §3's separation of evidence from the thing evidenced.
+
+```
+Availability {
+    content_reference, source, url, source_page?, availability_type?,
+    metadata?, provenance?
+}
+```
+
+A single `MovieResult`/`SeriesResult`/`BookResult` may have zero, one, or
+many `Availability` records. Discovering the same content from multiple
+sources must never fork it into separate content identities — one movie,
+many possible availability records, one `MovieResult`.
+
+Availability may be discovered through general web search, configured
+search providers, a source/domain hint supplied by a downstream consumer,
+future provider adapters, or previously discovered pages. No specific
+source is mandatory, and none is named or privileged in this contract.
+
+### 9.5 Discovery modes
+
+Three conceptual modes:
+
+- **General discovery** — `query → search/discovery → candidate
+  sources/results`.
+- **Source-hinted discovery** — `query + source_hint/domain_hint →
+  discovery biased toward that source/domain → candidate results`. The
+  caller does not need to know the exact content URL, only a hint toward
+  where to look.
+- **Direct URL** — `explicit URL → fetch/browser/crawl`, bypassing
+  discovery entirely.
+
+### 9.6 Example flow (illustrative, not a spec)
+
+```
+"I want to watch a dark science-fiction movie"
+    ↓
+downstream consumer
+    ↓
+Scorpion content discovery
+    ↓
+MovieResult candidates
+    ↓
+optional poster/trailer discovery
+    ↓
+optional source/availability discovery
+    ↓
+Availability results
+    ↓
+downstream consumer decides presentation
+```
+
+A second request shape: `content_kind = MOVIE`, `query = "<title>"`,
+`source_hint = "<operator-supplied source>"` — Scorpion discovers matching
+URLs from that source where possible. The source is always supplied or
+discovered, never assumed by Scorpion itself.
+
+### 9.7 Generic media result
+
+The umbrella shape underlying 9.2–9.4, retained for cases that don't need a
+`ContentKind`-specific structure:
+
+```
+MediaResult {
+    media_type, content_kind?, source, title, url, thumbnail_url?,
+    description?, creator_or_channel?, published_at?, duration?,
+    mime_type?, source_page?, provenance?
+}
+```
+
+Conceptual only — a discovery representation, not yet the final canonical
+evidence schema §3 will eventually define.
+
+### 9.8 Responsibility boundary
+
+Media/content discovery is additive to §2's Ownership Boundary, not a
+separate contract: Scorpion owns content discovery, media discovery,
+source/availability discovery, structured metadata, URLs, provenance,
+optional subsequent fetch/browser/evidence capture, and MCP/API exposure of
+all of it. Scorpion does not own conversational presentation — a downstream
+consumer decides how discovered results are described or offered to a user
+("I found a movie you may like," "here's a trailer," "here's where it's
+available"). That framing logic stays outside Scorpion, per §2's existing
+"Scorpion returns evidence and facts" rule.
+
+### 9.9 Search vs. fetch, and self-hosting
+
+Discovery and retrieval stay two deliberate steps, and the existing
+Self-Hosting Contract applies without modification:
+
+- **Search vs. fetch:** discovery producing candidate results (this
+  section) is separate from fetch/crawl/browser producing content/evidence
+  (§3). A discovered movie, series, book, image, or video result must not
+  automatically trigger fetching, downloading, or opening it.
+- **Self-hosting:** self-hosted/open discovery paths remain first-class,
+  and Scorpion core must not require any single external
+  discovery/media/catalog provider — consistent with how SearXNG is
+  already the preferred self-hosted search path (see the Self-Hosting
+  Contract above).
+
+### 9.10 Source integrity
+
+Every discovered media/content/availability result must preserve where it
+came from. Source/provenance must survive transformation into structured
+result models — discovery must not erase its own trail, matching §3's
+provenance fields for evidence generally.

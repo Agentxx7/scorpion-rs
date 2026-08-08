@@ -2,6 +2,7 @@ pub mod crawl;
 pub mod crawl_status;
 pub mod links;
 pub mod scrape;
+pub mod search;
 pub mod transform;
 
 use spider::features::chrome_common::{WaitForDelay, WaitForIdleNetwork, WaitForSelector};

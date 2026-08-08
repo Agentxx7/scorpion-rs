@@ -39,7 +39,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["chrome", "chrome_screenshot", "spider_cloud"]
+default = ["chrome", "chrome_screenshot", "spider_cloud", "search_searxng"]
 chrome = ["spider/chrome"]
 # Enables spider_transformations' own `screenshot` feature, which is what
 # turns `ReturnFormat::Screenshot` from a hardcoded empty string into a real
@@ -51,4 +51,7 @@ spider_cloud = ["spider/spider_cloud"]
 search = []
 search_serper = ["search", "spider/search_serper"]
 search_brave = ["search", "spider/search_brave"]
-full = ["chrome_screenshot", "smart", "spider_cloud", "search_serper"]
+# Powers the spider_search MCP tool's provider="searxng" — a self-hosted
+# metasearch provider requiring no API key and no spider.cloud dependency.
+search_searxng = ["search", "spider/search_searxng"]
+full = ["chrome_screenshot", "smart", "spider_cloud", "search_serper", "search_searxng"]

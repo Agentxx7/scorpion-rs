@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::state::SharedState;
 use crate::tools::{
     crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
-    scrape::ScrapeParams, transform::TransformParams,
+    scrape::ScrapeParams, search::SearchParams, transform::TransformParams,
 };
 
 #[derive(Clone)]
@@ -72,6 +72,17 @@ impl SpiderMcpServer {
     ) -> Result<String, String> {
         crate::tools::crawl_status::run(params, self.state.clone())
     }
+
+    #[tool(
+        name = "spider_search",
+        description = "Run a web search via a configured search provider and return structured results (position, title, url, snippet, date, score) for a downstream agent to evaluate. Does not fetch or crawl the result URLs. Currently supports provider=\"searxng\" against a self-hosted SearXNG instance — base_url is required, no public instance is assumed, and no API key is used."
+    )]
+    async fn search(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<String, String> {
+        crate::tools::search::run(params).await
+    }
 }
 
 #[tool_handler]
@@ -121,6 +132,16 @@ mod tests {
         assert!(
             router.list_all().iter().any(|t| t.name == "spider_crawl_status"),
             "spider_crawl_status must be registered in the tool router"
+        );
+    }
+
+    /// 1. spider_search is registered in MCP.
+    #[test]
+    fn spider_search_tool_is_registered() {
+        let router = SpiderMcpServer::tool_router();
+        assert!(
+            router.list_all().iter().any(|t| t.name == "spider_search"),
+            "spider_search must be registered in the tool router"
         );
     }
 }

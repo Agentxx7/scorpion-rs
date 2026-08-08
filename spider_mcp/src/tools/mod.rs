@@ -1,4 +1,5 @@
 pub mod crawl;
+pub mod crawl_status;
 pub mod links;
 pub mod scrape;
 pub mod transform;

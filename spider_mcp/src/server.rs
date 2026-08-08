@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::state::SharedState;
 use crate::tools::{
-    crawl::CrawlParams, links::LinksParams, scrape::ScrapeParams, transform::TransformParams,
+    crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
+    scrape::ScrapeParams, transform::TransformParams,
 };
 
 #[derive(Clone)]
@@ -60,7 +61,66 @@ impl SpiderMcpServer {
     ) -> Result<String, String> {
         crate::tools::transform::run(params)
     }
+
+    #[tool(
+        name = "spider_crawl_status",
+        description = "Check the status of a background crawl started by spider_crawl (crawls above the inline page-limit threshold). Returns running/complete/failed status, page count, and collected pages so far."
+    )]
+    async fn crawl_status(
+        &self,
+        Parameters(params): Parameters<CrawlStatusParams>,
+    ) -> Result<String, String> {
+        crate::tools::crawl_status::run(params, self.state.clone())
+    }
 }
 
 #[tool_handler]
-impl ServerHandler for SpiderMcpServer {}
+impl ServerHandler for SpiderMcpServer {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::from_build_env())
+    }
+
+    /// Advertises `crawl://{crawl_id}/summary` — the resource `spider_crawl`'s
+    /// background path promises callers ("read resource crawl://{crawl_id}/summary")
+    /// but which had no handler at all until this.
+    async fn list_resource_templates(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourceTemplatesResult, rmcp::ErrorData> {
+        Ok(rmcp::model::ListResourceTemplatesResult::with_all_items(
+            vec![crate::tools::crawl_status::resource_template()],
+        ))
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResult, rmcp::ErrorData> {
+        crate::tools::crawl_status::read_resource(&request.uri, &self.state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 5 (tool half) — RED before crawl_status was wired into tools/mod.rs
+    /// and registered here: this test could not even compile, since the
+    /// tool didn't exist anywhere in the crate.
+    #[test]
+    fn spider_crawl_status_tool_is_registered() {
+        let router = SpiderMcpServer::tool_router();
+        assert!(
+            router.list_all().iter().any(|t| t.name == "spider_crawl_status"),
+            "spider_crawl_status must be registered in the tool router"
+        );
+    }
+}

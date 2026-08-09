@@ -5,6 +5,8 @@ use std::sync::Arc;
 use crate::state::SharedState;
 #[cfg(feature = "feed")]
 use crate::tools::feed::FeedReadParams;
+#[cfg(feature = "news_sitemap")]
+use crate::tools::news_sitemap::NewsSitemapReadParams;
 #[cfg(feature = "sitemap")]
 use crate::tools::sitemap::SitemapReadParams;
 use crate::tools::{
@@ -43,7 +45,28 @@ impl SpiderMcpServer {
             router.merge(Self::sitemap_tool_router());
             router
         };
+        #[cfg(feature = "news_sitemap")]
+        let router = {
+            let mut router = router;
+            router.merge(Self::news_sitemap_tool_router());
+            router
+        };
         router
+    }
+}
+
+#[cfg(feature = "news_sitemap")]
+#[tool_router(router = news_sitemap_tool_router)]
+impl SpiderMcpServer {
+    #[tool(
+        name = "spider_news_sitemap_read",
+        description = "Fetch exactly one Google News Sitemap, preserve evidence for the exact response bytes, and return structurally associated News metadata without fetching articles, media, or child sitemaps."
+    )]
+    async fn news_sitemap_read(
+        &self,
+        Parameters(params): Parameters<NewsSitemapReadParams>,
+    ) -> Result<String, String> {
+        crate::tools::news_sitemap::run(params).await
     }
 }
 
@@ -193,6 +216,18 @@ impl ServerHandler for SpiderMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "news_sitemap")]
+    #[test]
+    fn spider_news_sitemap_read_is_registered_with_exact_properties() {
+        let tools = SpiderMcpServer::tool_router().list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "spider_news_sitemap_read")
+            .unwrap();
+        let properties = tool.input_schema["properties"].as_object().unwrap();
+        assert_eq!(properties.keys().collect::<Vec<_>>(), ["limit", "url"]);
+    }
 
     #[cfg(feature = "sitemap")]
     #[test]

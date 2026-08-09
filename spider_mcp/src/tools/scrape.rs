@@ -32,9 +32,10 @@ pub struct ScrapeParams {
     /// Opt-in: return an EvidenceBundle (requested/final URL, retrieved_at,
     /// status_code, content_type, content, links, screenshot, and integrity
     /// hashes) instead of the normal {url, status_code, content, links} shape.
-    /// `response_body_hash` is available only for the non-browser HTTP path;
-    /// browser/headless pages contain rendered DOM bytes instead. Default
-    /// false — normal output is unaffected either way.
+    /// `response_body_hash` and byte-derived `detected_content_type` are
+    /// available only for the non-browser HTTP path; browser/headless pages
+    /// contain rendered DOM bytes instead. Default false — normal output is
+    /// unaffected either way.
     pub evidence: Option<bool>,
 }
 
@@ -54,6 +55,13 @@ fn build_evidence(
     let response_body_hash = (!used_browser)
         .then(|| page.get_bytes().map(crate::evidence::sha256_hex))
         .flatten();
+    let detected_content_type = if used_browser {
+        None
+    } else {
+        page.get_bytes()
+            .and_then(infer::get)
+            .map(|kind| kind.mime_type().to_string())
+    };
     let screenshot_bytes = super::page_screenshot_bytes(page);
     let transformed_content_hash =
         (!wants_screenshot).then(|| crate::evidence::sha256_hex(content.as_bytes()));
@@ -80,6 +88,7 @@ fn build_evidence(
         retrieved_at: page.get_retrieved_at(),
         status_code: Some(page.status_code.as_u16()),
         content_type,
+        detected_content_type,
         response_body_hash,
         transformed_content_hash,
         content: if wants_screenshot {
@@ -238,6 +247,113 @@ mod tests {
         )
     }
 
+    fn page_with_content_type(body: &[u8], content_type: Option<&str>) -> spider::page::Page {
+        let headers = content_type.map(|value| {
+            let mut headers = spider::client::header::HeaderMap::new();
+            headers.insert(
+                spider::client::header::CONTENT_TYPE,
+                spider::client::header::HeaderValue::from_bytes(value.as_bytes()).unwrap(),
+            );
+            headers
+        });
+        spider::page::build(
+            "http://127.0.0.1/evidence",
+            PageResponse {
+                content: Some(body.to_vec()),
+                headers,
+                status_code: StatusCode::OK,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn detected_type(body: &[u8]) -> Option<String> {
+        build_evidence(
+            &page_with_content_type(body, None),
+            "unchanged transformed content".into(),
+            false,
+            false,
+        )
+        .detected_content_type
+    }
+
+    #[test]
+    fn detects_known_byte_signatures_and_leaves_unknown_null() {
+        assert_eq!(
+            detected_type(b"\x89PNG\r\n\x1a\nbytes").as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            detected_type(b"%PDF-1.7\nbody").as_deref(),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            detected_type(b"<!DOCTYPE HTML><html><body>x</body></html>").as_deref(),
+            Some("text/html")
+        );
+        assert_eq!(
+            detected_type(b"<?xml version=\"1.0\"?><root/>").as_deref(),
+            Some("text/xml")
+        );
+        assert_eq!(
+            detected_type(b"scorpion bytes with no known signature"),
+            None
+        );
+    }
+
+    #[test]
+    fn declared_and_detected_content_types_remain_independent() {
+        let agreeing = build_evidence(
+            &page_with_content_type(b"\x89PNG\r\n\x1a\nbytes", Some("image/png")),
+            "text".into(),
+            false,
+            false,
+        );
+        assert_eq!(agreeing.content_type.as_deref(), Some("image/png"));
+        assert_eq!(agreeing.detected_content_type.as_deref(), Some("image/png"));
+
+        let disagreeing = build_evidence(
+            &page_with_content_type(b"%PDF-1.7\nbody", Some("text/html")),
+            "text".into(),
+            false,
+            false,
+        );
+        assert_eq!(disagreeing.content_type.as_deref(), Some("text/html"));
+        assert_eq!(
+            disagreeing.detected_content_type.as_deref(),
+            Some("application/pdf")
+        );
+
+        let missing = build_evidence(
+            &page_with_content_type(b"\x89PNG\r\n\x1a\nbytes", None),
+            "text".into(),
+            false,
+            false,
+        );
+        assert_eq!(missing.content_type, None);
+        assert_eq!(missing.detected_content_type.as_deref(), Some("image/png"));
+
+        for body in [
+            b"\x89PNG\r\n\x1a\nbytes".as_slice(),
+            b"%PDF-1.7\nbody".as_slice(),
+        ] {
+            let evidence = build_evidence(
+                &page_with_content_type(body, Some("application/octet-stream")),
+                "text".into(),
+                false,
+                false,
+            );
+            assert_eq!(
+                evidence.content_type.as_deref(),
+                Some("application/octet-stream")
+            );
+            assert!(matches!(
+                evidence.detected_content_type.as_deref(),
+                Some("image/png" | "application/pdf")
+            ));
+        }
+    }
+
     #[test]
     fn evidence_hashes_exact_page_and_transformed_bytes() {
         let body = b"<p>\xc3\xa5</p>\r\n";
@@ -285,6 +401,7 @@ mod tests {
         );
         assert_eq!(evidence.screenshot.as_deref(), Some(base64_output));
         assert!(evidence.content.is_none());
+        assert!(evidence.detected_content_type.is_none());
         assert!(evidence.transformed_content_hash.is_none());
     }
 
@@ -308,6 +425,7 @@ mod tests {
     fn absent_http_body_has_null_hash() {
         let evidence = build_evidence(&page(None, None, None), "text".into(), false, false);
         assert!(evidence.response_body_hash.is_none());
+        assert!(evidence.detected_content_type.is_none());
     }
 
     #[test]
@@ -319,6 +437,7 @@ mod tests {
             true,
         );
         assert!(evidence.response_body_hash.is_none());
+        assert!(evidence.detected_content_type.is_none());
         assert!(evidence.transformed_content_hash.is_some());
     }
 
@@ -415,7 +534,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "localhost socket acceptance; run explicitly where loopback bind is permitted"]
     async fn localhost_scrape_acceptance_and_legacy_shape() {
-        static BODY: &[u8] = b"<!doctype html><html><body>known evidence body</body></html>";
+        static BODY: &[u8] = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n";
         let (url, stop, handle) = localhost_server(BODY);
 
         let before = local_unix_epoch_millis();
@@ -442,6 +561,7 @@ mod tests {
             format!("{:x}", Sha256::digest(BODY))
         );
         assert_eq!(evidence["content_type"], "text/html; charset=utf-8");
+        assert_eq!(evidence["detected_content_type"], "application/pdf");
         let returned = evidence["content"].as_str().unwrap();
         assert_eq!(
             evidence["transformed_content_hash"],
@@ -509,6 +629,7 @@ mod tests {
             format!("{:x}", Sha256::digest(&png))
         );
         assert!(evidence["response_body_hash"].is_null());
+        assert!(evidence["detected_content_type"].is_null());
         assert!(evidence["transformed_content_hash"].is_null());
 
         stop.store(true, Ordering::Relaxed);

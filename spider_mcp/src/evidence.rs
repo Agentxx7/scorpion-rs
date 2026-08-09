@@ -38,6 +38,10 @@ pub struct EvidenceBundle {
     pub status_code: Option<u16>,
     /// The response's `Content-Type` header, verbatim, when present.
     pub content_type: Option<String>,
+    /// MIME type detected directly from the retained non-browser HTTP
+    /// response bytes. Independent of the declared `content_type`; `None`
+    /// when bytes are absent, unrecognized, or produced by a browser path.
+    pub detected_content_type: Option<String>,
     /// SHA-256 of the exact HTTP content-decoded response-body bytes retained
     /// by `Page` on the non-browser HTTP scrape path. This is not a hash of
     /// transport/wire bytes and no character normalization is applied. Always
@@ -95,6 +99,7 @@ mod tests {
             "final_url",
             "retrieved_at",
             "content_type",
+            "detected_content_type",
             "response_body_hash",
             "transformed_content_hash",
             "content",

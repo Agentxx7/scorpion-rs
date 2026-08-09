@@ -42,7 +42,8 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["chrome", "chrome_screenshot", "spider_cloud", "search_searxng"]
+default = ["chrome", "chrome_screenshot", "spider_cloud", "search_searxng", "feed"]
+feed = ["spider/feed"]
 chrome = ["spider/chrome"]
 # Enables spider_transformations' own `screenshot` feature, which is what
 # turns `ReturnFormat::Screenshot` from a hardcoded empty string into a real

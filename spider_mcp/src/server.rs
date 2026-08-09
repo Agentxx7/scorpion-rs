@@ -3,6 +3,8 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use std::sync::Arc;
 
 use crate::state::SharedState;
+#[cfg(feature = "feed")]
+use crate::tools::feed::FeedReadParams;
 use crate::tools::{
     crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
     media_search::MediaSearchParams, scrape::ScrapeParams, search::SearchParams,
@@ -24,9 +26,23 @@ impl SpiderMcpServer {
             tool_router: Self::tool_router(),
         }
     }
+
+    fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        let router = Self::base_tool_router();
+        #[cfg(feature = "feed")]
+        {
+            let mut router = router;
+            router.merge(Self::feed_tool_router());
+            router
+        }
+        #[cfg(not(feature = "feed"))]
+        {
+            router
+        }
+    }
 }
 
-#[tool_router]
+#[tool_router(router = base_tool_router)]
 impl SpiderMcpServer {
     #[tool(
         name = "spider_scrape",
@@ -78,10 +94,7 @@ impl SpiderMcpServer {
         name = "spider_search",
         description = "Run a web search via a configured search provider and return structured results (position, title, url, snippet, date, score) for a downstream agent to evaluate. Does not fetch or crawl the result URLs. Currently supports provider=\"searxng\" against a self-hosted SearXNG instance — base_url is required, no public instance is assumed, and no API key is used."
     )]
-    async fn search(
-        &self,
-        Parameters(params): Parameters<SearchParams>,
-    ) -> Result<String, String> {
+    async fn search(&self, Parameters(params): Parameters<SearchParams>) -> Result<String, String> {
         crate::tools::search::run(params).await
     }
 
@@ -94,6 +107,21 @@ impl SpiderMcpServer {
         Parameters(params): Parameters<MediaSearchParams>,
     ) -> Result<String, String> {
         crate::tools::media_search::run(params).await
+    }
+}
+
+#[cfg(feature = "feed")]
+#[tool_router(router = feed_tool_router)]
+impl SpiderMcpServer {
+    #[tool(
+        name = "spider_feed_read",
+        description = "Fetch exactly one RSS or Atom feed, preserve evidence for the original response bytes, and return normalized discovery entries without fetching article or media URLs."
+    )]
+    async fn feed_read(
+        &self,
+        Parameters(params): Parameters<FeedReadParams>,
+    ) -> Result<String, String> {
+        crate::tools::feed::run(params).await
     }
 }
 
@@ -135,6 +163,16 @@ impl ServerHandler for SpiderMcpServer {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "feed")]
+    #[test]
+    fn spider_feed_read_tool_is_registered() {
+        let router = SpiderMcpServer::tool_router();
+        assert!(router
+            .list_all()
+            .iter()
+            .any(|tool| tool.name == "spider_feed_read"));
+    }
+
     /// 5 (tool half) — RED before crawl_status was wired into tools/mod.rs
     /// and registered here: this test could not even compile, since the
     /// tool didn't exist anywhere in the crate.
@@ -142,7 +180,10 @@ mod tests {
     fn spider_crawl_status_tool_is_registered() {
         let router = SpiderMcpServer::tool_router();
         assert!(
-            router.list_all().iter().any(|t| t.name == "spider_crawl_status"),
+            router
+                .list_all()
+                .iter()
+                .any(|t| t.name == "spider_crawl_status"),
             "spider_crawl_status must be registered in the tool router"
         );
     }
@@ -162,7 +203,10 @@ mod tests {
     fn spider_media_search_tool_is_registered() {
         let router = SpiderMcpServer::tool_router();
         assert!(
-            router.list_all().iter().any(|t| t.name == "spider_media_search"),
+            router
+                .list_all()
+                .iter()
+                .any(|t| t.name == "spider_media_search"),
             "spider_media_search must be registered in the tool router"
         );
     }

@@ -42,74 +42,6 @@ pub struct ScrapeParams {
     pub evidence: Option<bool>,
 }
 
-/// Build the evidence-mode result for one fetched page. `content` is absent
-/// when retrieval succeeded but auto extraction did not. Content and
-/// screenshot remain mutually exclusive; hashes exist only for the actual
-/// representation returned in the corresponding field.
-fn build_evidence(
-    page: &spider::page::Page,
-    content: Option<String>,
-    wants_screenshot: bool,
-    used_browser: bool,
-) -> crate::evidence::EvidenceBundle {
-    // Only the non-browser path retains HTTP content-decoded response bytes.
-    // Browser `Page` bytes are rendered DOM and must not be mislabeled.
-    let response_body_hash = (!used_browser)
-        .then(|| page.get_bytes().map(crate::evidence::sha256_hex))
-        .flatten();
-    let detected_content_type = if used_browser {
-        None
-    } else {
-        page.get_bytes()
-            .and_then(infer::get)
-            .map(|kind| kind.mime_type().to_string())
-    };
-    let screenshot_bytes = super::page_screenshot_bytes(page);
-    let transformed_content_hash = if wants_screenshot {
-        None
-    } else {
-        content
-            .as_deref()
-            .map(|text| crate::evidence::sha256_hex(text.as_bytes()))
-    };
-    let screenshot_hash = wants_screenshot
-        .then_some(screenshot_bytes)
-        .flatten()
-        .map(crate::evidence::sha256_hex);
-    let content_type = page
-        .headers
-        .as_ref()
-        .and_then(|h| h.get("content-type"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let links = page.page_links.as_ref().map(|s| {
-        s.iter()
-            .map(|l| l.inner().to_string())
-            .collect::<Vec<String>>()
-    });
-
-    crate::evidence::EvidenceBundle {
-        requested_url: Some(page.get_url().to_string()),
-        final_url: Some(page.get_url_final().to_string()),
-        retrieved_at: page.get_retrieved_at(),
-        status_code: Some(page.status_code.as_u16()),
-        observed_status_code: page.observed_status_code.map(|status| status.as_u16()),
-        content_type,
-        detected_content_type,
-        response_body_hash,
-        transformed_content_hash,
-        content: (!wants_screenshot).then_some(content.clone()).flatten(),
-        links,
-        source: None,
-        provider: None,
-        query: None,
-        screenshot: wants_screenshot.then_some(content).flatten(),
-        screenshot_hash,
-        metadata: None,
-    }
-}
-
 #[derive(Debug, PartialEq)]
 enum AutoRoute {
     Markdown,
@@ -410,7 +342,8 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
                 Err(_) if wants_auto => None,
                 Err(error) => return Err(error),
             };
-            let evidence = build_evidence(&page, content, wants_screenshot, used_browser);
+            let evidence =
+                crate::evidence::build_evidence(&page, content, wants_screenshot, used_browser);
             serde_json::to_value(&evidence).map_err(|e| e.to_string())?
         } else {
             let content = super::screenshot_content_or_error(wants_screenshot, content_result?)?;
@@ -577,6 +510,7 @@ mod auto_router_tests {
 #[cfg(all(test, feature = "chrome"))]
 mod tests {
     use super::*;
+    use crate::evidence::build_evidence;
     use sha2::{Digest, Sha256};
     use spider::client::StatusCode;
     use spider::utils::PageResponse;

@@ -42,6 +42,12 @@ pub mod gemini_common;
 /// Solve all.
 pub mod solvers;
 
+/// RSS and Atom feed parsing and normalization.
+#[cfg(feature = "feed")]
+pub mod feed;
+/// Generic source-discovery vocabulary.
+pub mod source;
+
 #[cfg(all(not(feature = "simd"), any(feature = "openai", feature = "gemini")))]
 pub(crate) use serde_json;
 #[cfg(all(feature = "simd", any(feature = "openai", feature = "gemini")))]

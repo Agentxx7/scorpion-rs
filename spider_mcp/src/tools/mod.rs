@@ -1,5 +1,7 @@
 pub mod crawl;
 pub mod crawl_status;
+#[cfg(feature = "feed")]
+pub mod feed;
 pub mod links;
 pub mod media_search;
 pub mod scrape;
@@ -11,6 +13,23 @@ use spider::website::Website;
 #[cfg(feature = "chrome_screenshot")]
 use spider_transformations::transformation::content::ReturnFormat;
 use std::time::Duration;
+
+/// Fetch exactly one page through Spider's ordinary non-browser HTTP path.
+#[cfg(feature = "feed")]
+pub(crate) async fn fetch_single_page(url: &str) -> Result<spider::page::Page, String> {
+    let mut website = Website::new(url);
+    website.with_limit(1);
+    let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
+    let mut receiver = website.subscribe(1);
+    tokio::spawn(async move {
+        website.crawl_raw().await;
+        website.unsubscribe();
+    });
+    receiver
+        .recv()
+        .await
+        .map_err(|_| "Feed retrieval completed without producing a page".to_string())
+}
 
 /// Apply common wait-for options to a Website builder.
 pub fn apply_wait_options(
@@ -94,7 +113,10 @@ pub fn page_screenshot_bytes(_page: &spider::page::Page) -> Option<&[u8]> {
 /// explicit error instead. Non-screenshot requests, and screenshot requests
 /// that did produce content, pass through unchanged.
 ///
-pub fn screenshot_content_or_error(wants_screenshot: bool, content: String) -> Result<String, String> {
+pub fn screenshot_content_or_error(
+    wants_screenshot: bool,
+    content: String,
+) -> Result<String, String> {
     if wants_screenshot && content.is_empty() {
         Err(
             "Screenshot capture was requested (return_format=\"screenshot\") but no \

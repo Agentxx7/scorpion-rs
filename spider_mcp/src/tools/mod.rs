@@ -6,6 +6,8 @@ pub mod links;
 pub mod media_search;
 pub mod scrape;
 pub mod search;
+#[cfg(feature = "sitemap")]
+pub mod sitemap;
 pub mod transform;
 
 use spider::features::chrome_common::{WaitForDelay, WaitForIdleNetwork, WaitForSelector};
@@ -15,7 +17,7 @@ use spider_transformations::transformation::content::ReturnFormat;
 use std::time::Duration;
 
 /// Fetch exactly one page through Spider's ordinary non-browser HTTP path.
-#[cfg(feature = "feed")]
+#[cfg(any(feature = "feed", feature = "sitemap"))]
 pub(crate) async fn fetch_single_page(url: &str) -> Result<spider::page::Page, String> {
     let mut website = Website::new(url);
     website.with_limit(1);

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use crate::state::SharedState;
 #[cfg(feature = "feed")]
 use crate::tools::feed::FeedReadParams;
+#[cfg(feature = "sitemap")]
+use crate::tools::sitemap::SitemapReadParams;
 use crate::tools::{
     crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
     media_search::MediaSearchParams, scrape::ScrapeParams, search::SearchParams,
@@ -30,15 +32,18 @@ impl SpiderMcpServer {
     fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let router = Self::base_tool_router();
         #[cfg(feature = "feed")]
-        {
+        let router = {
             let mut router = router;
             router.merge(Self::feed_tool_router());
             router
-        }
-        #[cfg(not(feature = "feed"))]
-        {
+        };
+        #[cfg(feature = "sitemap")]
+        let router = {
+            let mut router = router;
+            router.merge(Self::sitemap_tool_router());
             router
-        }
+        };
+        router
     }
 }
 
@@ -110,6 +115,21 @@ impl SpiderMcpServer {
     }
 }
 
+#[cfg(feature = "sitemap")]
+#[tool_router(router = sitemap_tool_router)]
+impl SpiderMcpServer {
+    #[tool(
+        name = "spider_sitemap_read",
+        description = "Fetch exactly one standard sitemap urlset or sitemapindex, preserve evidence for the original response bytes, and return discovery candidates without fetching content or child sitemap URLs."
+    )]
+    async fn sitemap_read(
+        &self,
+        Parameters(params): Parameters<SitemapReadParams>,
+    ) -> Result<String, String> {
+        crate::tools::sitemap::run(params).await
+    }
+}
+
 #[cfg(feature = "feed")]
 #[tool_router(router = feed_tool_router)]
 impl SpiderMcpServer {
@@ -162,6 +182,16 @@ impl ServerHandler for SpiderMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sitemap")]
+    #[test]
+    fn spider_sitemap_read_tool_is_registered() {
+        let router = SpiderMcpServer::tool_router();
+        assert!(router
+            .list_all()
+            .iter()
+            .any(|tool| tool.name == "spider_sitemap_read"));
+    }
 
     #[cfg(feature = "feed")]
     #[test]

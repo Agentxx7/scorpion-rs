@@ -45,6 +45,9 @@ pub mod solvers;
 /// RSS and Atom feed parsing and normalization.
 #[cfg(feature = "feed")]
 pub mod feed;
+/// Standard sitemap urlset and sitemapindex parsing and normalization.
+#[cfg(feature = "sitemap")]
+pub mod sitemap;
 /// Generic source-discovery vocabulary.
 pub mod source;
 

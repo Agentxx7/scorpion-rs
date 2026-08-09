@@ -1,4 +1,12 @@
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum SearchCategory {
+    Web,
+    News,
+    Image,
+    Video,
+}
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -91,5 +99,27 @@ pub enum Commands {
         /// Return only the first N declared sitemap URLs in source order.
         #[clap(long)]
         limit: Option<usize>,
+    },
+    /// Search an operator-provided SearXNG instance and return discovery
+    /// candidates as JSON. Result URLs are not fetched.
+    #[cfg(feature = "search_searxng")]
+    SEARCH {
+        /// Search query.
+        query: String,
+        /// Search provider. Currently supported: searxng.
+        #[clap(long)]
+        provider: String,
+        /// Base URL of the operator-provided SearXNG instance.
+        #[clap(long)]
+        base_url: Option<String>,
+        /// Search category. Defaults to ordinary web results.
+        #[clap(long, value_enum, default_value_t = SearchCategory::Web)]
+        category: SearchCategory,
+        /// Return only the first N results in provider order.
+        #[clap(long)]
+        limit: Option<usize>,
+        /// Language code passed through to SearXNG.
+        #[clap(long)]
+        language: Option<String>,
     },
 }

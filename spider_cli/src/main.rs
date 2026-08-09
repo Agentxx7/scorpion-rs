@@ -34,6 +34,8 @@ pub mod build_folders;
 pub mod discovery;
 pub mod oauth;
 pub mod options;
+#[cfg(feature = "search_searxng")]
+pub mod search;
 
 use clap::Parser;
 use options::{Cli, Commands};
@@ -200,7 +202,7 @@ async fn crawl_with_mode(website: &mut Website, headless: bool) {
     }
 }
 
-/// Print a discovery/fetch command's JSON result to stdout and return, or
+/// Print a discovery/fetch/search command's JSON result to stdout and return, or
 /// print a retrieval/config error to stderr and exit non-zero. A parser
 /// failure is never a process failure here — it is represented inside the
 /// JSON itself (`parse_error`), so it always reaches the `Ok` branch.
@@ -209,7 +211,8 @@ async fn crawl_with_mode(website: &mut Website, headless: bool) {
     feature = "feed",
     feature = "sitemap",
     feature = "news_sitemap",
-    feature = "robots_sitemap"
+    feature = "robots_sitemap",
+    feature = "search_searxng"
 ))]
 async fn print_discovery_result(result: Result<String, String>) {
     match result {
@@ -289,7 +292,8 @@ async fn main() {
         feature = "feed",
         feature = "sitemap",
         feature = "news_sitemap",
-        feature = "robots_sitemap"
+        feature = "robots_sitemap",
+        feature = "search_searxng"
     ))]
     {
         #[cfg(feature = "fetch")]
@@ -311,6 +315,26 @@ async fn main() {
         #[cfg(feature = "robots_sitemap")]
         if let Some(Commands::ROBOTS_SITEMAP { url, limit }) = &cli.command {
             return print_discovery_result(discovery::run_robots_sitemap(url, *limit).await).await;
+        }
+        #[cfg(feature = "search_searxng")]
+        if let Some(Commands::SEARCH {
+            query,
+            provider,
+            base_url,
+            category,
+            limit,
+            language,
+        }) = &cli.command
+        {
+            let params = search::SearchParams {
+                query: query.clone(),
+                provider: provider.clone(),
+                base_url: base_url.clone(),
+                category: *category,
+                limit: *limit,
+                language: language.clone(),
+            };
+            return print_discovery_result(search::run(params).await).await;
         }
     }
 
@@ -652,7 +676,8 @@ async fn main() {
                     feature = "feed",
                     feature = "sitemap",
                     feature = "news_sitemap",
-                    feature = "robots_sitemap"
+                    feature = "robots_sitemap",
+                    feature = "search_searxng"
                 ))]
                 Some(_) => unreachable!(
                     "discovery/fetch commands return early, before this match"

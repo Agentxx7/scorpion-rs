@@ -50,13 +50,14 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap"]
+default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap", "search_searxng"]
 # Evidence-first single-resource acquisition (`spider fetch <url>`).
 fetch = ["spider/evidence"]
 feed = ["spider/feed", "spider/evidence"]
 sitemap = ["spider/sitemap", "spider/evidence"]
 news_sitemap = ["spider/news_sitemap", "spider/evidence"]
 robots_sitemap = ["spider/robots_sitemap", "spider/evidence"]
+search_searxng = ["spider/search_searxng"]
 spider_cloud = ["spider/spider_cloud"]
 warc = ["spider/warc"]
 jemalloc = ["tikv-jemallocator"]

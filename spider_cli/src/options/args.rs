@@ -203,6 +203,77 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::ROBOTS_SITEMAP { .. })));
     }
 
+    #[cfg(feature = "search_searxng")]
+    #[test]
+    fn parses_search_options_and_default_web_category() {
+        use crate::options::sub_command::SearchCategory;
+
+        let cli = Cli::try_parse_from([
+            "spider",
+            "search",
+            "open source intelligence",
+            "--provider",
+            "searxng",
+            "--base-url",
+            "http://localhost:8080",
+            "--limit",
+            "7",
+            "--language",
+            "sv",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::SEARCH {
+                query,
+                provider,
+                base_url: Some(base_url),
+                category: SearchCategory::Web,
+                limit: Some(7),
+                language: Some(language),
+            }) if query == "open source intelligence"
+                && provider == "searxng"
+                && base_url == "http://localhost:8080"
+                && language == "sv"
+        ));
+    }
+
+    #[cfg(feature = "search_searxng")]
+    #[test]
+    fn parses_all_search_categories_and_english_language() {
+        use crate::options::sub_command::SearchCategory;
+
+        for (name, expected) in [
+            ("web", SearchCategory::Web),
+            ("news", SearchCategory::News),
+            ("image", SearchCategory::Image),
+            ("video", SearchCategory::Video),
+        ] {
+            let cli = Cli::try_parse_from([
+                "spider",
+                "search",
+                "query",
+                "--provider",
+                "searxng",
+                "--base-url",
+                "http://localhost:8080",
+                "--category",
+                name,
+                "--language",
+                "en",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Commands::SEARCH {
+                    category,
+                    language: Some(language),
+                    ..
+                }) if category == expected && language == "en"
+            ));
+        }
+    }
+
     /// Existing commands remain parseable, unregressed by the new variants.
     #[test]
     fn existing_commands_remain_parseable() {

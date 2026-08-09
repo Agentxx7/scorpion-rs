@@ -38,4 +38,58 @@ pub enum Commands {
         #[clap(long)]
         paste: bool,
     },
+    /// Fetch exactly one resource and print its retrieval evidence
+    /// (hashes, status, timestamps) as JSON. HTTP-only: no crawl following,
+    /// no browser, no content transformation.
+    #[cfg(feature = "fetch")]
+    FETCH {
+        /// The URL to fetch.
+        url: String,
+    },
+    /// Read exactly one RSS or Atom feed and print its normalized entries
+    /// plus retrieval evidence as JSON. Does not fetch any entry's URL.
+    #[cfg(feature = "feed")]
+    FEED {
+        /// The feed URL to read.
+        url: String,
+        /// Return only the first N entries in source order.
+        #[clap(long)]
+        limit: Option<usize>,
+    },
+    /// Read exactly one standard sitemap (urlset or sitemapindex) and print
+    /// its discovery candidates plus retrieval evidence as JSON. Does not
+    /// fetch any discovered URL.
+    #[cfg(feature = "sitemap")]
+    SITEMAP {
+        /// The sitemap URL to read.
+        url: String,
+        /// Return only the first N candidates in source order.
+        #[clap(long)]
+        limit: Option<usize>,
+    },
+    /// Read exactly one Google News Sitemap and print its News-aware
+    /// entries plus retrieval evidence as JSON. Does not fetch any
+    /// discovered URL.
+    #[cfg(feature = "news_sitemap")]
+    #[clap(name = "news-sitemap")]
+    #[allow(non_camel_case_types)]
+    NEWS_SITEMAP {
+        /// The News Sitemap URL to read.
+        url: String,
+        /// Return only the first N entries in source order.
+        #[clap(long)]
+        limit: Option<usize>,
+    },
+    /// Read exactly one robots.txt and print its declared `Sitemap:` URLs
+    /// plus retrieval evidence as JSON. Does not fetch any declared URL.
+    #[cfg(feature = "robots_sitemap")]
+    #[clap(name = "robots-sitemap")]
+    #[allow(non_camel_case_types)]
+    ROBOTS_SITEMAP {
+        /// The robots.txt URL to read.
+        url: String,
+        /// Return only the first N declared sitemap URLs in source order.
+        #[clap(long)]
+        limit: Option<usize>,
+    },
 }

@@ -44,6 +44,8 @@ case_insensitive_string = { version = "0.2", features = ["compact", "serde"] }
 sitemap = { version = "0.4", optional = true }
 chrono = { version = "0.4", optional = true }
 cron = { version = "0.16", optional = true }
+sha2 = { version = "0.10", optional = true }
+infer = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
 async-trait = { version = "0.1" }
 strum = { version = "0.28", features = ["derive"] }
 async_job = { version = "0.1", optional = true }
@@ -278,6 +280,7 @@ sitemap = ["dep:sitemap"]
 news_sitemap = ["dep:chrono"]
 robots_sitemap = []
 feed = ["dep:feed-rs"]
+evidence = ["dep:sha2", "dep:infer", "serde"]
 cache_request = ["dep:http-global-cache","dep:reqwest-middleware", "dep:http-cache-reqwest", "dep:http", "dep:http-cache"]
 cache = ["cache_request", "http-global-cache/cache", "http-cache-reqwest/manager-cacache"]
 cache_mem = ["cache_request", "http-global-cache/cache_mem"]

@@ -20,6 +20,7 @@ maintenance = { status = "as-is" }
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 percent-encoding = "2"
 unicode-normalization = "0.1"
@@ -37,6 +38,7 @@ failure_derive = "0.1.8"
 [dependencies.spider]
 version = "2"
 path = "../spider"
+default-features = false
 features = ["tokio_io_std", "sync", "serde", "cookies"]
 
 [dependencies.spider_transformations]
@@ -48,7 +50,13 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["status_code", "chrome", "warc", "spider_cloud"]
+default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap"]
+# Evidence-first single-resource acquisition (`spider fetch <url>`).
+fetch = ["spider/evidence"]
+feed = ["spider/feed", "spider/evidence"]
+sitemap = ["spider/sitemap", "spider/evidence"]
+news_sitemap = ["spider/news_sitemap", "spider/evidence"]
+robots_sitemap = ["spider/robots_sitemap", "spider/evidence"]
 spider_cloud = ["spider/spider_cloud"]
 warc = ["spider/warc"]
 jemalloc = ["tikv-jemallocator"]

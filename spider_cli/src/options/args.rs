@@ -125,3 +125,110 @@ pub struct Cli {
     #[clap(long, default_value = "markdown")]
     pub return_format: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Every derived subcommand's argument definitions are internally
+    /// consistent (clap's own structural invariant check).
+    #[test]
+    fn command_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[cfg(feature = "fetch")]
+    #[test]
+    fn parses_fetch() {
+        let cli = Cli::try_parse_from(["spider", "fetch", "https://example.test"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::FETCH { url }) if url == "https://example.test"
+        ));
+    }
+
+    #[cfg(feature = "feed")]
+    #[test]
+    fn parses_feed_with_limit() {
+        let cli = Cli::try_parse_from([
+            "spider",
+            "feed",
+            "https://example.test/feed.xml",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::FEED { url, limit: Some(5) }) if url == "https://example.test/feed.xml"
+        ));
+    }
+
+    #[cfg(feature = "feed")]
+    #[test]
+    fn parses_feed_without_limit() {
+        let cli = Cli::try_parse_from(["spider", "feed", "https://example.test/feed.xml"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::FEED { limit: None, .. })
+        ));
+    }
+
+    #[cfg(feature = "sitemap")]
+    #[test]
+    fn parses_sitemap() {
+        let cli =
+            Cli::try_parse_from(["spider", "sitemap", "https://example.test/sitemap.xml"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::SITEMAP { .. })));
+    }
+
+    #[cfg(feature = "news_sitemap")]
+    #[test]
+    fn parses_news_sitemap_hyphenated_name() {
+        let cli = Cli::try_parse_from(["spider", "news-sitemap", "https://example.test/news.xml"])
+            .unwrap();
+        assert!(matches!(cli.command, Some(Commands::NEWS_SITEMAP { .. })));
+    }
+
+    #[cfg(feature = "robots_sitemap")]
+    #[test]
+    fn parses_robots_sitemap_hyphenated_name() {
+        let cli = Cli::try_parse_from([
+            "spider",
+            "robots-sitemap",
+            "https://example.test/robots.txt",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Commands::ROBOTS_SITEMAP { .. })));
+    }
+
+    /// Existing commands remain parseable, unregressed by the new variants.
+    #[test]
+    fn existing_commands_remain_parseable() {
+        assert!(matches!(
+            Cli::try_parse_from(["spider", "--url", "https://example.test", "crawl"])
+                .unwrap()
+                .command,
+            Some(Commands::CRAWL { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["spider", "--url", "https://example.test", "scrape"])
+                .unwrap()
+                .command,
+            Some(Commands::SCRAPE { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["spider", "--url", "https://example.test", "download"])
+                .unwrap()
+                .command,
+            Some(Commands::DOWNLOAD { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["spider", "authenticate", "sk-test"])
+                .unwrap()
+                .command,
+            Some(Commands::AUTHENTICATE { .. })
+        ));
+    }
+}

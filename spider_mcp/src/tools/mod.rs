@@ -22,26 +22,16 @@ use spider_transformations::transformation::content::ReturnFormat;
 use std::time::Duration;
 
 /// Fetch exactly one page through Spider's ordinary non-browser HTTP path.
+/// The canonical implementation now lives in `spider::utils::evidence` (the
+/// core acquisition/evidence seam shared with the CLI); re-exported here so
+/// every existing crate-local call site keeps working unchanged.
 #[cfg(any(
     feature = "feed",
     feature = "sitemap",
     feature = "news_sitemap",
     feature = "robots_sitemap"
 ))]
-pub(crate) async fn fetch_single_page(url: &str) -> Result<spider::page::Page, String> {
-    let mut website = Website::new(url);
-    website.with_limit(1);
-    let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
-    let mut receiver = website.subscribe(1);
-    tokio::spawn(async move {
-        website.crawl_raw().await;
-        website.unsubscribe();
-    });
-    receiver
-        .recv()
-        .await
-        .map_err(|_| "Feed retrieval completed without producing a page".to_string())
-}
+pub(crate) use spider::utils::evidence::fetch_single_page;
 
 /// Apply common wait-for options to a Website builder.
 pub fn apply_wait_options(
@@ -106,16 +96,10 @@ pub fn apply_screenshot_options(_website: &mut Website, _return_format: &str) ->
 
 /// Extract a page's captured screenshot bytes, if any. `Page::screenshot_bytes`
 /// only exists at all behind the `chrome` feature, so this is `None`
-/// unconditionally without it.
-#[cfg(feature = "chrome")]
-pub fn page_screenshot_bytes(page: &spider::page::Page) -> Option<&[u8]> {
-    page.screenshot_bytes.as_deref()
-}
-
-#[cfg(not(feature = "chrome"))]
-pub fn page_screenshot_bytes(_page: &spider::page::Page) -> Option<&[u8]> {
-    None
-}
+/// unconditionally without it. The canonical implementation now lives in
+/// `spider::utils::evidence`; re-exported here so every existing
+/// crate-local call site (`crawl.rs`, `scrape.rs`) keeps working unchanged.
+pub use spider::utils::evidence::page_screenshot_bytes;
 
 /// Fail-closed screenshot semantics, shared by `scrape` and `crawl` so both
 /// tools apply the identical rule: a caller who explicitly asked for

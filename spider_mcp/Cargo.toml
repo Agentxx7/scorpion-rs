@@ -31,7 +31,7 @@ pdf-extract = "0.9"
 [dependencies.spider]
 version = "2"
 path = "../spider"
-features = ["tokio_io_std", "sync", "serde", "cookies"]
+features = ["tokio_io_std", "sync", "serde", "cookies", "evidence"]
 
 [dependencies.spider_transformations]
 version = "2"

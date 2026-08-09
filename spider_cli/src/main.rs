@@ -24,6 +24,14 @@ extern crate serde_json;
 extern crate spider;
 
 pub mod build_folders;
+#[cfg(any(
+    feature = "fetch",
+    feature = "feed",
+    feature = "sitemap",
+    feature = "news_sitemap",
+    feature = "robots_sitemap"
+))]
+pub mod discovery;
 pub mod oauth;
 pub mod options;
 
@@ -192,6 +200,27 @@ async fn crawl_with_mode(website: &mut Website, headless: bool) {
     }
 }
 
+/// Print a discovery/fetch command's JSON result to stdout and return, or
+/// print a retrieval/config error to stderr and exit non-zero. A parser
+/// failure is never a process failure here — it is represented inside the
+/// JSON itself (`parse_error`), so it always reaches the `Ok` branch.
+#[cfg(any(
+    feature = "fetch",
+    feature = "feed",
+    feature = "sitemap",
+    feature = "news_sitemap",
+    feature = "robots_sitemap"
+))]
+async fn print_discovery_result(result: Result<String, String>) {
+    match result {
+        Ok(json) => println!("{json}"),
+        Err(message) => {
+            eprintln!("Error: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -249,6 +278,40 @@ async fn main() {
             }
         }
         return;
+    }
+
+    // Canonical discovery/fetch commands — handled early, exactly like
+    // AUTHENTICATE: they take their own `url` field, never the shared
+    // `--url`/crawl-configuration preamble below, and never build a
+    // `Website` (no crawl following, no browser).
+    #[cfg(any(
+        feature = "fetch",
+        feature = "feed",
+        feature = "sitemap",
+        feature = "news_sitemap",
+        feature = "robots_sitemap"
+    ))]
+    {
+        #[cfg(feature = "fetch")]
+        if let Some(Commands::FETCH { url }) = &cli.command {
+            return print_discovery_result(discovery::run_fetch(url).await).await;
+        }
+        #[cfg(feature = "feed")]
+        if let Some(Commands::FEED { url, limit }) = &cli.command {
+            return print_discovery_result(discovery::run_feed(url, *limit).await).await;
+        }
+        #[cfg(feature = "sitemap")]
+        if let Some(Commands::SITEMAP { url, limit }) = &cli.command {
+            return print_discovery_result(discovery::run_sitemap(url, *limit).await).await;
+        }
+        #[cfg(feature = "news_sitemap")]
+        if let Some(Commands::NEWS_SITEMAP { url, limit }) = &cli.command {
+            return print_discovery_result(discovery::run_news_sitemap(url, *limit).await).await;
+        }
+        #[cfg(feature = "robots_sitemap")]
+        if let Some(Commands::ROBOTS_SITEMAP { url, limit }) = &cli.command {
+            return print_discovery_result(discovery::run_robots_sitemap(url, *limit).await).await;
+        }
     }
 
     if cli.url.is_empty() {
@@ -582,6 +645,18 @@ async fn main() {
                     }
                 }
                 Some(Commands::AUTHENTICATE { .. }) => {},
+                // Discovery/fetch commands are handled earlier and always
+                // `return` before reaching this match — unreachable here.
+                #[cfg(any(
+                    feature = "fetch",
+                    feature = "feed",
+                    feature = "sitemap",
+                    feature = "news_sitemap",
+                    feature = "robots_sitemap"
+                ))]
+                Some(_) => unreachable!(
+                    "discovery/fetch commands return early, before this match"
+                ),
                 None => ()
             }
         }

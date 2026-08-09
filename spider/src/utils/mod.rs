@@ -32,6 +32,10 @@ pub mod dns_cache;
 #[cfg(feature = "etag_cache")]
 /// ETag / conditional-request cache for bandwidth-efficient re-crawls.
 pub mod etag_cache;
+#[cfg(feature = "evidence")]
+/// Canonical one-shot fetch + retrieval-evidence/provenance construction,
+/// shared by the MCP server and the CLI.
+pub mod evidence;
 #[cfg(feature = "priority_frontier")]
 /// Prioritized URL frontier with dedup and optional domain round-robin.
 pub mod frontier;

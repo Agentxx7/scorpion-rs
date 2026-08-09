@@ -1,152 +1,20 @@
 //! Scorpion's first concrete evidence/provenance representation
-//! (SCORPION.md §3, "Evidence-First Direction"). `EvidenceBundle` is
-//! deliberately minimal and purely additive: every field is `Option`,
-//! populated only when the underlying data was actually observed during a
-//! fetch — never fabricated or guessed. `EvidenceId`/`ArtifactId` are
-//! intentionally NOT represented here — SCORPION.md §3 has not locked a
-//! representation for either yet, and this bundle does not invent one.
+//! (SCORPION.md §3, "Evidence-First Direction").
 //!
-//! This is plumbing, not a new capability: every field it can populate is
-//! sourced from data Spider/Scorpion already capture (`Page`,
-//! `spider_transformations`, the existing screenshot pipeline) — nothing
-//! here changes crawling, fetching, or rendering behavior.
+//! The actual `EvidenceBundle` type and its constructor now live in
+//! `spider::utils::evidence` — the canonical core seam shared by this MCP
+//! server and the CLI, so neither independently reimplements
+//! acquisition/evidence logic. This module re-exports them under their
+//! established crate-local names so every existing call site in
+//! `spider_mcp` (`crate::evidence::{EvidenceBundle, build_evidence,
+//! sha256_hex}`) keeps working unchanged.
 
-use serde::Serialize;
-use sha2::{Digest, Sha256};
-
-/// SHA-256 of exactly the supplied bytes, encoded as lowercase hexadecimal.
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct EvidenceBundle {
-    /// The URL that was actually requested.
-    pub requested_url: Option<String>,
-    /// The URL after following any redirects. Equal to `requested_url` when
-    /// no redirect occurred — this field is populated whenever a page was
-    /// fetched, never omitted just because the two happen to match, so its
-    /// presence always reflects ground truth rather than leaving
-    /// redirect-vs-no-redirect ambiguous.
-    pub final_url: Option<String>,
-    /// Unix epoch milliseconds when the live HTTP- or Chrome-produced
-    /// representation backing this page finished materializing. `None` when
-    /// that canonical completion time was not captured (including cache and
-    /// error paths). This is not a server timestamp or request-start time.
-    pub retrieved_at: Option<u64>,
-    /// Spider's effective/crawler status after existing operational
-    /// reclassification and retry policy.
-    pub status_code: Option<u16>,
-    /// HTTP status actually observed from a response or trusted relay. This
-    /// remains independent of Spider's effective/crawler `status_code`.
-    pub observed_status_code: Option<u16>,
-    /// The response's `Content-Type` header, verbatim, when present.
-    pub content_type: Option<String>,
-    /// MIME type detected directly from the retained non-browser HTTP
-    /// response bytes. Independent of the declared `content_type`; `None`
-    /// when bytes are absent, unrecognized, or produced by a browser path.
-    pub detected_content_type: Option<String>,
-    /// SHA-256 of the exact HTTP content-decoded response-body bytes retained
-    /// by `Page` on the non-browser HTTP scrape path. This is not a hash of
-    /// transport/wire bytes and no character normalization is applied. Always
-    /// `None` for browser/headless fetches because their `Page` bytes represent
-    /// Chromium's rendered DOM rather than an HTTP response body.
-    pub response_body_hash: Option<String>,
-    /// SHA-256 of `content.as_bytes()` exactly as returned in this bundle.
-    pub transformed_content_hash: Option<String>,
-    /// Textual content in the requested format (markdown/text/raw/xml).
-    /// `None` when the request was for a screenshot instead — see
-    /// `screenshot`.
-    pub content: Option<String>,
-    /// Links discovered on the page, when link collection was enabled.
-    pub links: Option<Vec<String>>,
-    /// Which engine/site surfaced this evidence — populated only for
-    /// search-derived evidence (e.g. "youtube"). `None` for a direct fetch:
-    /// a URL fetch has no "source" distinct from the URL itself.
-    pub source: Option<String>,
-    /// Which search provider produced this evidence — populated only for
-    /// search-derived evidence (e.g. "searxng"). `None` for a direct fetch.
-    pub provider: Option<String>,
-    /// The search query that led to this evidence — populated only for
-    /// search-derived evidence. `None` for a direct fetch.
-    pub query: Option<String>,
-    /// Base64-encoded screenshot, when a screenshot was requested and
-    /// captured. Kept distinct from `content` — image bytes are not
-    /// textual content (SCORPION.md §9.3's `PAGE_SCREENSHOT` distinction).
-    pub screenshot: Option<String>,
-    /// SHA-256 of the original captured PNG bytes, never its base64 encoding.
-    pub screenshot_hash: Option<String>,
-    /// Reserved for future structured metadata. Always `None` today —
-    /// nothing currently populates it honestly.
-    pub metadata: Option<serde_json::Value>,
-}
-
-/// Build retrieval evidence for one fetched page. Content and screenshot
-/// remain mutually exclusive; byte-derived fields are never claimed for a
-/// browser-produced representation.
-pub(crate) fn build_evidence(
-    page: &spider::page::Page,
-    content: Option<String>,
-    wants_screenshot: bool,
-    used_browser: bool,
-) -> EvidenceBundle {
-    let response_body_hash = (!used_browser)
-        .then(|| page.get_bytes().map(sha256_hex))
-        .flatten();
-    let detected_content_type = if used_browser {
-        None
-    } else {
-        page.get_bytes()
-            .and_then(infer::get)
-            .map(|kind| kind.mime_type().to_string())
-    };
-    let screenshot_bytes = crate::tools::page_screenshot_bytes(page);
-    let transformed_content_hash = if wants_screenshot {
-        None
-    } else {
-        content.as_deref().map(|text| sha256_hex(text.as_bytes()))
-    };
-    let screenshot_hash = wants_screenshot
-        .then_some(screenshot_bytes)
-        .flatten()
-        .map(sha256_hex);
-    let content_type = page
-        .headers
-        .as_ref()
-        .and_then(|headers| headers.get("content-type"))
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let links = page.page_links.as_ref().map(|links| {
-        links
-            .iter()
-            .map(|link| link.inner().to_string())
-            .collect::<Vec<_>>()
-    });
-
-    EvidenceBundle {
-        requested_url: Some(page.get_url().to_string()),
-        final_url: Some(page.get_url_final().to_string()),
-        retrieved_at: page.get_retrieved_at(),
-        status_code: Some(page.status_code.as_u16()),
-        observed_status_code: page.observed_status_code.map(|status| status.as_u16()),
-        content_type,
-        detected_content_type,
-        response_body_hash,
-        transformed_content_hash,
-        content: (!wants_screenshot).then_some(content.clone()).flatten(),
-        links,
-        source: None,
-        provider: None,
-        query: None,
-        screenshot: wants_screenshot.then_some(content).flatten(),
-        screenshot_hash,
-        metadata: None,
-    }
-}
+pub use spider::utils::evidence::{build_evidence, EvidenceBundle};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spider::utils::evidence::sha256_hex;
 
     /// 1/2. Only actually-known fields are populated; the rest remain
     /// absent (null), never fabricated.

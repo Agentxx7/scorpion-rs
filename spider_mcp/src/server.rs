@@ -9,8 +9,8 @@ use crate::tools::feed::FeedReadParams;
 use crate::tools::sitemap::SitemapReadParams;
 use crate::tools::{
     crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
-    media_search::MediaSearchParams, scrape::ScrapeParams, search::SearchParams,
-    transform::TransformParams,
+    media_search::MediaSearchParams, news_search::NewsSearchParams, scrape::ScrapeParams,
+    search::SearchParams, transform::TransformParams,
 };
 
 #[derive(Clone)]
@@ -112,6 +112,17 @@ impl SpiderMcpServer {
         Parameters(params): Parameters<MediaSearchParams>,
     ) -> Result<String, String> {
         crate::tools::media_search::run(params).await
+    }
+
+    #[tool(
+        name = "spider_news_search",
+        description = "Discover news results through a configured self-hosted SearXNG instance. Returns headlines, article URLs, summaries, opaque publish-date strings, authors, thumbnails, raw engine values, and scores. Does not fetch articles or images."
+    )]
+    async fn news_search(
+        &self,
+        Parameters(params): Parameters<NewsSearchParams>,
+    ) -> Result<String, String> {
+        crate::tools::news_search::run(params).await
     }
 }
 
@@ -239,5 +250,29 @@ mod tests {
                 .any(|t| t.name == "spider_media_search"),
             "spider_media_search must be registered in the tool router"
         );
+    }
+
+    #[test]
+    fn spider_news_search_tool_is_registered_with_exact_input_schema() {
+        let router = SpiderMcpServer::tool_router();
+        let tools = router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "spider_news_search")
+            .unwrap();
+        let actual = serde_json::Value::Object((*tool.input_schema).clone());
+        let expected = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "base_url": {"description": "Base URL of the caller's self-hosted SearXNG instance.", "type": ["string", "null"]},
+                "language": {"description": "Language code passed through to SearXNG (for example, \"en\").", "type": ["string", "null"]},
+                "limit": {"description": "Maximum number of results to return.", "format": "uint", "type": ["integer", "null"], "minimum": 0},
+                "provider": {"description": "Search provider to use. Currently supported: \"searxng\".", "type": "string"},
+                "query": {"description": "The news query.", "type": "string"}
+            },
+            "required": ["query", "provider"]
+        });
+        assert_eq!(actual, expected);
     }
 }

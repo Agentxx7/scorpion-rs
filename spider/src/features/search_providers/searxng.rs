@@ -295,6 +295,29 @@ pub struct ImageResult {
     pub description: Option<String>,
 }
 
+/// A news discovery candidate returned by SearXNG. This is provider output
+/// only: constructing it never fetches the article or thumbnail URL.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct NewsResult {
+    /// Result headline.
+    pub title: String,
+    /// Article URL.
+    pub url: String,
+    /// Result snippet from SearXNG's raw `content` field.
+    pub snippet: Option<String>,
+    /// Raw `publishedDate` string, preserved verbatim.
+    pub published_at: Option<String>,
+    /// Raw result author, when supplied.
+    pub author: Option<String>,
+    /// Raw result thumbnail URL, when supplied.
+    pub thumbnail_url: Option<String>,
+    /// Raw SearXNG result `engine`; this is not a publisher or outlet.
+    pub engine: Option<String>,
+    /// Raw SearXNG result score.
+    pub score: Option<f32>,
+}
+
 /// Map a SearXNG `img_format` value (e.g. `"png"`, `"jpeg"`) to its
 /// standard MIME type. Unrecognized formats deliberately map to `None`
 /// rather than guessing.
@@ -335,6 +358,23 @@ fn json_value_to_display_string(v: &serde_json::Value) -> Option<String> {
 }
 
 impl SearxngProvider {
+    /// Search only SearXNG's news category. The response is discovery data;
+    /// article and thumbnail URLs are never opened by this method.
+    pub async fn search_news(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+        client: Option<&reqwest::Client>,
+    ) -> Result<Vec<NewsResult>, SearchError> {
+        let mut extra_params = vec![("categories", "news".to_string())];
+        if let Some(ref language) = options.language {
+            extra_params.push(("language", language.clone()));
+        }
+
+        let json = self.fetch_json(query, &extra_params, client).await?;
+        Ok(Self::map_news_results(json, options.limit))
+    }
+
     /// Search SearXNG's `videos` category (`categories=videos`, confirmed
     /// against SearXNG's own `settings.yml` — see module docs). Returns
     /// Spider's canonical `VideoResult` shape, ordering preserved from the
@@ -489,6 +529,46 @@ impl SearxngProvider {
             out.truncate(limit);
         }
 
+        out
+    }
+
+    /// Pure mapping for a SearXNG `categories=news` response.
+    fn map_news_results(json: serde_json::Value, limit: Option<usize>) -> Vec<NewsResult> {
+        let mut out = Vec::new();
+        if let Some(items) = json.get("results").and_then(|v| v.as_array()) {
+            for item in items {
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or_default();
+                if url.is_empty() {
+                    continue;
+                }
+                let optional_string = |name| {
+                    item.get(name)
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                };
+                out.push(NewsResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    url: url.to_string(),
+                    snippet: optional_string("content"),
+                    published_at: optional_string("publishedDate"),
+                    author: optional_string("author"),
+                    thumbnail_url: optional_string("thumbnail"),
+                    engine: optional_string("engine"),
+                    score: item
+                        .get("score")
+                        .and_then(|v| v.as_f64())
+                        .map(|score| score as f32),
+                });
+            }
+        }
+        if let Some(limit) = limit {
+            out.truncate(limit);
+        }
         out
     }
 }
@@ -932,5 +1012,62 @@ mod tests {
         assert_eq!(image_format_to_mime("png"), Some("image/png"));
         assert_eq!(image_format_to_mime("JPEG"), Some("image/jpeg"));
         assert_eq!(image_format_to_mime("made-up-format"), None);
+    }
+
+    // --- news results (SCORPION_SEARXNG_NEWS_DISCOVERY_001) ---
+
+    #[test]
+    fn test_map_news_results_preserves_fields_order_and_opaque_date() {
+        let body = json!({"results": [
+            {
+                "title": "First",
+                "url": "https://example.test/article-a",
+                "content": "Summary A",
+                "publishedDate": "yesterday at 09:17 + mystery-zone",
+                "author": "Author A",
+                "thumbnail": "https://example.test/thumb.jpg",
+                "engine": "engine-a",
+                "score": 1.25
+            },
+            {"title": "Second", "url": "https://example.test/article-b"}
+        ]});
+
+        let results = SearxngProvider::map_news_results(body, None);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "First");
+        assert_eq!(results[0].url, "https://example.test/article-a");
+        assert_eq!(results[0].snippet.as_deref(), Some("Summary A"));
+        assert_eq!(
+            results[0].published_at.as_deref(),
+            Some("yesterday at 09:17 + mystery-zone")
+        );
+        assert_eq!(results[0].author.as_deref(), Some("Author A"));
+        assert_eq!(
+            results[0].thumbnail_url.as_deref(),
+            Some("https://example.test/thumb.jpg")
+        );
+        assert_eq!(results[0].engine.as_deref(), Some("engine-a"));
+        let score: Option<f32> = results[0].score;
+        assert_eq!(score, Some(1.25_f32));
+        assert_eq!(results[1].title, "Second");
+        assert_eq!(results[1].snippet, None);
+        assert_eq!(results[1].published_at, None);
+        assert_eq!(results[1].author, None);
+        assert_eq!(results[1].thumbnail_url, None);
+        assert_eq!(results[1].engine, None);
+        assert_eq!(results[1].score, None);
+    }
+
+    #[test]
+    fn test_map_news_results_limit_zero_and_skips_missing_url() {
+        let body = json!({"results": [
+            {"title": "No URL"},
+            {"title": "One", "url": "https://1.example/"},
+            {"title": "Two", "url": "https://2.example/"}
+        ]});
+        assert!(SearxngProvider::map_news_results(body.clone(), Some(0)).is_empty());
+        let limited = SearxngProvider::map_news_results(body, Some(1));
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].title, "One");
     }
 }

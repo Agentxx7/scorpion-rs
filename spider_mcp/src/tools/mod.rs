@@ -4,6 +4,7 @@ pub mod crawl_status;
 pub mod feed;
 pub mod links;
 pub mod media_search;
+pub mod news_search;
 pub mod scrape;
 pub mod search;
 #[cfg(feature = "sitemap")]

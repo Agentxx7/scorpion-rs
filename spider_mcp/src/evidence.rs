@@ -29,16 +29,10 @@ pub struct EvidenceBundle {
     /// presence always reflects ground truth rather than leaving
     /// redirect-vs-no-redirect ambiguous.
     pub final_url: Option<String>,
-    /// Unix epoch seconds of the actual page retrieval. Currently always
-    /// `None` — no canonical retrieval wall-clock timestamp exists anywhere
-    /// in the reachable scrape path today (see SCORPION.md §3's
-    /// `retrieved_at` gap). An MCP-side `SystemTime::now()` captured at
-    /// evidence-assembly time was tried and reverted
-    /// (SCORPION_EVIDENCE_BUNDLE_001A): it only marks when this code
-    /// happened to run, not when the network fetch completed, and labeling
-    /// that approximation `retrieved_at` would overclaim provenance the
-    /// runtime doesn't actually have. This field stays populated with real
-    /// data only once Spider core exposes a genuine retrieval timestamp.
+    /// Unix epoch milliseconds when the live HTTP- or Chrome-produced
+    /// representation backing this page finished materializing. `None` when
+    /// that canonical completion time was not captured (including cache and
+    /// error paths). This is not a server timestamp or request-start time.
     pub retrieved_at: Option<u64>,
     /// HTTP status code of the response.
     pub status_code: Option<u16>,
@@ -183,13 +177,8 @@ mod tests {
         assert_eq!(v["links"][1], "https://b.example/");
     }
 
-    /// SCORPION_EVIDENCE_BUNDLE_001A: retrieved_at is null when no
-    /// canonical retrieval timestamp exists — which is unconditionally
-    /// true today, since nothing in this crate populates it. `Default`
-    /// alone proves this: the struct offers no associated function to
-    /// derive a value for the field (the earlier `now_unix()` helper that
-    /// did was removed in this correction) — only explicit, caller-
-    /// supplied data can set it.
+    /// A bundle without a live-fetch completion timestamp must serialize
+    /// `retrieved_at` as null rather than fabricating one during assembly.
     #[test]
     fn retrieved_at_is_null_by_default() {
         let bundle = EvidenceBundle {

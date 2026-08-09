@@ -2406,6 +2406,9 @@ impl HtmlSpoolGuard {
 pub struct Page {
     /// The bytes of the resource.
     pub(crate) html: Option<bytes::Bytes>,
+    /// Unix epoch milliseconds when the carried live-fetch representation
+    /// finished materializing.
+    retrieved_at: Option<u64>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -2567,6 +2570,9 @@ impl Drop for Page {
 pub struct Page {
     /// The bytes of the resource.
     pub(crate) html: Option<bytes::Bytes>,
+    /// Unix epoch milliseconds when the carried live-fetch representation
+    /// finished materializing.
+    retrieved_at: Option<u64>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -2710,6 +2716,7 @@ pub fn page_assign(page: &mut Page, mut new_page: Page) {
                 new_page.balance_bytes_tracked = false;
             }
             page.html = std::mem::take(&mut new_page.html);
+            page.retrieved_at = new_page.retrieved_at;
             page.is_valid_utf8 = new_page.is_valid_utf8;
             page.is_xml = new_page.is_xml;
             #[cfg(not(feature = "decentralized"))]
@@ -3624,6 +3631,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
         let precomputed_signature = spool.signature.or(res.signature);
         return Page {
             html: None,
+            retrieved_at: res.retrieved_at,
             binary_file: spool.vitals.binary_file,
             is_valid_utf8: spool.vitals.is_valid_utf8,
             is_xml: spool.vitals.is_xml,
@@ -3731,6 +3739,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
 
     Page {
         html: res.content.map(bytes::Bytes::from),
+        retrieved_at: res.retrieved_at,
         binary_file,
         is_valid_utf8,
         is_xml,
@@ -3796,6 +3805,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
 pub fn build(_: &str, res: PageResponse) -> Page {
     Page {
         html: res.content.map(bytes::Bytes::from),
+        retrieved_at: res.retrieved_at,
         headers: res.headers,
         #[cfg(feature = "remote_addr")]
         remote_addr: res.remote_addr,
@@ -5210,6 +5220,11 @@ impl Page {
                         } else {
                             Some(collected_bytes)
                         };
+                        // The streaming writer returns metadata first; this is
+                        // the seam where its PageResponse representation is
+                        // actually established for the live HTTP fetch.
+                        response.0.retrieved_at =
+                            crate::utils::retrieval_timestamp_for_content(&response.0.content);
 
                         if r_settings.ssg_build {
                             if let Some(ssg_map) = ssg_map {
@@ -7053,6 +7068,12 @@ impl Page {
     /// [`get_html_async`], or [`stream_html_bytes`] for disk-aware access.
     pub fn get_bytes(&self) -> Option<&[u8]> {
         self.html.as_deref()
+    }
+
+    /// Unix epoch milliseconds when the live-fetch representation backing
+    /// this page finished materializing, if that time was captured.
+    pub fn get_retrieved_at(&self) -> Option<u64> {
+        self.retrieved_at
     }
 
     /// Html getter for bytes on the page as string.
@@ -13972,6 +13993,41 @@ impl crate::traits::PageChromeExt for Page {
 // ============================================================================
 // Empty-success reclassification tests
 // ============================================================================
+
+#[cfg(all(test, not(feature = "decentralized")))]
+mod retrieval_timestamp_tests {
+    use super::*;
+    use crate::utils::PageResponse;
+
+    #[test]
+    fn page_threads_and_exposes_present_retrieval_timestamp_unchanged() {
+        let expected = 1_765_432_109_876_u64;
+        let page = build(
+            "https://example.test/",
+            PageResponse {
+                content: Some(b"representation".to_vec()),
+                retrieved_at: Some(expected),
+                status_code: StatusCode::OK,
+                ..Default::default()
+            },
+        );
+        assert_eq!(page.get_retrieved_at(), Some(expected));
+    }
+
+    #[test]
+    fn page_accessor_preserves_absent_retrieval_timestamp() {
+        let page = build(
+            "https://example.test/",
+            PageResponse {
+                content: Some(b"representation".to_vec()),
+                retrieved_at: None,
+                status_code: StatusCode::OK,
+                ..Default::default()
+            },
+        );
+        assert_eq!(page.get_retrieved_at(), None);
+    }
+}
 
 #[cfg(all(test, not(feature = "decentralized")))]
 mod empty_success_tests {

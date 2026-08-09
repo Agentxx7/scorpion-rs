@@ -77,17 +77,7 @@ fn build_evidence(
     crate::evidence::EvidenceBundle {
         requested_url: Some(page.get_url().to_string()),
         final_url: Some(page.get_url_final().to_string()),
-        // Always `None`: no canonical retrieval wall-clock timestamp exists
-        // anywhere in the reachable scrape path today. `Page` only carries
-        // a private, monotonic `Instant` (elapsed-time measurement, not a
-        // point in time, and inaccessible from this crate regardless). An
-        // MCP-side `SystemTime::now()` taken here would only mark when
-        // this function got scheduled to run — not when the network
-        // fetch actually completed — and was reverted for exactly that
-        // reason (SCORPION_EVIDENCE_BUNDLE_001A). Populating this field
-        // honestly requires Spider core to capture the timestamp at fetch
-        // completion, which is out of scope here.
-        retrieved_at: None,
+        retrieved_at: page.get_retrieved_at(),
         status_code: Some(page.status_code.as_u16()),
         content_type,
         response_body_hash,
@@ -414,12 +404,21 @@ mod tests {
         output
     }
 
+    fn local_unix_epoch_millis() -> u64 {
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test wall clock must be after Unix epoch")
+            .as_millis();
+        u64::try_from(millis).expect("test wall clock milliseconds must fit u64")
+    }
+
     #[tokio::test]
     #[ignore = "localhost socket acceptance; run explicitly where loopback bind is permitted"]
     async fn localhost_scrape_acceptance_and_legacy_shape() {
         static BODY: &[u8] = b"<!doctype html><html><body>known evidence body</body></html>";
         let (url, stop, handle) = localhost_server(BODY);
 
+        let before = local_unix_epoch_millis();
         let evidence_json = run(ScrapeParams {
             url: url.clone(),
             return_format: Some("raw".into()),
@@ -434,7 +433,10 @@ mod tests {
         })
         .await
         .unwrap();
+        let after = local_unix_epoch_millis();
         let evidence: serde_json::Value = serde_json::from_str(&evidence_json).unwrap();
+        let retrieved_at = evidence["retrieved_at"].as_u64().unwrap();
+        assert!(before <= retrieved_at && retrieved_at <= after);
         assert_eq!(
             evidence["response_body_hash"],
             format!("{:x}", Sha256::digest(BODY))
@@ -480,6 +482,7 @@ mod tests {
         static BODY: &[u8] = b"<!doctype html><html><body><h1>Chromium evidence</h1></body></html>";
         let (url, stop, handle) = localhost_server(BODY);
 
+        let before = local_unix_epoch_millis();
         let result = run(ScrapeParams {
             url,
             return_format: Some("screenshot".into()),
@@ -494,7 +497,10 @@ mod tests {
         })
         .await
         .unwrap();
+        let after = local_unix_epoch_millis();
         let evidence: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let retrieved_at = evidence["retrieved_at"].as_u64().unwrap();
+        assert!(before <= retrieved_at && retrieved_at <= after);
         let png = decode_base64_independently(evidence["screenshot"].as_str().unwrap());
         assert!(png.len() > 8);
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");

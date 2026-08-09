@@ -594,6 +594,10 @@ pub fn build_first_byte_timeout_page_response(target_url: &str) -> PageResponse 
 pub struct PageResponse {
     /// The page response resource.
     pub content: Option<Vec<u8>>,
+    /// Unix epoch milliseconds when a live fetch finished materializing the
+    /// representation carried by this response. `None` for responses without
+    /// a materialized representation and for paths without canonical timing.
+    pub retrieved_at: Option<u64>,
     /// Pre-spooled HTML handle carrying the disk path and the vitals
     /// that were computed inline with the write.  Set only when the
     /// `balance` feature is active, the chrome fetch path detected
@@ -680,6 +684,21 @@ pub struct PageResponse {
     /// instead of serialized HTML. Downstream consumers can skip local
     /// HTML→Markdown conversion when set.
     pub content_is_markdown: bool,
+}
+
+/// Current Unix epoch time in milliseconds, when the wall clock and the
+/// millisecond count can both be represented honestly.
+fn unix_epoch_millis_now() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+/// Timestamp a present representation without collapsing present-empty and
+/// absent content.
+pub(crate) fn retrieval_timestamp_for_content(content: &Option<Vec<u8>>) -> Option<u64> {
+    content.as_ref().and_then(|_| unix_epoch_millis_now())
 }
 
 impl PageResponse {
@@ -5551,6 +5570,10 @@ pub async fn fetch_page_html_chrome_base<'h>(
         }
     };
 
+    // Both Chrome body sources converge above. Timestamp the completed
+    // representation carried in memory, never the underlying network event.
+    page_response.retrieved_at = retrieval_timestamp_for_content(&page_response.content);
+
     // Every byte source feeding `page_response.content` on this chrome
     // path originates as a Rust `String`/`Vec<u8>` deserialised from CDP
     // (chromiumoxide's `outer_html_bytes`, `evaluate_function`,
@@ -6464,6 +6487,11 @@ pub async fn handle_response_bytes(
         }
     }
 
+    // The body stream is finalized and `content` now exactly represents what
+    // this live HTTP PageResponse will carry. Timestamp only that presence;
+    // `Some(Vec::new())` remains a real materialized representation.
+    let retrieved_at = retrieval_timestamp_for_content(&content);
+
     PageResponse {
         headers: Some(headers),
         #[cfg(feature = "remote_addr")]
@@ -6472,6 +6500,7 @@ pub async fn handle_response_bytes(
         cookies,
         is_valid_utf8: utf8_state.finish(content.as_deref()),
         content,
+        retrieved_at,
         final_url: rd,
         status_code,
         anti_bot_tech,
@@ -10267,6 +10296,46 @@ pub fn emit_log_shutdown(link: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_epoch_millis_helper_is_plausible_and_bounded() {
+        let before = unix_epoch_millis_now().expect("current wall clock should be representable");
+        let observed = unix_epoch_millis_now().expect("current wall clock should be representable");
+        let after = unix_epoch_millis_now().expect("current wall clock should be representable");
+        assert!(before <= observed && observed <= after);
+        assert!(observed > 1_500_000_000_000, "expected a plausible Unix-ms value");
+    }
+
+    #[test]
+    fn retrieval_timestamp_preserves_present_empty_and_absent_content() {
+        let before = unix_epoch_millis_now().unwrap();
+        let present_empty = retrieval_timestamp_for_content(&Some(Vec::new()));
+        let after = unix_epoch_millis_now().unwrap();
+        assert!(present_empty.is_some_and(|value| before <= value && value <= after));
+        assert_eq!(retrieval_timestamp_for_content(&None), None);
+    }
+
+    #[test]
+    fn synthetic_error_and_cached_responses_have_no_retrieval_timestamp() {
+        let error = build_first_byte_timeout_page_response("https://example.test/");
+        assert_eq!(error.retrieved_at, None);
+
+        let cached = build_cached_html_page_response(
+            "https://example.test/",
+            "<html>cached</html>".to_string(),
+        );
+        assert_eq!(cached.retrieved_at, None);
+    }
+
+    #[tokio::test]
+    async fn engine_error_response_has_no_retrieval_timestamp() {
+        let error = build_engine_error_page_response(
+            "https://example.test/",
+            crate::fetch_engine::EngineError::Other("deterministic test error".to_string()),
+        )
+        .await;
+        assert_eq!(error.retrieved_at, None);
+    }
 
     /// The rebalance pause must be claimable at most once per `REBALANCE_TIME`
     /// window, not once per call. Before the gate, `get_semaphore` slept on every

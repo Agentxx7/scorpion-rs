@@ -32,8 +32,9 @@ pub struct ScrapeParams {
     /// Proxy URL
     pub proxy: Option<String>,
     /// Opt-in: return an EvidenceBundle (requested/final URL, retrieved_at,
-    /// status_code, content_type, content, links, screenshot, and integrity
-    /// hashes) instead of the normal {url, status_code, content, links} shape.
+    /// effective status_code, observed_status_code, content_type, content,
+    /// links, screenshot, and integrity hashes) instead of the normal
+    /// {url, status_code, content, links} shape.
     /// `response_body_hash` and byte-derived `detected_content_type` are
     /// available only for the non-browser HTTP path; browser/headless pages
     /// contain rendered DOM bytes instead. Default false — normal output is
@@ -93,6 +94,7 @@ fn build_evidence(
         final_url: Some(page.get_url_final().to_string()),
         retrieved_at: page.get_retrieved_at(),
         status_code: Some(page.status_code.as_u16()),
+        observed_status_code: page.observed_status_code.map(|status| status.as_u16()),
         content_type,
         detected_content_type,
         response_body_hash,
@@ -1114,8 +1116,17 @@ mod tests {
         body: &[u8],
         content_type: &str,
     ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        localhost_status_server(body, content_type, "200 OK")
+    }
+
+    fn localhost_status_server(
+        body: &[u8],
+        content_type: &str,
+        status: &str,
+    ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
         let body = body.to_vec();
         let content_type = content_type.to_owned();
+        let status = status.to_owned();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
@@ -1128,7 +1139,7 @@ mod tests {
                         let mut request = [0_u8; 2048];
                         let _ = stream.read(&mut request);
                         let headers = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         stream.write_all(headers.as_bytes()).unwrap();
@@ -1248,6 +1259,65 @@ mod tests {
 
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "localhost socket acceptance; run explicitly where loopback bind is permitted"]
+    async fn localhost_empty_writer_integrity_and_observed_status_acceptance() {
+        for (status_line, observed) in [("200 OK", 200), ("204 No Content", 204)] {
+            let (url, stop, handle) =
+                localhost_status_server(b"", "text/plain; charset=utf-8", status_line);
+
+            let evidence_json = run(ScrapeParams {
+                url: url.clone(),
+                return_format: Some("raw".into()),
+                headless: Some(false),
+                wait_for: None,
+                wait_for_delay_ms: None,
+                wait_for_idle_network: None,
+                user_agent: None,
+                cookie: None,
+                proxy: None,
+                evidence: Some(true),
+            })
+            .await
+            .unwrap();
+            let evidence: serde_json::Value = serde_json::from_str(&evidence_json).unwrap();
+            assert_eq!(evidence["status_code"], 504);
+            assert_eq!(evidence["observed_status_code"], observed);
+            assert_eq!(
+                evidence["response_body_hash"],
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            );
+            assert!(evidence["retrieved_at"].as_u64().is_some());
+
+            let legacy_json = run(ScrapeParams {
+                url,
+                return_format: Some("raw".into()),
+                headless: Some(false),
+                wait_for: None,
+                wait_for_delay_ms: None,
+                wait_for_idle_network: None,
+                user_agent: None,
+                cookie: None,
+                proxy: None,
+                evidence: Some(false),
+            })
+            .await
+            .unwrap();
+            let legacy: serde_json::Value = serde_json::from_str(&legacy_json).unwrap();
+            let mut keys = legacy
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort();
+            assert_eq!(keys, ["content", "links", "status_code", "url"]);
+
+            stop.store(true, Ordering::Relaxed);
+            handle.join().unwrap();
+        }
     }
 
     #[tokio::test]

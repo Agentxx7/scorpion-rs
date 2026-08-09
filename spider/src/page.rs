@@ -2423,6 +2423,8 @@ pub struct Page {
     pub cookies: Option<reqwest::header::HeaderMap>,
     /// The status code of the page request.
     pub status_code: StatusCode,
+    /// Status actually observed from a response or trusted relay.
+    pub observed_status_code: Option<StatusCode>,
     #[cfg(not(feature = "page_error_status_details"))]
     /// The error of the request if any.
     pub error_status: Option<String>,
@@ -2587,6 +2589,8 @@ pub struct Page {
     pub cookies: Option<reqwest::header::HeaderMap>,
     /// The status code of the page request.
     pub status_code: StatusCode,
+    /// Status actually observed from a response or trusted relay.
+    pub observed_status_code: Option<StatusCode>,
     /// The error of the request if any.
     pub error_status: Option<String>,
     /// The current links for the page.
@@ -3644,6 +3648,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
             #[cfg(feature = "time")]
             duration: res.duration,
             status_code: res.status_code,
+            observed_status_code: res.observed_status_code,
             error_status: get_error_status(&mut should_retry, res.error_for_status, status),
             final_redirect_destination: if empty_page { None } else { res.final_url },
             #[cfg(feature = "chrome")]
@@ -3752,6 +3757,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
         #[cfg(feature = "time")]
         duration: res.duration,
         status_code: res.status_code,
+        observed_status_code: res.observed_status_code,
         error_status: get_error_status(&mut should_retry, res.error_for_status, status),
         final_redirect_destination: if empty_page { None } else { res.final_url },
         #[cfg(feature = "chrome")]
@@ -3813,6 +3819,7 @@ pub fn build(_: &str, res: PageResponse) -> Page {
         cookies: res.cookies,
         final_redirect_destination: res.final_url,
         status_code: res.status_code,
+        observed_status_code: res.observed_status_code,
         metadata: res.metadata,
         spawn_pages: res.spawn_pages,
         content_truncated: res.content_truncated,
@@ -4986,11 +4993,9 @@ impl Page {
                         response.0.signature = Some(hash_html(&collected_bytes).await);
                     }
 
-                    response.0.content = if collected_bytes.is_empty() {
-                        None
-                    } else {
-                        Some(collected_bytes)
-                    };
+                    response.0.content = Some(collected_bytes);
+                    response.0.retrieved_at =
+                        crate::utils::retrieval_timestamp_for_content(&response.0.content);
 
                     if r_settings.ssg_build {
                         if let Some(ssg_map) = ssg_map {
@@ -5215,11 +5220,7 @@ impl Page {
                             response.0.signature = Some(hash_html(&collected_bytes).await);
                         }
 
-                        response.0.content = if collected_bytes.is_empty() {
-                            None
-                        } else {
-                            Some(collected_bytes)
-                        };
+                        response.0.content = Some(collected_bytes);
                         // The streaming writer returns metadata first; this is
                         // the seam where its PageResponse representation is
                         // actually established for the live HTTP fetch.
@@ -12025,6 +12026,23 @@ async fn test_confirm_tunnel_failure_with_local_dns_resolved_keeps_503() {
     );
 }
 
+#[cfg(not(feature = "decentralized"))]
+#[test]
+fn observed_empty_200_survives_effective_504_reclassification() {
+    let page = build(
+        "https://example.test/",
+        PageResponse {
+            content: Some(Vec::new()),
+            status_code: StatusCode::OK,
+            observed_status_code: Some(StatusCode::OK),
+            ..Default::default()
+        },
+    );
+    assert_eq!(page.status_code, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(page.observed_status_code, Some(StatusCode::OK));
+    assert_eq!(page.get_bytes(), Some([].as_slice()));
+}
+
 /// Chrome-side counterpart: a chrome-rendered error page with errorCode
 /// `ERR_TUNNEL_CONNECTION_FAILED` + an unresolvable `.invalid` host must
 /// upgrade to 525 (permanent) and clear `should_retry` so the chrome
@@ -12236,6 +12254,7 @@ async fn test_confirm_chrome_tunnel_failure_504_nxdomain_upgrades_to_525() {
     // Empty body shape — exactly what triggers the empty-200 reclass.
     let mut page = Page::default();
     page.status_code = StatusCode::from_u16(504).unwrap();
+    page.observed_status_code = Some(StatusCode::OK);
     page.should_retry = true; // 504 is retryable per is_retryable_status
 
     confirm_chrome_tunnel_failure_with_local_dns(
@@ -12254,6 +12273,11 @@ async fn test_confirm_chrome_tunnel_failure_504_nxdomain_upgrades_to_525() {
         !page.should_retry,
         "should_retry must be cleared after 504 → 525 upgrade so chrome \
          retry loop short-circuits"
+    );
+    assert_eq!(
+        page.observed_status_code,
+        Some(StatusCode::OK),
+        "effective 504 → 525 mutation must not alter the observed 200"
     );
 }
 

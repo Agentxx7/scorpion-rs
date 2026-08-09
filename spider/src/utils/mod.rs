@@ -620,6 +620,9 @@ pub struct PageResponse {
     pub cookies: Option<reqwest::header::HeaderMap>,
     /// The status code of the request.
     pub status_code: StatusCode,
+    /// Status observed from a real response or trusted relay. Unlike
+    /// `status_code`, this never carries Spider's synthetic classifications.
+    pub observed_status_code: Option<StatusCode>,
     /// The final url destination after any redirects.
     pub final_url: Option<String>,
     /// The message of the response error if any.
@@ -1331,6 +1334,8 @@ pub struct ChromeHTTPReqRes {
     pub waf_check: bool,
     /// The HTTP status code.
     pub status_code: StatusCode,
+    /// Status observed from an actual CDP response, if one existed.
+    pub observed_status_code: Option<StatusCode>,
     /// The HTTP method of the request.
     pub method: String,
     /// The HTTP response headers for the request.
@@ -1441,6 +1446,7 @@ fn ssl_handshake_permanent_response() -> ChromeHTTPReqRes {
     ChromeHTTPReqRes {
         waf_check: false,
         status_code: *crate::page::ADDRESS_UNREACHABLE_ERROR,
+        observed_status_code: None,
         method: "GET".to_string(),
         response_headers: Default::default(),
         request_headers: Default::default(),
@@ -1486,6 +1492,7 @@ pub async fn perform_chrome_http_request(
         // valid HTTP response from Chrome.  This ensures callers see a
         // non-success status when navigation produces no response.
         let mut status_code = *crate::page::UNKNOWN_STATUS_ERROR;
+        let mut observed_status_code = None;
         let mut method = String::from("GET");
         let mut response_headers: std::collections::HashMap<String, String> =
             std::collections::HashMap::default();
@@ -1581,8 +1588,9 @@ pub async fn perform_chrome_http_request(
                             }
                         }
 
-                        status_code = StatusCode::from_u16(response.status as u16)
-                            .unwrap_or(StatusCode::EXPECTATION_FAILED);
+                        observed_status_code = StatusCode::from_u16(response.status as u16).ok();
+                        status_code =
+                            observed_status_code.unwrap_or(StatusCode::EXPECTATION_FAILED);
                     } else if let Some(failure_text) = &http_request.failure_text {
                         if failure_text == "net::ERR_FAILED" {
                             waf_check = true;
@@ -1611,6 +1619,7 @@ pub async fn perform_chrome_http_request(
         Ok(ChromeHTTPReqRes {
             waf_check,
             status_code,
+            observed_status_code,
             method,
             response_headers,
             request_headers,
@@ -1659,6 +1668,7 @@ pub async fn perform_chrome_http_request(
                 return Ok(ChromeHTTPReqRes {
                     waf_check: false,
                     status_code: *crate::page::TOO_MANY_REDIRECTS_ERROR,
+                    observed_status_code: None,
                     method: "GET".to_string(),
                     response_headers: Default::default(),
                     request_headers: Default::default(),
@@ -1691,6 +1701,7 @@ pub async fn perform_chrome_http_request_cache(
     ) -> Result<ChromeHTTPReqRes, chromiumoxide::error::CdpError> {
         let mut waf_check = false;
         let mut status_code = *crate::page::UNKNOWN_STATUS_ERROR;
+        let mut observed_status_code = None;
         let mut method = String::from("GET");
         let mut response_headers: std::collections::HashMap<String, String> =
             std::collections::HashMap::default();
@@ -1796,8 +1807,8 @@ pub async fn perform_chrome_http_request_cache(
                         }
                     }
 
-                    status_code = StatusCode::from_u16(response.status as u16)
-                        .unwrap_or(StatusCode::EXPECTATION_FAILED);
+                    observed_status_code = StatusCode::from_u16(response.status as u16).ok();
+                    status_code = observed_status_code.unwrap_or(StatusCode::EXPECTATION_FAILED);
                 } else if let Some(failure_text) = &http_request.failure_text {
                     if failure_text == "net::ERR_FAILED" {
                         waf_check = true;
@@ -1818,6 +1829,7 @@ pub async fn perform_chrome_http_request_cache(
         Ok(ChromeHTTPReqRes {
             waf_check,
             status_code,
+            observed_status_code,
             method,
             response_headers,
             request_headers,
@@ -1887,6 +1899,7 @@ pub async fn perform_chrome_http_request_cache(
                 return Ok(ChromeHTTPReqRes {
                     waf_check: false,
                     status_code: *crate::page::TOO_MANY_REDIRECTS_ERROR,
+                    observed_status_code: None,
                     method: "GET".to_string(),
                     response_headers: Default::default(),
                     request_headers: Default::default(),
@@ -5496,6 +5509,8 @@ pub async fn fetch_page_html_chrome_base<'h>(
                         set_page_response_headers(&mut chrome_http_req_res1, &mut page_response);
 
                         page_response.status_code = chrome_http_req_res1.status_code;
+                        page_response.observed_status_code =
+                            chrome_http_req_res1.observed_status_code;
                         page_response.waf_check = chrome_http_req_res1.waf_check;
 
                         #[cfg(feature = "cache_request")]
@@ -5523,6 +5538,7 @@ pub async fn fetch_page_html_chrome_base<'h>(
 
     set_page_response_headers(&mut chrome_http_req_res, &mut page_response);
     page_response.status_code = chrome_http_req_res.status_code;
+    page_response.observed_status_code = chrome_http_req_res.observed_status_code;
     page_response.waf_check = chrome_http_req_res.waf_check;
 
     // Under `balance + !decentralized`, a pre-spooled page carries its
@@ -6372,6 +6388,7 @@ pub async fn handle_response_bytes(
                 content: None,
                 final_url: rd,
                 status_code,
+                observed_status_code: Some(status_code),
                 anti_bot_tech,
                 ..Default::default()
             };
@@ -6400,6 +6417,7 @@ pub async fn handle_response_bytes(
                     content: None,
                     final_url: rd,
                     status_code,
+                    observed_status_code: Some(status_code),
                     anti_bot_tech,
                     ..Default::default()
                 };
@@ -6503,6 +6521,7 @@ pub async fn handle_response_bytes(
         retrieved_at,
         final_url: rd,
         status_code,
+        observed_status_code: Some(status_code),
         anti_bot_tech,
         content_truncated,
         ..Default::default()
@@ -6635,6 +6654,7 @@ where
             is_valid_utf8: utf8_state.finish(Some(&collected_bytes[..])),
             final_url,
             status_code,
+            observed_status_code: Some(status_code),
             anti_bot_tech,
             content_truncated,
             ..Default::default()
@@ -6669,7 +6689,9 @@ pub(crate) async fn build_error_page_response(target_url: &str, err: RequestErro
     log::info!("error fetching {}", target_url);
 
     let mut page_response = PageResponse::default();
-    let initial_status = if let Some(status_code) = err.status() {
+    let observed_status = err.status();
+    page_response.observed_status_code = observed_status;
+    let initial_status = if let Some(status_code) = observed_status {
         status_code
     } else {
         crate::page::get_error_http_status_code(&err)
@@ -6744,6 +6766,7 @@ pub async fn handle_engine_response_bytes(
                     content: None,
                     final_url: rd,
                     status_code,
+                    observed_status_code: Some(status_code),
                     anti_bot_tech,
                     ..Default::default()
                 };
@@ -6764,6 +6787,7 @@ pub async fn handle_engine_response_bytes(
                 content: None,
                 final_url: rd,
                 status_code,
+                observed_status_code: Some(status_code),
                 anti_bot_tech: AntiBotTech::default(),
                 ..Default::default()
             };
@@ -6828,6 +6852,7 @@ pub async fn handle_engine_response_bytes(
         content,
         final_url: rd,
         status_code,
+        observed_status_code: Some(status_code),
         anti_bot_tech,
         content_truncated,
         ..Default::default()
@@ -6923,6 +6948,7 @@ where
             is_valid_utf8: utf8_state.finish(Some(&collected_bytes[..])),
             final_url,
             status_code,
+            observed_status_code: Some(status_code),
             anti_bot_tech,
             content_truncated,
             ..Default::default()
@@ -6948,6 +6974,10 @@ pub(crate) async fn build_engine_error_page_response(
     log::info!("engine error fetching {target_url}: {err}");
 
     let mut page_response = PageResponse::default();
+    page_response.observed_status_code = match &err {
+        crate::fetch_engine::EngineError::Status(code) => StatusCode::from_u16(*code).ok(),
+        _ => None,
+    };
     page_response.status_code = if err.is_proxy_tunnel() {
         crate::page::confirm_engine_tunnel_failure_with_local_dns(
             target_url,
@@ -7304,6 +7334,7 @@ pub async fn fetch_page_html_raw_conditional(
                 // 304 — content unchanged, no body to process.
                 PageResponse {
                     status_code: StatusCode::NOT_MODIFIED,
+                    observed_status_code: Some(StatusCode::NOT_MODIFIED),
                     final_url: Some(target_url.to_string()),
                     ..Default::default()
                 }
@@ -7382,6 +7413,14 @@ pub async fn fetch_page_html_raw_cached(
 /// Perform a network request to a resource extracting all content streaming.
 pub async fn fetch_page_html_raw_only_html(target_url: &str, client: &Client) -> PageResponse {
     fetch_page_html_raw_base(target_url, client, false, None, None, None).await
+}
+
+#[cfg(feature = "spider_cloud")]
+fn spider_cloud_observed_status(item: &serde_json::Value) -> Option<StatusCode> {
+    item.get("status")
+        .and_then(|value| value.as_u64())
+        .and_then(|status| u16::try_from(status).ok())
+        .and_then(|status| StatusCode::from_u16(status).ok())
 }
 
 /// Fetch a single page via the spider.cloud REST API.
@@ -7469,8 +7508,8 @@ pub async fn fetch_page_html_spider_cloud(
                                 log::warn!("spider.cloud error for {}: {}", target_url, err);
                             }
 
-                            let item_status =
-                                first.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
+                            let observed_status_code = spider_cloud_observed_status(&first);
+                            let item_status = observed_status_code.unwrap_or(StatusCode::OK);
 
                             let final_url = first
                                 .get("url")
@@ -7519,8 +7558,8 @@ pub async fn fetch_page_html_spider_cloud(
                             return PageResponse {
                                 content: Some(primary_content.into_bytes()),
                                 content_map,
-                                status_code: StatusCode::from_u16(item_status)
-                                    .unwrap_or(StatusCode::OK),
+                                status_code: item_status,
+                                observed_status_code,
                                 final_url,
                                 ..Default::default()
                             };
@@ -7531,11 +7570,13 @@ pub async fn fetch_page_html_spider_cloud(
                     PageResponse {
                         content: Some(bytes.to_vec()),
                         status_code: status,
+                        observed_status_code: Some(status),
                         ..Default::default()
                     }
                 }
                 Err(_) => PageResponse {
                     status_code: status,
+                    observed_status_code: Some(status),
                     ..Default::default()
                 },
             }
@@ -10297,13 +10338,41 @@ pub fn emit_log_shutdown(link: &str) {
 mod tests {
     use super::*;
 
+    fn localhost_response(status: u16, body: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            let reason = StatusCode::from_u16(status)
+                .ok()
+                .and_then(|value| value.canonical_reason())
+                .unwrap_or("Test");
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        (url, handle)
+    }
+
     #[test]
     fn unix_epoch_millis_helper_is_plausible_and_bounded() {
         let before = unix_epoch_millis_now().expect("current wall clock should be representable");
         let observed = unix_epoch_millis_now().expect("current wall clock should be representable");
         let after = unix_epoch_millis_now().expect("current wall clock should be representable");
         assert!(before <= observed && observed <= after);
-        assert!(observed > 1_500_000_000_000, "expected a plausible Unix-ms value");
+        assert!(
+            observed > 1_500_000_000_000,
+            "expected a plausible Unix-ms value"
+        );
     }
 
     #[test]
@@ -10335,6 +10404,154 @@ mod tests {
         )
         .await;
         assert_eq!(error.retrieved_at, None);
+    }
+
+    #[tokio::test]
+    async fn real_reqwest_statuses_are_observed() {
+        for status in [200, 204] {
+            let (url, server) = localhost_response(status, Vec::new());
+            let response = Client::new().get(&url).send().await.unwrap();
+            let page_response = handle_response_bytes(response, &url, false).await;
+            assert_eq!(page_response.status_code.as_u16(), status);
+            assert_eq!(
+                page_response
+                    .observed_status_code
+                    .map(|value| value.as_u16()),
+                Some(status)
+            );
+            assert_eq!(page_response.content.as_deref(), Some([].as_slice()));
+            assert!(page_response.retrieved_at.is_some());
+            server.join().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reqwest_error_status_is_observed_but_transport_error_is_not() {
+        for status in [404, 500] {
+            let (url, server) = localhost_response(status, Vec::new());
+            let error = Client::new()
+                .get(&url)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err();
+            let response = build_error_page_response(&url, error).await;
+            assert_eq!(
+                response.observed_status_code.map(|value| value.as_u16()),
+                Some(status)
+            );
+            server.join().unwrap();
+        }
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let error = Client::new().get(&url).send().await.unwrap_err();
+        let response = build_error_page_response(&url, error).await;
+        assert!(response.observed_status_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn engine_status_provenance_excludes_synthetic_errors() {
+        let observed = build_engine_error_page_response(
+            "https://example.test/",
+            crate::fetch_engine::EngineError::Status(429),
+        )
+        .await;
+        assert_eq!(
+            observed.observed_status_code,
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+
+        let invalid = build_engine_error_page_response(
+            "https://example.test/",
+            crate::fetch_engine::EngineError::Status(0),
+        )
+        .await;
+        assert!(invalid.observed_status_code.is_none());
+
+        for error in [
+            crate::fetch_engine::EngineError::ConnectRefused,
+            crate::fetch_engine::EngineError::Timeout,
+            crate::fetch_engine::EngineError::Other("synthetic".into()),
+        ] {
+            let response = build_engine_error_page_response("https://example.test/", error).await;
+            assert!(response.observed_status_code.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_real_response_status_is_observed() {
+        let response = handle_engine_response_bytes(
+            crate::fetch_engine::EngineResponse {
+                status_code: StatusCode::OK,
+                body: Vec::new(),
+                ..Default::default()
+            },
+            "https://example.test/",
+            false,
+        )
+        .await;
+        assert_eq!(response.observed_status_code, Some(StatusCode::OK));
+    }
+
+    #[test]
+    fn synthetic_and_cache_statuses_are_not_observed() {
+        assert!(
+            build_first_byte_timeout_page_response("https://example.test/")
+                .observed_status_code
+                .is_none()
+        );
+        assert!(
+            build_cached_html_page_response("https://example.test/", "cached".into())
+                .observed_status_code
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "chrome")]
+    #[test]
+    fn synthetic_chrome_statuses_are_not_observed() {
+        let unknown = ChromeHTTPReqRes {
+            status_code: *crate::page::UNKNOWN_STATUS_ERROR,
+            ..Default::default()
+        };
+        assert_eq!(unknown.status_code.as_u16(), 599);
+        assert!(unknown.observed_status_code.is_none());
+
+        let ssl = ssl_handshake_permanent_response();
+        assert!(ssl.observed_status_code.is_none());
+    }
+
+    #[cfg(feature = "spider_cloud")]
+    #[test]
+    fn spider_cloud_status_requires_valid_explicit_field() {
+        assert_eq!(
+            spider_cloud_observed_status(&serde_json::json!({"status": 201})),
+            Some(StatusCode::CREATED)
+        );
+        assert!(spider_cloud_observed_status(&serde_json::json!({})).is_none());
+        assert!(spider_cloud_observed_status(&serde_json::json!({"status": 0})).is_none());
+        assert!(spider_cloud_observed_status(&serde_json::json!({"status": "200"})).is_none());
+    }
+
+    #[cfg(feature = "etag_cache")]
+    #[tokio::test]
+    async fn conditional_real_304_is_observed() {
+        let (url, server) = localhost_response(304, Vec::new());
+        let response = fetch_page_html_raw_conditional(
+            &url,
+            &Client::new(),
+            &crate::utils::etag_cache::ETagCache::new(),
+        )
+        .await;
+        assert_eq!(response.status_code, StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            response.observed_status_code,
+            Some(StatusCode::NOT_MODIFIED)
+        );
+        server.join().unwrap();
     }
 
     /// The rebalance pause must be claimable at most once per `REBALANCE_TIME`

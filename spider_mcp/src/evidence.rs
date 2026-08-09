@@ -34,8 +34,12 @@ pub struct EvidenceBundle {
     /// that canonical completion time was not captured (including cache and
     /// error paths). This is not a server timestamp or request-start time.
     pub retrieved_at: Option<u64>,
-    /// HTTP status code of the response.
+    /// Spider's effective/crawler status after existing operational
+    /// reclassification and retry policy.
     pub status_code: Option<u16>,
+    /// HTTP status actually observed from a response or trusted relay. This
+    /// remains independent of Spider's effective/crawler `status_code`.
+    pub observed_status_code: Option<u16>,
     /// The response's `Content-Type` header, verbatim, when present.
     pub content_type: Option<String>,
     /// MIME type detected directly from the retained non-browser HTTP
@@ -98,6 +102,7 @@ mod tests {
         for field in [
             "final_url",
             "retrieved_at",
+            "observed_status_code",
             "content_type",
             "detected_content_type",
             "response_body_hash",

@@ -114,6 +114,7 @@ enum AutoRoute {
     Json(String),
     Xml(String),
     Text(String),
+    Pdf,
 }
 
 fn declared_mime(content_type: Option<&str>) -> Option<String> {
@@ -151,11 +152,7 @@ fn route_auto_http(bytes: &[u8], content_type: Option<&str>) -> Result<AutoRoute
             "text/xml" | "application/xml" => std::str::from_utf8(bytes)
                 .map(|text| AutoRoute::Xml(text.to_owned()))
                 .map_err(|_| auto_error(content_type, detected, "detected XML is not valid UTF-8")),
-            "application/pdf" => Err(auto_error(
-                content_type,
-                detected,
-                "PDF text extraction is not available",
-            )),
+            "application/pdf" => Ok(AutoRoute::Pdf),
             mime if mime.starts_with("image/") => Err(auto_error(
                 content_type,
                 detected,
@@ -261,7 +258,54 @@ fn transform_page(page: &spider::page::Page, return_format: ReturnFormat) -> Str
     )
 }
 
-fn auto_content(page: &spider::page::Page, used_browser: bool) -> Result<String, String> {
+/// Extract a complete PDF in memory on Tokio's blocking pool. `pdf-extract`
+/// is synchronous and CPU-bound; timeout/admission control belongs to a later
+/// resource-control frontier. Parser panics are contained inside the worker.
+async fn extract_pdf_text(
+    bytes: &[u8],
+    content_type: Option<&str>,
+    detected_content_type: Option<&str>,
+) -> Result<String, String> {
+    let owned_bytes = bytes.to_vec();
+    let extraction = tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pdf_extract::extract_text_from_mem_by_pages(&owned_bytes)
+        }))
+    })
+    .await
+    .map_err(|_| {
+        auto_error(
+            content_type,
+            detected_content_type,
+            "PDF extraction worker did not complete",
+        )
+    })?;
+
+    match extraction {
+        Ok(Ok(pages)) => {
+            // Separator-only output is not textual content. Normalize only
+            // the all-pages-empty case; otherwise preserve every page string
+            // exactly and use Scorpion's explicit two-newline separator.
+            if pages.iter().all(String::is_empty) {
+                Ok(String::new())
+            } else {
+                Ok(pages.join("\n\n"))
+            }
+        }
+        Ok(Err(_)) => Err(auto_error(
+            content_type,
+            detected_content_type,
+            "PDF text extraction failed",
+        )),
+        Err(_) => Err(auto_error(
+            content_type,
+            detected_content_type,
+            "PDF text extraction failed because the parser panicked",
+        )),
+    }
+}
+
+async fn auto_content(page: &spider::page::Page, used_browser: bool) -> Result<String, String> {
     // The browser path intentionally operates on Chromium's rendered DOM. It
     // does not claim to identify or retain the original resource MIME/bytes.
     if used_browser {
@@ -278,6 +322,9 @@ fn auto_content(page: &spider::page::Page, used_browser: bool) -> Result<String,
     match route_auto_http(bytes, page_content_type(page))? {
         AutoRoute::Markdown => Ok(transform_page(page, ReturnFormat::Markdown)),
         AutoRoute::Json(text) | AutoRoute::Xml(text) | AutoRoute::Text(text) => Ok(text),
+        AutoRoute::Pdf => {
+            extract_pdf_text(bytes, page_content_type(page), Some("application/pdf")).await
+        }
     }
 }
 
@@ -344,7 +391,7 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
 
     while let Ok(page) = rx.recv().await {
         let content_result = if wants_auto {
-            auto_content(&page, used_browser)
+            auto_content(&page, used_browser).await
         } else {
             Ok(transform_page(&page, ReturnFormat::from_str(format_str)))
         };
@@ -445,13 +492,8 @@ mod auto_router_tests {
     }
 
     #[test]
-    fn auto_rejects_pdf_png_mp4_and_unknown_binary() {
+    fn auto_rejects_png_mp4_and_unknown_binary() {
         let cases: &[(&[u8], Option<&str>, Option<&str>)] = &[
-            (
-                b"%PDF-1.7\nbody",
-                Some("text/html"),
-                Some("application/pdf"),
-            ),
             (b"\x89PNG\r\n\x1a\nbytes", None, Some("image/png")),
             (
                 b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom",
@@ -492,12 +534,15 @@ mod auto_router_tests {
 
     #[test]
     fn byte_signature_takes_precedence_without_mutating_declared_signal() {
-        let error = error_value(route_auto_http(
-            b"%PDF-1.7\nbody",
-            Some("application/json; charset=utf-8"),
-        ));
-        assert_eq!(error["content_type"], "application/json; charset=utf-8");
-        assert_eq!(error["detected_content_type"], "application/pdf");
+        let bytes = b"%PDF-1.7\nbody";
+        assert_eq!(
+            infer::get(bytes).map(|kind| kind.mime_type()),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            route_auto_http(bytes, Some("application/json; charset=utf-8")).unwrap(),
+            AutoRoute::Pdf
+        );
     }
 
     #[test]
@@ -537,6 +582,114 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    /// Build a small, deterministic, uncompressed PDF without external files.
+    /// Each input is the complete content stream for one page.
+    fn pdf_fixture(page_streams: &[&str]) -> Vec<u8> {
+        let page_count = page_streams.len();
+        let font_id = 3 + page_count * 2;
+        let page_ids = (0..page_count).map(|index| 3 + index).collect::<Vec<_>>();
+        let content_ids = (0..page_count)
+            .map(|index| 3 + page_count + index)
+            .collect::<Vec<_>>();
+
+        let mut objects = Vec::<(usize, Vec<u8>)>::new();
+        objects.push((1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()));
+        objects.push((
+            2,
+            format!(
+                "<< /Type /Pages /Kids [{}] /Count {} >>",
+                page_ids
+                    .iter()
+                    .map(|id| format!("{id} 0 R"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                page_count
+            )
+            .into_bytes(),
+        ));
+        for (page_id, content_id) in page_ids.iter().zip(&content_ids) {
+            objects.push((
+                *page_id,
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                     /Resources << /Font << /F1 {font_id} 0 R >> >> \
+                     /Contents {content_id} 0 R >>"
+                )
+                .into_bytes(),
+            ));
+        }
+        for (content_id, stream) in content_ids.iter().zip(page_streams) {
+            objects.push((
+                *content_id,
+                format!(
+                    "<< /Length {} >>\nstream\n{}\nendstream",
+                    stream.len(),
+                    stream
+                )
+                .into_bytes(),
+            ));
+        }
+        objects.push((
+            font_id,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ));
+        objects.sort_by_key(|(id, _)| *id);
+
+        let mut pdf = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        let mut offsets = vec![0usize; font_id + 1];
+        for (id, body) in objects {
+            offsets[id] = pdf.len();
+            pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+            pdf.extend_from_slice(&body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", font_id + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                font_id + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    fn text_page(text: &str) -> String {
+        // Match pdf-extract's initial text cursor so fixture output contains
+        // only the meaningful glyphs, without parser-generated leading space.
+        format!("BT\n/F1 12 Tf\n100000 792 Td\n({text}) Tj\nET")
+    }
+
+    fn encrypted_pdf_fixture() -> Vec<u8> {
+        use pdf_extract::{Document, EncryptionState, EncryptionVersion, Object, Permissions};
+
+        let source = pdf_fixture(&[&text_page("Secret")]);
+        let mut document = Document::load_mem(&source).unwrap();
+        document.trailer.set(
+            b"ID",
+            Object::Array(vec![
+                Object::string_literal("deterministic-id-one"),
+                Object::string_literal("deterministic-id-two"),
+            ]),
+        );
+        let state = EncryptionState::try_from(EncryptionVersion::V1 {
+            document: &document,
+            owner_password: "owner-password",
+            user_password: "user-password",
+            permissions: Permissions::empty(),
+        })
+        .unwrap();
+        document.encrypt(&state).unwrap();
+        let mut encrypted = Vec::new();
+        document.save_to(&mut encrypted).unwrap();
+        encrypted
+    }
 
     fn page(
         body: Option<&[u8]>,
@@ -585,38 +738,158 @@ mod tests {
         .detected_content_type
     }
 
-    #[test]
-    fn auto_html_uses_existing_markdown_transformer() {
+    #[tokio::test]
+    async fn pdf_adapter_extracts_exact_single_page_plain_text() {
+        let pdf = pdf_fixture(&[&text_page("Scorpion PDF text")]);
+        assert_eq!(
+            extract_pdf_text(&pdf, Some("application/pdf"), Some("application/pdf"))
+                .await
+                .unwrap(),
+            "Scorpion PDF text"
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_adapter_joins_pages_with_scorpion_separator() {
+        let first = text_page("First page");
+        let second = text_page("Second page");
+        let pdf = pdf_fixture(&[&first, &second]);
+        assert_eq!(
+            extract_pdf_text(&pdf, None, Some("application/pdf"))
+                .await
+                .unwrap(),
+            "First page\n\nSecond page"
+        );
+    }
+
+    #[tokio::test]
+    async fn textless_pdf_is_successful_empty_text() {
+        let pdf = pdf_fixture(&[""]);
+        let text = extract_pdf_text(&pdf, None, Some("application/pdf"))
+            .await
+            .unwrap();
+        assert_eq!(text, "");
+
+        let page = page_with_content_type(&pdf, Some("application/pdf"));
+        let evidence = build_evidence(&page, Some(text), false, false);
+        assert_eq!(evidence.content.as_deref(), Some(""));
+        assert_eq!(
+            evidence.transformed_content_hash.as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+    }
+
+    #[tokio::test]
+    async fn three_page_textless_pdf_is_successful_empty_text() {
+        let pdf = pdf_fixture(&["", "", ""]);
+        let text = extract_pdf_text(&pdf, None, Some("application/pdf"))
+            .await
+            .unwrap();
+        assert_eq!(text, "");
+        assert_ne!(text, "\n\n");
+        assert_ne!(text, "\n\n\n\n");
+
+        let page = page_with_content_type(&pdf, Some("application/pdf"));
+        let evidence = build_evidence(&page, Some(text), false, false);
+        assert_eq!(evidence.content.as_deref(), Some(""));
+        assert_eq!(
+            evidence.transformed_content_hash.as_deref(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_pdf_pages_retain_deterministic_separators() {
+        let first = text_page("First");
+        let third = text_page("Third");
+        let pdf = pdf_fixture(&[&first, "", &third]);
+        assert_eq!(
+            extract_pdf_text(&pdf, None, Some("application/pdf"))
+                .await
+                .unwrap(),
+            "First\n\n\n\nThird"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_pdf_is_contained_as_extraction_error() {
+        let error = extract_pdf_text(
+            b"%PDF-1.7\nnot a complete PDF",
+            Some("application/pdf"),
+            Some("application/pdf"),
+        )
+        .await
+        .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"], "auto_extraction_unsupported");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("PDF text extraction failed"));
+    }
+
+    #[tokio::test]
+    async fn structurally_valid_parser_panic_is_contained() {
+        // `cm` requires six operands. The PDF structure and content stream are
+        // valid, but pdf-extract 0.9.0 asserts on this operator shape.
+        let pdf = pdf_fixture(&["0 0 cm"]);
+        let error = extract_pdf_text(&pdf, None, Some("application/pdf"))
+            .await
+            .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"], "auto_extraction_unsupported");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("parser panicked"));
+    }
+
+    #[tokio::test]
+    async fn encrypted_pdf_fails_without_password() {
+        let pdf = encrypted_pdf_fixture();
+        let error = extract_pdf_text(&pdf, None, Some("application/pdf"))
+            .await
+            .unwrap_err();
+        let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"], "auto_extraction_unsupported");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("PDF text extraction failed"));
+    }
+
+    #[tokio::test]
+    async fn auto_html_uses_existing_markdown_transformer() {
         let page = page_with_content_type(
             b"<!doctype html><html><body><h1>Auto title</h1><p>Body</p></body></html>",
             Some("text/html; charset=utf-8"),
         );
-        let content = auto_content(&page, false).unwrap();
+        let content = auto_content(&page, false).await.unwrap();
         assert!(content.contains("# Auto title"));
         assert!(content.contains("Body"));
         assert!(!content.contains("<h1>"));
     }
 
-    #[test]
-    fn auto_json_and_xml_bypass_html_transformer() {
+    #[tokio::test]
+    async fn auto_json_and_xml_bypass_html_transformer() {
         let json = page_with_content_type(br#"{"z":2,"a":1}"#, Some("application/json"));
         assert_eq!(
-            auto_content(&json, false).unwrap(),
+            auto_content(&json, false).await.unwrap(),
             "{\n  \"a\": 1,\n  \"z\": 2\n}"
         );
 
         let xml_text = "<?xml version=\"1.0\"?><root><item>unchanged</item></root>";
         let xml = page_with_content_type(xml_text.as_bytes(), Some("application/xml"));
-        assert_eq!(auto_content(&xml, false).unwrap(), xml_text);
+        assert_eq!(auto_content(&xml, false).await.unwrap(), xml_text);
     }
 
-    #[test]
-    fn browser_auto_is_bounded_to_rendered_dom_markdown() {
+    #[tokio::test]
+    async fn browser_auto_is_bounded_to_rendered_dom_markdown() {
         let page = page_with_content_type(
             b"<!doctype html><html><body><h1>Rendered DOM</h1></body></html>",
             Some("application/pdf"),
         );
-        let content = auto_content(&page, true).unwrap();
+        let content = auto_content(&page, true).await.unwrap();
         assert!(content.contains("# Rendered DOM"));
 
         let evidence = build_evidence(&page, Some(content), false, true);
@@ -626,11 +899,11 @@ mod tests {
         assert!(evidence.transformed_content_hash.is_some());
     }
 
-    #[test]
-    fn unsupported_auto_returns_structured_extraction_error() {
+    #[tokio::test]
+    async fn unsupported_auto_returns_structured_extraction_error() {
         let page = page_with_content_type(b"%PDF-1.7\nbody", Some("application/pdf"));
         let error: serde_json::Value =
-            serde_json::from_str(&auto_content(&page, false).unwrap_err()).unwrap();
+            serde_json::from_str(&auto_content(&page, false).await.unwrap_err()).unwrap();
         assert_eq!(error["content_type"], "application/pdf");
         assert_eq!(error["detected_content_type"], "application/pdf");
         assert_eq!(error["error"], "auto_extraction_unsupported");
@@ -838,9 +1111,11 @@ mod tests {
     }
 
     fn localhost_server(
-        body: &'static [u8],
-        content_type: &'static str,
+        body: &[u8],
+        content_type: &str,
     ) -> (String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let body = body.to_vec();
+        let content_type = content_type.to_owned();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
@@ -857,7 +1132,7 @@ mod tests {
                             body.len()
                         );
                         stream.write_all(headers.as_bytes()).unwrap();
-                        stream.write_all(body).unwrap();
+                        stream.write_all(&body).unwrap();
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1061,6 +1336,35 @@ mod tests {
         assert_eq!(error["error"], "auto_extraction_unsupported");
         assert_eq!(error["content_type"], "text/html; charset=utf-8");
         assert_eq!(error["detected_content_type"], "application/pdf");
+
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "localhost socket acceptance; run explicitly where loopback bind is permitted"]
+    async fn localhost_auto_pdf_extraction_acceptance() {
+        let stream = text_page("Extracted localhost PDF");
+        let body = pdf_fixture(&[&stream]);
+        let (url, stop, handle) = localhost_server(&body, "application/pdf");
+
+        let evidence_json = run(localhost_auto_params(url.clone(), true)).await.unwrap();
+        let evidence: serde_json::Value = serde_json::from_str(&evidence_json).unwrap();
+        assert_eq!(evidence["content"], "Extracted localhost PDF");
+        assert_eq!(evidence["detected_content_type"], "application/pdf");
+        assert_eq!(
+            evidence["response_body_hash"],
+            format!("{:x}", Sha256::digest(&body))
+        );
+        assert_eq!(
+            evidence["transformed_content_hash"],
+            format!("{:x}", Sha256::digest(b"Extracted localhost PDF"))
+        );
+        assert!(evidence["retrieved_at"].as_u64().is_some());
+
+        let result = run(localhost_auto_params(url, false)).await.unwrap();
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(result["content"], "Extracted localhost PDF");
 
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();

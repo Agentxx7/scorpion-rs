@@ -12,6 +12,12 @@
 //! here changes crawling, fetching, or rendering behavior.
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+/// SHA-256 of exactly the supplied bytes, encoded as lowercase hexadecimal.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct EvidenceBundle {
@@ -38,6 +44,14 @@ pub struct EvidenceBundle {
     pub status_code: Option<u16>,
     /// The response's `Content-Type` header, verbatim, when present.
     pub content_type: Option<String>,
+    /// SHA-256 of the exact HTTP content-decoded response-body bytes retained
+    /// by `Page` on the non-browser HTTP scrape path. This is not a hash of
+    /// transport/wire bytes and no character normalization is applied. Always
+    /// `None` for browser/headless fetches because their `Page` bytes represent
+    /// Chromium's rendered DOM rather than an HTTP response body.
+    pub response_body_hash: Option<String>,
+    /// SHA-256 of `content.as_bytes()` exactly as returned in this bundle.
+    pub transformed_content_hash: Option<String>,
     /// Textual content in the requested format (markdown/text/raw/xml).
     /// `None` when the request was for a screenshot instead — see
     /// `screenshot`.
@@ -58,6 +72,8 @@ pub struct EvidenceBundle {
     /// captured. Kept distinct from `content` — image bytes are not
     /// textual content (SCORPION.md §9.3's `PAGE_SCREENSHOT` distinction).
     pub screenshot: Option<String>,
+    /// SHA-256 of the original captured PNG bytes, never its base64 encoding.
+    pub screenshot_hash: Option<String>,
     /// Reserved for future structured metadata. Always `None` today —
     /// nothing currently populates it honestly.
     pub metadata: Option<serde_json::Value>,
@@ -85,15 +101,22 @@ mod tests {
             "final_url",
             "retrieved_at",
             "content_type",
+            "response_body_hash",
+            "transformed_content_hash",
             "content",
             "links",
             "source",
             "provider",
             "query",
             "screenshot",
+            "screenshot_hash",
             "metadata",
         ] {
-            assert!(v[field].is_null(), "field {field} should be null, got {:?}", v[field]);
+            assert!(
+                v[field].is_null(),
+                "field {field} should be null, got {:?}",
+                v[field]
+            );
         }
     }
 
@@ -106,8 +129,14 @@ mod tests {
             final_url: Some("https://example.test/final".to_string()),
             ..Default::default()
         };
-        assert_eq!(bundle.requested_url.as_deref(), Some("https://example.test/"));
-        assert_eq!(bundle.final_url.as_deref(), Some("https://example.test/final"));
+        assert_eq!(
+            bundle.requested_url.as_deref(),
+            Some("https://example.test/")
+        );
+        assert_eq!(
+            bundle.final_url.as_deref(),
+            Some("https://example.test/final")
+        );
         assert_ne!(bundle.requested_url, bundle.final_url);
     }
 
@@ -171,5 +200,20 @@ mod tests {
         assert_eq!(bundle.retrieved_at, None);
         let v = serde_json::to_value(&bundle).unwrap();
         assert!(v["retrieved_at"].is_null());
+    }
+
+    #[test]
+    fn sha256_is_deterministic_and_byte_sensitive() {
+        let bytes = b"scorpion evidence";
+        assert_eq!(sha256_hex(bytes), sha256_hex(bytes));
+        assert_ne!(sha256_hex(bytes), sha256_hex(b"scorpion evidencf"));
+    }
+
+    #[test]
+    fn sha256_matches_known_vector_and_is_lowercase_hex() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

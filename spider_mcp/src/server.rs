@@ -30,7 +30,7 @@ impl SpiderMcpServer {
 impl SpiderMcpServer {
     #[tool(
         name = "spider_scrape",
-        description = "Fetch a web page and return its content as markdown, text, HTML, or XML. Supports Chrome rendering for JavaScript-heavy sites. Set evidence=true to instead return a structured EvidenceBundle (requested/final URL, retrieved_at, status_code, content_type, content, links, screenshot) — default output is unchanged."
+        description = "Fetch a web page and return its content as markdown, text, HTML, or XML. Supports Chrome rendering for JavaScript-heavy sites. Set evidence=true to instead return a structured EvidenceBundle with content integrity hashes. response_body_hash covers HTTP content-decoded body bytes only on the non-browser path and is null for Chrome/headless fetches; default output is unchanged."
     )]
     async fn scrape(&self, Parameters(params): Parameters<ScrapeParams>) -> Result<String, String> {
         crate::tools::scrape::run(params).await

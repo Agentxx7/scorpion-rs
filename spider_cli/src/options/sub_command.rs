@@ -122,4 +122,13 @@ pub enum Commands {
         #[clap(long)]
         language: Option<String>,
     },
+    /// Launch the canonical Spider MCP server over stdio — the same
+    /// server implementation the standalone `spider-mcp` binary runs.
+    /// Stdout is reserved for MCP protocol traffic; logs go to stderr.
+    #[cfg(feature = "mcp")]
+    MCP {
+        /// Log level (default: warn). Logs go to stderr.
+        #[clap(long, default_value = "warn")]
+        log_level: String,
+    },
 }

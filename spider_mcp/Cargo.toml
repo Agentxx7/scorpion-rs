@@ -36,6 +36,10 @@ features = ["tokio_io_std", "sync", "serde", "cookies", "evidence"]
 [dependencies.spider_transformations]
 version = "2"
 
+[lib]
+name = "spider_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "spider-mcp"
 path = "src/main.rs"

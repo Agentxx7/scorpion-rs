@@ -275,6 +275,10 @@ mod tests {
     }
 
     /// Existing commands remain parseable, unregressed by the new variants.
+    /// Argv[0] is deliberately still `"spider"` here — clap only uses it
+    /// for shell-completion/error-message purposes, never for validating
+    /// which binary is running, so this proves parsing itself is
+    /// unaffected by the binary rename in `Cargo.toml`.
     #[test]
     fn existing_commands_remain_parseable() {
         assert!(matches!(
@@ -301,5 +305,102 @@ mod tests {
                 .command,
             Some(Commands::AUTHENTICATE { .. })
         ));
+    }
+
+    /// Same proof again, but through the literal renamed binary name —
+    /// `scorpion crawl ...` etc. all parse identically.
+    #[test]
+    fn existing_commands_remain_parseable_under_scorpion_argv0() {
+        assert!(matches!(
+            Cli::try_parse_from(["scorpion", "--url", "https://example.test", "crawl"])
+                .unwrap()
+                .command,
+            Some(Commands::CRAWL { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["scorpion", "--url", "https://example.test", "scrape"])
+                .unwrap()
+                .command,
+            Some(Commands::SCRAPE { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["scorpion", "--url", "https://example.test", "download"])
+                .unwrap()
+                .command,
+            Some(Commands::DOWNLOAD { .. })
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["scorpion", "authenticate", "sk-test"])
+                .unwrap()
+                .command,
+            Some(Commands::AUTHENTICATE { .. })
+        ));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn parses_mcp_with_default_log_level() {
+        let cli = Cli::try_parse_from(["scorpion", "mcp"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::MCP { ref log_level }) if log_level == "warn"
+        ));
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn parses_mcp_with_custom_log_level() {
+        let cli = Cli::try_parse_from(["scorpion", "mcp", "--log-level", "debug"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::MCP { ref log_level }) if log_level == "debug"
+        ));
+    }
+
+    /// `mcp` does not expose any of the irrelevant crawl/discovery flags —
+    /// its arg surface is exactly `--log-level`/`-h`.
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn mcp_subcommand_exposes_only_log_level() {
+        let command = Cli::command();
+        let mcp = command
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "mcp")
+            .expect("mcp subcommand must be registered");
+        let arg_names: Vec<&str> = mcp
+            .get_arguments()
+            .map(|arg| arg.get_id().as_str())
+            .filter(|name| *name != "help")
+            .collect();
+        assert_eq!(arg_names, ["log_level"]);
+    }
+
+    /// The full canonical command tree — every command this frontier and
+    /// its predecessors established must remain reachable by name.
+    #[test]
+    fn command_tree_lists_all_canonical_commands() {
+        let command = Cli::command();
+        let names: Vec<&str> = command
+            .get_subcommands()
+            .map(|sub| sub.get_name())
+            .collect();
+
+        for expected in ["crawl", "scrape", "download", "authenticate"] {
+            assert!(names.contains(&expected), "missing {expected}: {names:?}");
+        }
+        #[cfg(feature = "fetch")]
+        assert!(names.contains(&"fetch"), "{names:?}");
+        #[cfg(feature = "feed")]
+        assert!(names.contains(&"feed"), "{names:?}");
+        #[cfg(feature = "sitemap")]
+        assert!(names.contains(&"sitemap"), "{names:?}");
+        #[cfg(feature = "news_sitemap")]
+        assert!(names.contains(&"news-sitemap"), "{names:?}");
+        #[cfg(feature = "robots_sitemap")]
+        assert!(names.contains(&"robots-sitemap"), "{names:?}");
+        #[cfg(feature = "search_searxng")]
+        assert!(names.contains(&"search"), "{names:?}");
+        #[cfg(feature = "mcp")]
+        assert!(names.contains(&"mcp"), "{names:?}");
     }
 }

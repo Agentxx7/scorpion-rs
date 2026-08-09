@@ -1,14 +1,6 @@
 extern crate env_logger;
 
 use clap::Parser;
-use rmcp::ServiceExt;
-
-mod evidence;
-mod server;
-mod state;
-mod tools;
-
-use server::SpiderMcpServer;
 
 #[derive(Parser)]
 #[command(name = "spider-mcp", about = "MCP server for Spider web crawler")]
@@ -27,10 +19,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .target(env_logger::Target::Stderr)
         .init();
 
-    let server = SpiderMcpServer::new();
-    let transport = (tokio::io::stdin(), tokio::io::stdout());
-
-    server.serve(transport).await?.waiting().await?;
-
-    Ok(())
+    spider_mcp::serve_stdio().await
 }

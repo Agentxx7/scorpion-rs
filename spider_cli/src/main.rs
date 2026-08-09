@@ -32,6 +32,8 @@ pub mod build_folders;
     feature = "robots_sitemap"
 ))]
 pub mod discovery;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod oauth;
 pub mod options;
 #[cfg(feature = "search_searxng")]
@@ -227,6 +229,25 @@ async fn print_discovery_result(result: Result<String, String>) {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // `scorpion mcp` owns logger initialization via its own `--log-level`
+    // — checked here, before the generic `--verbose` block below, so
+    // `--verbose` can never install a competing logger first (a logger
+    // can only be initialized once per process; whichever caller gets
+    // there first wins, silently locking out the other). Handled early
+    // like AUTHENTICATE/discovery/search: it takes no `url`, builds no
+    // `Website`, and does not go through `print_discovery_result` — there
+    // is no single JSON result to print, stdout belongs to the MCP
+    // protocol for the server's entire lifetime, and a normal exit (the
+    // client closing the connection) is not an error.
+    #[cfg(feature = "mcp")]
+    if let Some(Commands::MCP { log_level }) = &cli.command {
+        if let Err(message) = mcp::run(log_level).await {
+            eprintln!("Error: {message}");
+            std::process::exit(2);
+        }
+        return;
+    }
 
     if cli.verbose {
         use env_logger::Env;
@@ -677,10 +698,11 @@ async fn main() {
                     feature = "sitemap",
                     feature = "news_sitemap",
                     feature = "robots_sitemap",
-                    feature = "search_searxng"
+                    feature = "search_searxng",
+                    feature = "mcp"
                 ))]
                 Some(_) => unreachable!(
-                    "discovery/fetch commands return early, before this match"
+                    "discovery/fetch/mcp commands return early, before this match"
                 ),
                 None => ()
             }

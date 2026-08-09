@@ -4,13 +4,13 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 
-fn spider() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_spider"))
+fn scorpion() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_scorpion"))
 }
 
 #[test]
 fn missing_configuration_and_provider_failure_use_stderr_and_nonzero_exit() {
-    let missing = spider()
+    let missing = scorpion()
         .args(["search", "query", "--provider", "searxng"])
         .output()
         .unwrap();
@@ -18,7 +18,7 @@ fn missing_configuration_and_provider_failure_use_stderr_and_nonzero_exit() {
     assert!(missing.stdout.is_empty());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("base_url"));
 
-    let unreachable = spider()
+    let unreachable = scorpion()
         .args([
             "search",
             "query",
@@ -53,7 +53,7 @@ fn zero_results_are_json_stdout_with_one_provider_request() {
         request
     });
 
-    let output = spider()
+    let output = scorpion()
         .args([
             "search",
             "zero result query",

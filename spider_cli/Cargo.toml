@@ -44,13 +44,22 @@ features = ["tokio_io_std", "sync", "serde", "cookies"]
 [dependencies.spider_transformations]
 version = "2"
 
+# Only pulled in when the `mcp` feature is selected — `scorpion mcp` reuses
+# the exact same canonical server implementation `spider-mcp` runs, via
+# spider_mcp's own library seam (`spider_mcp::serve_stdio`). No tool
+# registration or server logic is duplicated here.
+[dependencies.spider_mcp]
+version = "2"
+path = "../spider_mcp"
+optional = true
+
 [[bin]]
-name = "spider"
+name = "scorpion"
 path = "src/main.rs"
 doc = false
 
 [features]
-default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap", "search_searxng"]
+default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap", "search_searxng", "mcp"]
 # Evidence-first single-resource acquisition (`spider fetch <url>`).
 fetch = ["spider/evidence"]
 feed = ["spider/feed", "spider/evidence"]
@@ -58,6 +67,11 @@ sitemap = ["spider/sitemap", "spider/evidence"]
 news_sitemap = ["spider/news_sitemap", "spider/evidence"]
 robots_sitemap = ["spider/robots_sitemap", "spider/evidence"]
 search_searxng = ["spider/search_searxng"]
+# `scorpion mcp` — launches the canonical Spider MCP server in-process,
+# with spider_mcp's own default tool surface (chrome, search_searxng,
+# feed/sitemap/news_sitemap/robots_sitemap, spider_cloud) intact, so it is
+# genuinely the same server `spider-mcp` runs, not a reduced one.
+mcp = ["dep:spider_mcp"]
 spider_cloud = ["spider/spider_cloud"]
 warc = ["spider/warc"]
 jemalloc = ["tikv-jemallocator"]

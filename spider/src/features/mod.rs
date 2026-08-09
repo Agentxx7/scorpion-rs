@@ -51,6 +51,9 @@ pub mod sitemap;
 /// Google News Sitemap parsing and normalization.
 #[cfg(feature = "news_sitemap")]
 pub mod news_sitemap;
+/// robots.txt `Sitemap:` directive discovery.
+#[cfg(feature = "robots_sitemap")]
+pub mod robots_sitemap;
 /// Generic source-discovery vocabulary.
 pub mod source;
 

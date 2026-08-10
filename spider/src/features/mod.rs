@@ -66,6 +66,9 @@ pub mod feed;
 /// Provider-native GitHub repository discovery through the official REST API.
 #[cfg(feature = "source_github")]
 pub mod github_source_provider;
+/// Provider-native Hugging Face model discovery through the official Hub API.
+#[cfg(feature = "source_hugging_face")]
+pub mod hugging_face_source_provider;
 /// Google News Sitemap parsing and normalization.
 #[cfg(feature = "news_sitemap")]
 pub mod news_sitemap;

@@ -42,6 +42,15 @@ pub mod gemini_common;
 /// Solve all.
 pub mod solvers;
 
+/// Binds a validated `DiscoveryTarget` to Scorpion's existing canonical
+/// acquisition/transport request vocabulary (`AcquisitionOptions` /
+/// `TransportRequest`) — the smallest seam between planning and a
+/// caller's own, separate execution. Zero acquisition; terminates in an
+/// `AcquisitionBinding`, never itself executable. Requires the
+/// `evidence` feature (the same feature the vocabulary it binds into
+/// already requires); does not require `transport_tor`.
+#[cfg(feature = "evidence")]
+pub mod acquisition_binding;
 /// `DiscoveryTarget`: the smallest canonical planning boundary for
 /// discovery pointers (sitemap index child sitemaps, robots.txt-declared
 /// sitemaps, caller/request-supplied URLs) — URLs to acquire *later*,

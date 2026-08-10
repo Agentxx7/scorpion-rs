@@ -593,11 +593,70 @@ pub fn build_first_byte_timeout_page_response(target_url: &str) -> PageResponse 
     resp
 }
 
+/// Whether a [`PageResponse`] represents bytes that actually crossed the
+/// network for this call, or a response synthesized from an existing
+/// local representation (disk/mem cache, a seeded/pre-supplied resource,
+/// or any other non-network origin) that never dialed the target.
+///
+/// This is the single, central origin signal [`crate::page::build`]
+/// consults to decide whether to stamp
+/// [`crate::features::transport::AcquisitionTransport`] from the ambient
+/// [`crate::features::transport::ACQUISITION_TRANSPORT_SCOPE`] — the
+/// scope reflects "what transport this crawl/task is configured for", not
+/// "did this specific response touch the network", so without this signal
+/// a cache hit served inside a `Default`- or (structurally, today,
+/// unreachable) `Tor`-scoped crawl would be stamped as if it had. Kept
+/// deliberately narrow: only this yes/no distinction, nothing about which
+/// cache backend or how the bytes were retrieved — see `Page::transport`
+/// and `Page::build`'s doc comments for the full contract this feeds.
+///
+/// **Fail-safe default.** `NonNetwork` is the `#[default]` variant —
+/// deliberately the *opposite* of what the name-ordering might suggest.
+/// Omitting `origin` (any `PageResponse { .., ..Default::default() }`
+/// literal that doesn't name it) can therefore never be silently
+/// misread as network acquisition; only an explicit, deliberate
+/// `origin: AcquisitionOrigin::Network` at one of the small number of
+/// canonical network-response constructors (`handle_response_bytes`,
+/// `handle_response_bytes_writer`, `handle_engine_response_bytes`,
+/// `handle_engine_response_bytes_writer`, `fetch_page_html_chrome_base`,
+/// [`fetch_page_html_spider_cloud`]) claims it. A future producer that
+/// forgets to mark itself simply stays provenance-`None` on `Page` — safe
+/// by construction, never a false `Some(Default)`/`Some(Tor)`.
+///
+/// `pub` (not `pub(crate)`) purely so external-crate `PageResponse { ...,
+/// ..Default::default() }` struct-literal construction — already used by
+/// `spider_mcp`'s and `spider_cli`'s own test fixtures — keeps compiling;
+/// every other `PageResponse` field is `pub` for the same reason. This
+/// does not widen the actual provenance contract: an external caller
+/// omitting `origin` gets the same safe `NonNetwork` default as everyone
+/// else, and has no reason to claim `Network` for a `Page` it didn't
+/// genuinely fetch over the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AcquisitionOrigin {
+    /// Bytes were actually fetched over the network for this call.
+    /// Never the default — must be stamped explicitly by a canonical
+    /// network-response constructor.
+    Network,
+    /// Bytes were synthesized from an existing local representation
+    /// (disk/mem cache, a seeded resource, or any other non-network
+    /// source) — no network activity occurred for this call. The safe,
+    /// fail-closed default.
+    #[default]
+    NonNetwork,
+}
+
 /// The response of a web page.
 #[derive(Debug, Default)]
 pub struct PageResponse {
     /// The page response resource.
     pub content: Option<Vec<u8>>,
+    /// See [`AcquisitionOrigin`]. Defaults to `NonNetwork` (the
+    /// `#[default]` variant, fail-safe) — every genuine network-response
+    /// constructor explicitly overrides it to `Network`; nothing needs to
+    /// (or should) explicitly set `NonNetwork`, though
+    /// [`build_cached_html_page_response`] still does so for clarity at
+    /// its call sites.
+    pub origin: AcquisitionOrigin,
     /// Unix epoch milliseconds when a live fetch finished materializing the
     /// representation carried by this response. `None` for responses without
     /// a materialized representation and for paths without canonical timing.
@@ -3954,6 +4013,55 @@ pub async fn fetch_page_html_chrome_base<'h>(
     jar: Option<&std::sync::Arc<crate::client::cookie::Jar>>,
     cache_namespace: Option<&str>,
     params: &ChromeFetchParams<'_>,
+    extract: Option<&mut crate::page::ChromeStreamingExtractor<'h>>,
+) -> Result<PageResponse, chromiumoxide::error::CdpError> {
+    // Canonical network-response constructor (Section D): reaching this
+    // function always means a real chrome navigation/content-acquisition
+    // attempt was made — never a pure disk/mem cache lookup (those are
+    // the early returns in `fetch_page_html`/`fetch_page_html_base`,
+    // *before* this function is ever called). Stamped once at this single
+    // boundary rather than at every internal return point below.
+    let mut result = fetch_page_html_chrome_base_inner(
+        source,
+        page,
+        content,
+        wait_for_navigation,
+        page_set,
+        url_target,
+        referrer,
+        max_page_bytes,
+        cache_options,
+        resp_headers,
+        chrome_intercept,
+        jar,
+        cache_namespace,
+        params,
+        extract,
+    )
+    .await;
+    if let Ok(ref mut response) = result {
+        response.origin = AcquisitionOrigin::Network;
+    }
+    result
+}
+
+#[cfg(feature = "chrome")]
+#[allow(private_interfaces, clippy::too_many_arguments)]
+async fn fetch_page_html_chrome_base_inner<'h>(
+    source: &[u8],
+    page: &chromiumoxide::Page,
+    content: bool,
+    wait_for_navigation: bool,
+    page_set: bool,
+    url_target: Option<&str>,
+    referrer: Option<String>,
+    max_page_bytes: Option<f64>,
+    cache_options: Option<CacheOptions>,
+    resp_headers: &Option<HeaderMap<HeaderValue>>,
+    chrome_intercept: &Option<&crate::features::chrome_common::RequestInterceptConfiguration>,
+    jar: Option<&std::sync::Arc<crate::client::cookie::Jar>>,
+    cache_namespace: Option<&str>,
+    params: &ChromeFetchParams<'_>,
     mut extract: Option<&mut crate::page::ChromeStreamingExtractor<'h>>,
 ) -> Result<PageResponse, chromiumoxide::error::CdpError> {
     let wait_for = params.wait_for;
@@ -6336,7 +6444,26 @@ pub(crate) fn valid_parsing_status_code(status: StatusCode) -> bool {
 }
 
 /// Handle the response bytes
+/// Canonical network-response constructor (Section D of the
+/// origin/default final-fix frontier): `res: Response` only exists here
+/// because a real `client.get(url).send()` already completed, so every
+/// value this produces — success, truncated, oversized, error-status,
+/// whatever internal branch — genuinely represents network-acquired
+/// bytes. Stamping `origin = Network` once at this single boundary
+/// (rather than at each of [`handle_response_bytes_inner`]'s several
+/// internal return points) is deliberately the smallest possible fix per
+/// this frontier's own guidance.
 pub async fn handle_response_bytes(
+    res: Response,
+    target_url: &str,
+    only_html: bool,
+) -> PageResponse {
+    let mut response = handle_response_bytes_inner(res, target_url, only_html).await;
+    response.origin = AcquisitionOrigin::Network;
+    response
+}
+
+async fn handle_response_bytes_inner(
     res: Response,
     target_url: &str,
     only_html: bool,
@@ -6532,8 +6659,29 @@ pub async fn handle_response_bytes(
     }
 }
 
-/// Handle the response bytes writing links while crawling
+/// Handle the response bytes writing links while crawling.
+///
+/// Same canonical-constructor stamping rationale as
+/// [`handle_response_bytes`]: `res: Response` here is only ever a real
+/// completed network response.
 pub async fn handle_response_bytes_writer<'h, O>(
+    res: Response,
+    target_url: &str,
+    only_html: bool,
+    rewriter: &mut HtmlRewriter<'h, O>,
+    collected_bytes: &mut Vec<u8>,
+) -> (PageResponse, bool)
+where
+    O: OutputSink + Send + 'static,
+{
+    let (mut response, rewrite_error) =
+        handle_response_bytes_writer_inner(res, target_url, only_html, rewriter, collected_bytes)
+            .await;
+    response.origin = AcquisitionOrigin::Network;
+    (response, rewrite_error)
+}
+
+async fn handle_response_bytes_writer_inner<'h, O>(
     res: Response,
     target_url: &str,
     only_html: bool,
@@ -6725,6 +6873,19 @@ pub async fn handle_engine_response_bytes(
     target_url: &str,
     only_html: bool,
 ) -> PageResponse {
+    let mut response = handle_engine_response_bytes_inner(resp, target_url, only_html).await;
+    response.origin = AcquisitionOrigin::Network;
+    response
+}
+
+/// Same canonical-constructor stamping rationale as
+/// [`handle_response_bytes`]: `resp: EngineResponse` here is only ever a
+/// real completed in-process-engine network response.
+async fn handle_engine_response_bytes_inner(
+    resp: crate::fetch_engine::EngineResponse,
+    target_url: &str,
+    only_html: bool,
+) -> PageResponse {
     let crate::fetch_engine::EngineResponse {
         status_code,
         final_url,
@@ -6878,6 +7039,30 @@ pub async fn handle_engine_response_bytes_writer<'h, O>(
 where
     O: OutputSink + Send + 'static,
 {
+    let (mut response, rewrite_error) = handle_engine_response_bytes_writer_inner(
+        resp,
+        target_url,
+        only_html,
+        rewriter,
+        collected_bytes,
+    )
+    .await;
+    response.origin = AcquisitionOrigin::Network;
+    (response, rewrite_error)
+}
+
+/// Same canonical-constructor stamping rationale as
+/// [`handle_response_bytes`].
+async fn handle_engine_response_bytes_writer_inner<'h, O>(
+    resp: crate::fetch_engine::EngineResponse,
+    target_url: &str,
+    only_html: bool,
+    rewriter: &mut HtmlRewriter<'h, O>,
+    collected_bytes: &mut Vec<u8>,
+) -> (PageResponse, bool)
+where
+    O: OutputSink + Send + 'static,
+{
     let crate::fetch_engine::EngineResponse {
         status_code,
         final_url,
@@ -7006,6 +7191,7 @@ pub(crate) fn build_cached_html_page_response(target_url: &str, html: String) ->
         content: Some(html.into_bytes()),
         status_code: StatusCode::OK,
         final_url: Some(target_url.to_string()),
+        origin: AcquisitionOrigin::NonNetwork,
         ..Default::default()
     }
 }
@@ -7559,12 +7745,20 @@ pub async fn fetch_page_html_spider_cloud(
                                 (s, None)
                             };
 
+                            // Section D: a real spider.cloud HTTP response
+                            // was received (`Ok(resp)` above) — this is a
+                            // genuine network acquisition, unlike the
+                            // pre-send serialization failure and the
+                            // send-itself-failed `Err(_)` arms below, which
+                            // safely keep the `NonNetwork` default (no
+                            // confirmed network round trip completed).
                             return PageResponse {
                                 content: Some(primary_content.into_bytes()),
                                 content_map,
                                 status_code: item_status,
                                 observed_status_code,
                                 final_url,
+                                origin: AcquisitionOrigin::Network,
                                 ..Default::default()
                             };
                         }
@@ -7575,12 +7769,14 @@ pub async fn fetch_page_html_spider_cloud(
                         content: Some(bytes.to_vec()),
                         status_code: status,
                         observed_status_code: Some(status),
+                        origin: AcquisitionOrigin::Network,
                         ..Default::default()
                     }
                 }
                 Err(_) => PageResponse {
                     status_code: status,
                     observed_status_code: Some(status),
+                    origin: AcquisitionOrigin::Network,
                     ..Default::default()
                 },
             }
@@ -7866,7 +8062,11 @@ pub async fn fetch_page_html<'h>(
     .await;
     let cached = cached_html.is_some();
 
-    // Skip browser entirely if cached and skip_browser mode is enabled
+    // Skip browser entirely if cached and skip_browser mode is enabled.
+    // Section D/E (origin/default final-fix frontier): no browser
+    // navigation and no network round trip happens on this path — the
+    // omitted `origin` here safely inherits `AcquisitionOrigin`'s
+    // `NonNetwork` default rather than needing an explicit reset.
     if skip_browser {
         if let Some(html) = cached_html {
             return PageResponse {
@@ -8521,7 +8721,11 @@ pub async fn fetch_page_html_base<'h>(
     };
     let cached = cached_html.is_some();
 
-    // Skip browser entirely if cached and skip_browser mode is enabled
+    // Skip browser entirely if cached and skip_browser mode is enabled.
+    // Section D/E: covers BOTH a disk/mem cache hit and a caller-seeded
+    // resource (`seeded_resource` above) — neither ever touches the
+    // network, so the omitted `origin` here safely inherits
+    // `AcquisitionOrigin`'s `NonNetwork` default.
     if skip_browser {
         if let Some(html) = cached_html {
             return PageResponse {
@@ -10096,11 +10300,32 @@ where
     // paths, `Page::build`) all see the same handle.  A single atomic
     // `Arc` clone — no mutex, no alloc.  When the caller is not inside
     // a website scope (tests, ad-hoc uses) this is a no-op.
+    //
+    // Same pattern, independently, for the current acquisition transport
+    // (`crate::features::transport::ACQUISITION_TRANSPORT_SCOPE`): a
+    // multi-page Tor crawl's worker tasks must see the same "this is Tor"
+    // signal the outer crawl body established, both so `Page::build`
+    // stamps truthful provenance and so `host_resolves_locally_cached`
+    // suppresses target-hostname DNS inside spawned fetch tasks, not just
+    // the crawl's own top-level task. The two scopes compose
+    // independently (either, both, or neither may be active) via nested
+    // `.scope()` calls rather than a shared variable, since each wraps
+    // `future` in a different concrete (unnameable) type.
+    let transport = crate::features::transport::current_acquisition_transport();
     #[cfg(feature = "balance")]
     {
         if let Some(dir) = crate::utils::html_spool::current_website_spool_dir() {
-            return set.spawn(crate::utils::html_spool::WEBSITE_SPOOL_DIR.scope(dir, future));
+            return match transport {
+                Some(t) => set.spawn(crate::utils::html_spool::WEBSITE_SPOOL_DIR.scope(
+                    dir,
+                    crate::features::transport::ACQUISITION_TRANSPORT_SCOPE.scope(t, future),
+                )),
+                None => set.spawn(crate::utils::html_spool::WEBSITE_SPOOL_DIR.scope(dir, future)),
+            };
         }
+    }
+    if let Some(t) = transport {
+        return set.spawn(crate::features::transport::ACQUISITION_TRANSPORT_SCOPE.scope(t, future));
     }
     set.spawn(future)
 }

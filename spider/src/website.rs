@@ -1483,6 +1483,11 @@ pub struct Website {
     client: Option<Client>,
     /// Round-robin client rotator for proxy rotation. Built when 2+ proxies are configured.
     client_rotator: Option<Arc<ClientRotator>>,
+    /// Explicit reason the most recent `tor_crawl_preflight` rejected a
+    /// `TransportPolicy::Tor` crawl (an unaudited combination — see that
+    /// method), if any. `None` both before any Tor crawl attempt and
+    /// after a successful one; only ever read via `last_transport_error()`.
+    last_transport_error: Option<crate::features::transport::TransportError>,
     /// Background proxy-DNS refresh task abort handle.
     /// Shared via Arc so the Website stays Clone-able; the guard aborts the task
     /// once the last clone drops it (see [`ProxyDnsAbortGuard`]).
@@ -2759,25 +2764,34 @@ impl Website {
     /// Fix the transport policy (`Default` or Tor-over-SOCKS5h) for this
     /// acquisition context. See [`crate::features::transport`].
     ///
-    /// Only the one-shot acquisition seam
-    /// (`spider::utils::evidence::fetch_single_page_with_options`) is
-    /// currently audited to honor `TransportPolicy::Tor` end to end. Every
-    /// public `Website` method that can initiate networking — the general
-    /// multi-page crawl family (`crawl`, `crawl_smart`, `crawl_raw`,
-    /// `crawl_sitemap`, `crawl_sitemap_chrome`, the `scrape*` family which
-    /// delegates to it), the send/setup/fetch-chrome family
+    /// **Audited for Tor**: the one-shot acquisition seam
+    /// (`spider::utils::evidence::fetch_single_page_with_options`), and
+    /// multi-page **raw HTTP** crawling via [`Self::crawl`]/
+    /// [`Self::crawl_raw`] — subject to [`Self::tor_crawl_preflight`]'s
+    /// validation (legacy proxy lists, a custom client/fetch engine,
+    /// Spider Cloud, parallel backends, hedge, ETag caching, and
+    /// `decentralized`/`wreq`/`cache_request` builds are all explicitly
+    /// incompatible with Tor and fail closed rather than silently running
+    /// over `Default`). [`Self::crawl`] forces the raw HTTP path under
+    /// Tor even when Chrome/WebDriver features are compiled.
+    ///
+    /// **Not audited, always fail closed under Tor**: `crawl_smart`,
+    /// `crawl_sitemap_chrome`, the send/setup/fetch-chrome family
     /// (`configure_setup`, `configure_setup_norobots`, `crawl_raw_send`,
-    /// `crawl_chrome_send`, `fetch_chrome`, `fetch_chrome_persisted`) —
-    /// builds its client through machinery this frontier has not audited
-    /// for Tor-safe behavior (legacy proxy rotation, Spider Cloud
-    /// injection, the `wreq` client stack, Chrome/smart escalation), so
-    /// calling any of them with `TransportPolicy::Tor` active fails closed
-    /// (zero requests) rather than silently crawling over `Default`
-    /// transport. This is a capability boundary, not a bug: general
-    /// multi-page Tor crawling is an explicitly out-of-scope future
-    /// frontier, not part of what this transport policy claims to support
-    /// today.
+    /// `crawl_chrome_send`, `fetch_chrome`, `fetch_chrome_persisted`,
+    /// `render_webdriver_page`, `render_chrome_page`) — Chrome/WebDriver
+    /// escalation is never audited for Tor pinning in this frontier, so
+    /// these refuse (zero requests) rather than silently crawling over
+    /// `Default` transport. This is a capability boundary, not a bug.
+    ///
+    /// Switching transport (in either direction, including `Tor` to a
+    /// *different* `Tor` endpoint) always discards any client/rotator
+    /// retained from a previous crawl on this instance — a client built
+    /// for one transport must never silently serve requests under
+    /// another.
     pub fn with_transport(&mut self, policy: TransportPolicy) -> &mut Self {
+        self.client = None;
+        self.client_rotator = None;
         self.configuration.transport_policy = policy;
         self
     }
@@ -2821,6 +2835,173 @@ impl Website {
         ok
     }
 
+    /// Explicit reason the most recent Tor crawl attempt (`crawl`/`crawl_raw`)
+    /// was rejected at preflight, if any. `None` when the last attempt
+    /// succeeded, used `Default` transport, or no Tor crawl has been
+    /// attempted yet.
+    pub fn last_transport_error(&self) -> Option<&crate::features::transport::TransportError> {
+        self.last_transport_error.as_ref()
+    }
+
+    /// Full preflight validation for a multi-page **raw HTTP** crawl under
+    /// the current `transport_policy`, run by `crawl`/`crawl_raw` before
+    /// any cache lookup, robots.txt fetch, or target-capable client setup.
+    ///
+    /// - `TransportPolicy::Default`: always `Ok(false)` — proceed exactly
+    ///   as before, unmodified.
+    /// - `TransportPolicy::Tor`: validates the *entire* crawl configuration
+    ///   against every unaudited routing/state combination this frontier
+    ///   does not cover (see the checks below); on success, builds the one
+    ///   canonical audited Tor client
+    ///   ([`crate::features::transport::build_tor_client`] — the same
+    ///   primitive the one-shot seam uses) and stores it in `self.client`
+    ///   so the *existing* `setup_base()`/`setup()` machinery picks it up
+    ///   via its own `self.client.take()` branch — no duplicate client
+    ///   construction, no change to `crawl_concurrent_raw`'s signature.
+    ///   Returns `Ok(true)`.
+    /// - Any incompatibility: `Err(reason)`, with zero client construction
+    ///   and zero network activity. Never falls back to `Default`.
+    #[cfg(all(
+        feature = "transport_tor",
+        not(feature = "wreq"),
+        not(feature = "cache_request")
+    ))]
+    fn tor_crawl_preflight(&mut self) -> Result<bool, crate::features::transport::TransportError> {
+        use crate::features::transport::TransportError;
+
+        let TransportPolicy::Tor(_) = &self.configuration.transport_policy else {
+            return Ok(false);
+        };
+
+        // Architecturally a different crawl engine entirely (spider_worker
+        // scraper connections) — not audited for Tor pinning at all.
+        if cfg!(feature = "decentralized") {
+            return Err(TransportError::IncompatibleConfiguration(
+                "decentralized crawling is not audited for Tor".to_string(),
+            ));
+        }
+        // An externally supplied retained client could be anything —
+        // built without consulting transport_policy at all, so it must
+        // never be silently adopted (or silently overwritten) for a Tor
+        // crawl; the caller must not pre-populate `self.client` at all.
+        if self.client.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "an externally supplied retained HTTP client cannot be combined with Tor"
+                    .to_string(),
+            ));
+        }
+        if self.configuration.proxies.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "legacy proxy lists / proxy rotation cannot be combined with Tor".to_string(),
+            ));
+        }
+        if self.client_rotator.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "client rotation cannot be combined with Tor".to_string(),
+            ));
+        }
+        if self.remote_fetcher.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "a custom remote_fetcher cannot be combined with Tor".to_string(),
+            ));
+        }
+        if self.fetch_engine.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "a custom fetch_engine cannot be combined with Tor".to_string(),
+            ));
+        }
+        if self.retry_strategy.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "a custom retry_strategy cannot be combined with Tor — Tor retries use \
+                 ordinary numeric retry/backoff only"
+                    .to_string(),
+            ));
+        }
+        #[cfg(feature = "spider_cloud")]
+        if self.configuration.spider_cloud.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "Spider Cloud acquisition cannot be combined with Tor".to_string(),
+            ));
+        }
+        #[cfg(feature = "parallel_backends")]
+        if self
+            .configuration
+            .parallel_backends
+            .as_ref()
+            .is_some_and(|config| config.enabled)
+        {
+            return Err(TransportError::IncompatibleConfiguration(
+                "parallel_backends acquisition cannot be combined with Tor".to_string(),
+            ));
+        }
+        #[cfg(feature = "hedge")]
+        if self
+            .configuration
+            .hedge
+            .as_ref()
+            .is_some_and(|config| config.enabled)
+        {
+            return Err(TransportError::IncompatibleConfiguration(
+                "hedge/alternate-client routing cannot be combined with Tor".to_string(),
+            ));
+        }
+        #[cfg(feature = "etag_cache")]
+        if self.configuration.etag_cache {
+            return Err(TransportError::IncompatibleConfiguration(
+                "ETag conditional-request caching cannot be combined with Tor — transport \
+                 provenance for a 304-shortcircuited response cannot be guaranteed"
+                    .to_string(),
+            ));
+        }
+
+        let client =
+            crate::features::transport::build_tor_client(&self.configuration.transport_policy)?;
+        self.client = Some(client);
+        Ok(true)
+    }
+
+    /// `transport_tor` is not compiled, or `wreq`/`cache_request` is
+    /// compiled (an alternate client stack this frontier does not audit
+    /// for Tor — see [`crate::features::transport::build_tor_client`]):
+    /// `TransportPolicy::Tor` always fails closed for multi-page crawling
+    /// in this configuration, before any network activity.
+    #[cfg(not(all(
+        feature = "transport_tor",
+        not(feature = "wreq"),
+        not(feature = "cache_request")
+    )))]
+    fn tor_crawl_preflight(&mut self) -> Result<bool, crate::features::transport::TransportError> {
+        match &self.configuration.transport_policy {
+            TransportPolicy::Default => Ok(false),
+            TransportPolicy::Tor(_) => {
+                Err(crate::features::transport::TransportError::TorNotCompiled)
+            }
+        }
+    }
+
+    /// Shared gate for [`Self::crawl`]/[`Self::crawl_raw`]: runs
+    /// [`Self::tor_crawl_preflight`], translating a rejection into
+    /// `CrawlStatus::Invalid` + [`Self::last_transport_error`] (mirroring
+    /// [`Self::transport_gate`]'s status-reporting contract for every
+    /// other, unaudited entry point). Returns `true` when it is safe to
+    /// continue — for `Default` transport this is always `true` with zero
+    /// side effects beyond clearing any previous rejection reason.
+    fn tor_crawl_gate(&mut self) -> bool {
+        match self.tor_crawl_preflight() {
+            Ok(_) => {
+                self.last_transport_error = None;
+                true
+            }
+            Err(reason) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!("refusing Tor crawl: {reason}");
+                self.last_transport_error = Some(reason);
+                self.status = CrawlStatus::Invalid;
+                false
+            }
+        }
+    }
+
     /// Release the broadcast ring backlog held by the internal placeholder receivers.
     ///
     /// [`Self::subscribe`] / [`Self::queue`] store an `Arc<broadcast::Receiver<_>>`
@@ -2858,10 +3039,27 @@ impl Website {
     /// configure the robots parser on initial crawl attempt and run.
     ///
     /// Takes a caller-supplied `client`, so this is directly network-capable
-    /// regardless of what built that client — gated at entry rather than
-    /// relying on the caller having already checked the transport policy.
+    /// regardless of what built that client. When called internally by
+    /// `setup()` (itself only reachable through `crawl`/`crawl_raw`'s
+    /// `tor_crawl_preflight`-gated scope), `client` is provably the one
+    /// audited Tor client for this crawl, so the fetch below correctly
+    /// reuses the same SOCKS5h route, redirect pinning, and DNS
+    /// suppression as every other request in the crawl — no separate
+    /// target client, no separate transport handling. A *standalone*
+    /// external call under `TransportPolicy::Tor` (outside that scope,
+    /// so `client` is not provably audited) still fails closed exactly as
+    /// before.
     pub async fn configure_robots_parser(&mut self, client: &Client) {
-        if !self.transport_gate() {
+        if matches!(self.configuration.transport_policy, TransportPolicy::Tor(_))
+            && crate::features::transport::current_acquisition_transport()
+                != Some(crate::features::transport::AcquisitionTransport::Tor)
+        {
+            self.status = CrawlStatus::Invalid;
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                "refusing robots.txt fetch: TransportPolicy::Tor is active but this call is \
+                 outside an audited Tor acquisition scope"
+            );
             return;
         }
         if self.configuration.respect_robots_txt {
@@ -7228,6 +7426,11 @@ impl Website {
                 crate::utils::build_cached_html_page_response(&target_url, html);
             self.apply_custom_antibot_check(&mut page_response);
             let page = build(&target_url, page_response);
+            // Provenance: `build_cached_html_page_response` stamps this
+            // response `AcquisitionOrigin::NonNetwork`, so `Page::build`
+            // already left `page.transport` truthfully `None` here — no
+            // manual post-build correction needed (see `Page::build`'s
+            // doc comment for the canonical rule).
             self.initial_status_code = page.status_code;
             self.initial_html_length = if page.is_empty() { 0 } else { page.size() };
             self.links_visited
@@ -7294,6 +7497,9 @@ impl Website {
         let mut page_response = build_cached_html_page_response(&target_url, html);
         self.apply_custom_antibot_check(&mut page_response);
         let mut page = build(&target_url, page_response);
+        // Provenance: see the `AcquisitionOrigin::NonNetwork` comment on
+        // `build_cached_html_page_response` — `Page::build` already left
+        // `page.transport` truthfully `None` for this cache-hit response.
 
         if !self.configuration.external_domains_caseless.is_empty() {
             page.set_external(self.configuration.external_domains_caseless.clone());
@@ -7402,6 +7608,8 @@ impl Website {
                             build_cached_html_page_response(&link_url, cached_html);
                         self.apply_custom_antibot_check(&mut page_response);
                         let mut page = build(&link_url, page_response);
+                        // Provenance: `AcquisitionOrigin::NonNetwork` on the
+                        // response above already keeps `page.transport` `None`.
 
                         if !self.configuration.external_domains_caseless.is_empty() {
                             page.set_external(self.configuration.external_domains_caseless.clone());
@@ -7475,29 +7683,59 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
-                self.start();
-                if self.try_cache_shortcircuit().await {
-                    self.set_crawl_status();
-                    return;
-                }
-                let (client, handle) = self.setup().await;
-                let (handle, join_handle) = match handle {
-                    Some(h) => (Some(h.0), Some(h.1)),
-                    _ => (None, None),
-                };
-                let crawl_timeout = self.configuration.crawl_timeout;
-                let url = self.url.inner().to_string();
-                run_with_crawl_timeout(crawl_timeout, &url, async {
-                    self.crawl_concurrent(&client, &handle).await;
-                    self.sitemap_crawl_chain(&client, &handle, false).await;
-                })
-                .await;
-                self.set_crawl_status();
-                if let Some(h) = join_handle {
-                    h.abort()
-                }
-                self.client.replace(client);
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.tor_crawl_gate() {
+                let tor_active =
+                    matches!(self.configuration.transport_policy, TransportPolicy::Tor(_));
+                let acquisition_transport = crate::features::transport::acquisition_transport_for(
+                    &self.configuration.transport_policy,
+                );
+                crate::features::transport::ACQUISITION_TRANSPORT_SCOPE
+                    .scope(acquisition_transport, async {
+                        self.start();
+                        if self.try_cache_shortcircuit().await {
+                            self.set_crawl_status();
+                            return;
+                        }
+                        let (client, handle) = self.setup().await;
+                        let (handle, join_handle) = match handle {
+                            Some(h) => (Some(h.0), Some(h.1)),
+                            _ => (None, None),
+                        };
+                        let crawl_timeout = self.configuration.crawl_timeout;
+                        let url = self.url.inner().to_string();
+                        run_with_crawl_timeout(crawl_timeout, &url, async {
+                            if tor_active {
+                                // Force the audited raw HTTP path even
+                                // when Chrome/WebDriver features are
+                                // compiled — smart/browser escalation is
+                                // never audited for Tor pinning (see
+                                // `Self::with_transport`).
+                                self.crawl_concurrent_raw(&client, &handle).await;
+                                self.sitemap_crawl_chain_raw(&client, &handle, false).await;
+                            } else {
+                                self.crawl_concurrent(&client, &handle).await;
+                                self.sitemap_crawl_chain(&client, &handle, false).await;
+                            }
+                        })
+                        .await;
+                        self.set_crawl_status();
+                        if let Some(h) = join_handle {
+                            h.abort()
+                        }
+                        if tor_active {
+                            // Never retain a Tor client across separate
+                            // crawl invocations — each call rebuilds a
+                            // fresh one-shot-per-crawl context (see
+                            // `Self::tor_crawl_preflight`), so the next
+                            // call always starts from a clean slate
+                            // instead of ambiguously "reusing" a client
+                            // preflight can't re-verify the provenance of.
+                            self.client = None;
+                        } else {
+                            self.client.replace(client);
+                        }
+                    })
+                    .await;
             }
         };
         #[cfg(feature = "balance")]
@@ -7800,29 +8038,43 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
-                self.start();
-                if self.try_cache_shortcircuit().await {
-                    self.set_crawl_status();
-                    return;
-                }
-                let (client, handle) = self.setup().await;
-                let (handle, join_handle) = match handle {
-                    Some(h) => (Some(h.0), Some(h.1)),
-                    _ => (None, None),
-                };
-                let crawl_timeout = self.configuration.crawl_timeout;
-                let url = self.url.inner().to_string();
-                run_with_crawl_timeout(crawl_timeout, &url, async {
-                    self.crawl_concurrent_raw(&client, &handle).await;
-                    self.sitemap_crawl_chain_raw(&client, &handle, false).await;
-                })
-                .await;
-                self.set_crawl_status();
-                if let Some(h) = join_handle {
-                    h.abort()
-                }
-                self.client.replace(client);
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.tor_crawl_gate() {
+                let tor_active =
+                    matches!(self.configuration.transport_policy, TransportPolicy::Tor(_));
+                let acquisition_transport = crate::features::transport::acquisition_transport_for(
+                    &self.configuration.transport_policy,
+                );
+                crate::features::transport::ACQUISITION_TRANSPORT_SCOPE
+                    .scope(acquisition_transport, async {
+                        self.start();
+                        if self.try_cache_shortcircuit().await {
+                            self.set_crawl_status();
+                            return;
+                        }
+                        let (client, handle) = self.setup().await;
+                        let (handle, join_handle) = match handle {
+                            Some(h) => (Some(h.0), Some(h.1)),
+                            _ => (None, None),
+                        };
+                        let crawl_timeout = self.configuration.crawl_timeout;
+                        let url = self.url.inner().to_string();
+                        run_with_crawl_timeout(crawl_timeout, &url, async {
+                            self.crawl_concurrent_raw(&client, &handle).await;
+                            self.sitemap_crawl_chain_raw(&client, &handle, false).await;
+                        })
+                        .await;
+                        self.set_crawl_status();
+                        if let Some(h) = join_handle {
+                            h.abort()
+                        }
+                        if tor_active {
+                            // See the matching comment in `Self::crawl`.
+                            self.client = None;
+                        } else {
+                            self.client.replace(client);
+                        }
+                    })
+                    .await;
             }
         };
         #[cfg(feature = "balance")]
@@ -8317,6 +8569,17 @@ impl Website {
         }
 
         self.status = CrawlStatus::Active;
+        // Seed-derived transport boundary (Section G): computed once,
+        // never merged into `is_allowed` (a crawl-policy concern) — a
+        // separate transport-security check applied both at admission
+        // (below, in the link stream) and again immediately before each
+        // worker's fetch (after callback rewriting), per Section H.
+        let crawl_boundary = self.domain_parsed.as_deref().map(|seed| {
+            crate::features::transport::CrawlBoundary::from_seed(
+                &self.configuration.transport_policy,
+                seed,
+            )
+        });
         let client_rotator = self.client_rotator.clone();
         #[cfg(feature = "hedge")]
         let hedge_config = self.configuration.hedge.clone();
@@ -8393,6 +8656,7 @@ impl Website {
                 self.domain_parsed.clone(),
                 self.on_link_find_callback.clone(),
                 self.configuration.remote_multimodal.clone(),
+                crawl_boundary.clone(),
             ));
 
             let mut set: JoinSet<(HashSet<CaseInsensitiveString>, Option<u64>)> = JoinSet::new();
@@ -8494,6 +8758,26 @@ impl Website {
                                 continue;
                             }
 
+                            // Admission-time transport boundary check
+                            // (Section G/H) — separate from `is_allowed`
+                            // above. A second, immediately-pre-acquisition
+                            // check runs inside the spawned worker below,
+                            // after callback rewriting, since admission
+                            // alone cannot see a URL a callback rewrites
+                            // afterward.
+                            if let Some(boundary) = &crawl_boundary {
+                                if url::Url::parse(link.inner())
+                                    .ok()
+                                    .is_none_or(|candidate| {
+                                        !crate::features::transport::crawl_boundary_allows(
+                                            boundary, &candidate,
+                                        )
+                                    })
+                                {
+                                    continue;
+                                }
+                            }
+
                             emit_log(link.inner());
 
                             // `is_allowed` above already probed the visited set and
@@ -8570,6 +8854,29 @@ impl Website {
 
                                     let target_url = link_result.0.as_ref();
 
+                                    // Immediately-pre-acquisition transport
+                                    // boundary re-check (Section H): the
+                                    // admission-time check above ran on the
+                                    // link as originally queued — a
+                                    // callback (`shared.9`,
+                                    // `on_link_find_callback`) can rewrite
+                                    // it between admission and here, so
+                                    // this is a genuinely independent
+                                    // second check, not a redundant one.
+                                    if let Some(boundary) = &shared.11 {
+                                        let candidate_allowed = url::Url::parse(target_url)
+                                            .ok()
+                                            .is_some_and(|candidate| {
+                                                crate::features::transport::crawl_boundary_allows(
+                                                    boundary, &candidate,
+                                                )
+                                            });
+                                        if !candidate_allowed {
+                                            drop(permit);
+                                            return Default::default();
+                                        }
+                                    }
+
                                     // ETag conditional request: if we have cached validators and
                                     // the server responds 304 Not Modified, skip the full fetch.
                                     #[cfg(feature = "etag_cache")]
@@ -8602,6 +8909,10 @@ impl Website {
                                                     }
                                                 }
                                                 let mut page = build(target_url, page_response);
+                                                // Provenance: `Page::build` already
+                                                // left `page.transport` `None` for
+                                                // this `AcquisitionOrigin::NonNetwork`
+                                                // cache-hit response.
 
                                                 if !shared.3.is_empty() {
                                                     page.set_external(shared.3.clone());
@@ -9559,6 +9870,10 @@ impl Website {
                                                                     }
                                                                 }
                                                                 let mut page = build(&target_url_string, page_response);
+                                                                // Provenance: `Page::build` already
+                                                                // left `page.transport` `None` for this
+                                                                // `AcquisitionOrigin::NonNetwork` cache-hit
+                                                                // response.
 
                                                                 if add_external {
                                                                     page.set_external(shared.3.clone());
@@ -12283,6 +12598,22 @@ impl Website {
 
             let persist_links = self.status == CrawlStatus::Start;
 
+            // Seed-derived transport boundary (Section D of the blocker-fix
+            // frontier): the SAME canonical `CrawlBoundary` used by the
+            // ordinary worker path (`crawl_concurrent_raw`), computed once
+            // here and applied to every sitemap acquisition — root sitemap
+            // URL, nested `<sitemap><loc>` URL (both admitted through this
+            // same loop below), and every `<url><loc>` page URL
+            // (`sitemap_parse_crawl`, threaded through as a parameter).
+            // Never merged into `is_allowed`/`is_allowed_sitemap` — a
+            // separate transport-security check, per Section D/H.
+            let crawl_boundary = self.domain_parsed.as_deref().map(|seed| {
+                crate::features::transport::CrawlBoundary::from_seed(
+                    &self.configuration.transport_policy,
+                    seed,
+                )
+            });
+
             let semaphore = self.setup_semaphore();
 
             let mut interval: Interval = tokio::time::interval(Duration::from_millis(15));
@@ -12347,6 +12678,19 @@ impl Website {
                     // on (otherwise the check is budgetless and never returns this).
                     if allowed.eq(&ProcessLinkStatus::BudgetExceeded) {
                         break 'outer;
+                    }
+
+                    // Admission-time transport boundary check (Section D/H):
+                    // covers both the root sitemap URL (first iteration) and
+                    // every nested `<sitemap><loc>` URL discovered by
+                    // `sitemap_parse_crawl` and re-queued into `sitemaps`
+                    // for a later iteration of this same loop.
+                    if let Some(boundary) = &crawl_boundary {
+                        if url::Url::parse(link.inner()).ok().is_none_or(|candidate| {
+                            !crate::features::transport::crawl_boundary_allows(boundary, &candidate)
+                        }) {
+                            continue;
+                        }
                     }
 
                     self.insert_link(&link).await;
@@ -12426,6 +12770,7 @@ impl Website {
                                                 &mut sitemaps,
                                                 true,
                                                 &semaphore,
+                                                crawl_boundary.as_ref(),
                                             )
                                             .await;
                                         }
@@ -13114,15 +13459,17 @@ impl Website {
 
     /// Sitemap parse entire lists. Note: this method does not re-crawl the links of the pages found on the sitemap. This does nothing without the `sitemap` flag.
     ///
-    /// Crate-private: only ever called from within the already-gated
-    /// sitemap crawl chain (`sitemap_crawl_raw`), never a standalone
-    /// public entry point — no external caller in this workspace uses it
-    /// (confirmed by audit), and its awkward multi-`&mut` signature is
-    /// itself internal orchestration state, not a general-purpose public
-    /// contract. Still independently gated below (rather than relying
-    /// solely on its callers) since it takes a caller-supplied `client`
-    /// and performs a real target request (`client.get(...).send()`)
-    /// directly — the same defense-in-depth pattern used for
+    /// Crate-private: only ever called from within the sitemap crawl
+    /// chain (`sitemap_crawl_raw`), never a standalone public entry point
+    /// — no external caller in this workspace uses it (confirmed by
+    /// audit), and its awkward multi-`&mut` signature is itself internal
+    /// orchestration state, not a general-purpose public contract. Under
+    /// `TransportPolicy::Tor`, reached only through `crawl`/`crawl_raw`'s
+    /// `tor_crawl_preflight`-gated scope (raw sitemap crawling is an
+    /// audited capability — see `Website::with_transport`), so `client`
+    /// is provably the one audited Tor client for this crawl. A
+    /// *standalone* call under Tor policy outside that scope still fails
+    /// closed, the same defense-in-depth pattern used for
     /// `configure_robots_parser`.
     #[cfg(feature = "sitemap")]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
@@ -13133,7 +13480,16 @@ impl Website {
         sitemap_url: &mut Box<CompactString>,
         attempted_correct: &mut bool,
     ) -> bool {
-        if !self.transport_gate() {
+        if matches!(self.configuration.transport_policy, TransportPolicy::Tor(_))
+            && crate::features::transport::current_acquisition_transport()
+                != Some(crate::features::transport::AcquisitionTransport::Tor)
+        {
+            self.status = CrawlStatus::Invalid;
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                "refusing sitemap fetch: TransportPolicy::Tor is active but this call is \
+                 outside an audited Tor acquisition scope"
+            );
             return false;
         }
 
@@ -13238,6 +13594,7 @@ impl Website {
         sitemaps: &mut Vec<Box<CompactString>>,
         crawl: bool,
         semaphore: &Arc<Semaphore>,
+        crawl_boundary: Option<&crate::features::transport::CrawlBoundary>,
     ) {
         use sitemap::reader::{SiteMapEntity, SiteMapReader};
         use sitemap::structs::Location;
@@ -13276,6 +13633,21 @@ impl Website {
                                 break;
                             }
 
+                            // Admission-time transport boundary check
+                            // (Section D/H): covers both a sitemap-discovered
+                            // page URL and a page URL discovered from a
+                            // nested sitemap — this same function runs for
+                            // both, once per fetched sitemap body.
+                            if let Some(boundary) = crawl_boundary {
+                                if url::Url::parse(link.inner()).ok().is_none_or(|candidate| {
+                                    !crate::features::transport::crawl_boundary_allows(
+                                        boundary, &candidate,
+                                    )
+                                }) {
+                                    continue;
+                                }
+                            }
+
                             self.insert_link(&link).await;
 
                             if crawl {
@@ -13299,9 +13671,34 @@ impl Website {
                                 let cache_policy = cache_policy.clone();
                                 let cache_ns = cache_ns.clone();
                                 let retry_strategy_ref = retry_strategy_ref.clone();
+                                // Owned clone for the moved (`'static`)
+                                // spawned future — the immediately
+                                // pre-acquisition re-check below (Section
+                                // H: admission alone is not sufficient).
+                                let crawl_boundary_owned = crawl_boundary.cloned();
 
-                                set.spawn(async move {
+                                spawn_set("sitemap_page_fetch", &mut set, async move {
                                     let _permit = permit; // Held for duration of task
+
+                                    // Immediately-pre-acquisition transport
+                                    // boundary re-check (Section H) —
+                                    // defense in depth alongside the
+                                    // admission-time check above, matching
+                                    // the ordinary worker path
+                                    // (`crawl_concurrent_raw`).
+                                    if let Some(boundary) = &crawl_boundary_owned {
+                                        let candidate_allowed = url::Url::parse(link.inner())
+                                            .ok()
+                                            .is_some_and(|candidate| {
+                                                crate::features::transport::crawl_boundary_allows(
+                                                    boundary, &candidate,
+                                                )
+                                            });
+                                        if !candidate_allowed {
+                                            drop(_permit);
+                                            return;
+                                        }
+                                    }
 
                                     let mut page = Page::new_page_with_cache(
                                         link.inner(),
@@ -16393,22 +16790,32 @@ mod tests {
         website
     }
 
+    /// `crawl`/`crawl_raw` are now audited for Tor (raw HTTP multi-page
+    /// crawling — see `Website::with_transport`), so they no longer fail
+    /// closed unconditionally; only genuinely incompatible combinations
+    /// do (`tor_crawl_preflight`). A legacy proxy list is exactly such a
+    /// combination — proves preflight rejection zero-network, with a
+    /// recorded reason, before `crawl_concurrent_raw` is ever entered.
     #[cfg(not(feature = "decentralized"))]
     #[tokio::test]
-    async fn crawl_fails_closed_under_tor_policy() {
+    async fn crawl_fails_closed_under_tor_policy_with_incompatible_proxies() {
         let mut website = tor_gated_website();
+        website.configuration.proxies = Some(Vec::new());
         website.crawl().await;
         assert_eq!(website.get_status(), &crate::website::CrawlStatus::Invalid);
         assert!(website.links_visited.is_empty());
+        assert!(website.last_transport_error().is_some());
     }
 
     #[cfg(not(feature = "decentralized"))]
     #[tokio::test]
-    async fn crawl_raw_fails_closed_under_tor_policy() {
+    async fn crawl_raw_fails_closed_under_tor_policy_with_incompatible_proxies() {
         let mut website = tor_gated_website();
+        website.configuration.proxies = Some(Vec::new());
         website.crawl_raw().await;
         assert_eq!(website.get_status(), &crate::website::CrawlStatus::Invalid);
         assert!(website.links_visited.is_empty());
+        assert!(website.last_transport_error().is_some());
     }
 
     #[cfg(all(not(feature = "decentralized"), feature = "sitemap"))]

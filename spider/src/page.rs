@@ -1279,6 +1279,21 @@ pub async fn host_resolves_locally_cached(
     host: &str,
     timeout: std::time::Duration,
 ) -> LocalDnsState {
+    // Tor DNS suppression (mandatory): while the enclosing acquisition is
+    // genuinely Tor, the target hostname must never be resolved locally —
+    // not even a cache lookup, since a hit could only exist if some
+    // earlier, non-Tor call resolved this exact host, and consulting that
+    // state here would leak "what local DNS knows about this Tor target"
+    // into the decision even though no network query happens on a hit.
+    // `TimedOut` is the existing, deliberately conservative "no evidence"
+    // state (see its doc comment) — every caller of this function already
+    // treats it as "stay retryable, don't upgrade to a confirmed-permanent
+    // classification", which is exactly the right behavior for "we
+    // intentionally didn't check."
+    if crate::features::transport::target_dns_suppressed() {
+        return LocalDnsState::TimedOut;
+    }
+
     let cache = host_dns_cache();
     if let Some(cached) = cache.get(host) {
         return cached;
@@ -1300,6 +1315,29 @@ pub async fn host_resolves_locally_cached(
     state
 }
 
+/// Test-only call counter for [`host_resolves_locally`] (Section C
+/// regression seam,
+/// `SCORPION_CANONICAL_MULTI_PAGE_HTTP_TOR_CRAWL_BLOCKER_FIX_001`):
+/// incremented once per genuine invocation, i.e. once per real
+/// `tokio::net::lookup_host` attempt. Exists solely so an integration
+/// test can prove a *negative* — that Tor's DNS-suppression guard in
+/// [`host_resolves_locally_cached`] genuinely short-circuits before this
+/// function ever runs on a tunnel-failure branch — without relying on
+/// timing, and without relying on the DNS cache staying empty by
+/// coincidence (a lookup that happens to also return `TimedOut` wouldn't
+/// populate the cache either, so an empty-cache assertion alone can't
+/// distinguish "never called" from "called and returned TimedOut").
+static HOST_RESOLVES_LOCALLY_CALL_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot of [`HOST_RESOLVES_LOCALLY_CALL_COUNT`]. `#[doc(hidden)]`: not
+/// part of the supported public contract — `pub` only because integration
+/// tests (a separate compilation unit) need to observe it.
+#[doc(hidden)]
+pub fn host_resolves_locally_call_count_for_test() -> u64 {
+    HOST_RESOLVES_LOCALLY_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Probe local DNS for `host`. Bounded to `timeout` so a slow / dead
 /// resolver doesn't block the caller.
 ///
@@ -1315,6 +1353,7 @@ pub async fn host_resolves_locally_cached(
 /// from any tokio context.
 pub async fn host_resolves_locally(host: &str, timeout: std::time::Duration) -> LocalDnsState {
     use std::io::ErrorKind;
+    HOST_RESOLVES_LOCALLY_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let addr = format!("{host}:443");
     match tokio::time::timeout(timeout, tokio::net::lookup_host(addr)).await {
         Ok(Ok(mut iter)) => {
@@ -2409,6 +2448,14 @@ pub struct Page {
     /// Unix epoch milliseconds when the carried live-fetch representation
     /// finished materializing.
     retrieved_at: Option<u64>,
+    /// Sanitized transport provenance: which audited route actually
+    /// performed this acquisition. `None` for pages this frontier's
+    /// acquisition scope doesn't cover (never fabricated) — see
+    /// `Page::transport()` and `crate::features::transport::AcquisitionTransport`.
+    /// Only [`build`] (this module) writes this field; there is no public
+    /// setter, and it is never inferred from `Website::configuration`
+    /// after the fact.
+    pub(crate) transport: Option<crate::features::transport::AcquisitionTransport>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -2575,6 +2622,14 @@ pub struct Page {
     /// Unix epoch milliseconds when the carried live-fetch representation
     /// finished materializing.
     retrieved_at: Option<u64>,
+    /// Sanitized transport provenance: which audited route actually
+    /// performed this acquisition. `None` for pages this frontier's
+    /// acquisition scope doesn't cover (never fabricated) — see
+    /// `Page::transport()` and `crate::features::transport::AcquisitionTransport`.
+    /// Only [`build`] (this module) writes this field; there is no public
+    /// setter, and it is never inferred from `Website::configuration`
+    /// after the fact.
+    pub(crate) transport: Option<crate::features::transport::AcquisitionTransport>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -3636,6 +3691,11 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
         return Page {
             html: None,
             retrieved_at: res.retrieved_at,
+            transport: if res.origin == crate::utils::AcquisitionOrigin::NonNetwork {
+                None
+            } else {
+                crate::features::transport::current_acquisition_transport()
+            },
             binary_file: spool.vitals.binary_file,
             is_valid_utf8: spool.vitals.is_valid_utf8,
             is_xml: spool.vitals.is_xml,
@@ -3745,6 +3805,11 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
     Page {
         html: res.content.map(bytes::Bytes::from),
         retrieved_at: res.retrieved_at,
+        transport: if res.origin == crate::utils::AcquisitionOrigin::NonNetwork {
+            None
+        } else {
+            crate::features::transport::current_acquisition_transport()
+        },
         binary_file,
         is_valid_utf8,
         is_xml,
@@ -7075,6 +7140,16 @@ impl Page {
     /// this page finished materializing, if that time was captured.
     pub fn get_retrieved_at(&self) -> Option<u64> {
         self.retrieved_at
+    }
+
+    /// Which audited transport actually acquired this page, if known.
+    /// `None` for pages built outside this frontier's acquisition scope
+    /// (cache hits, decentralized crawls, or any other path that doesn't
+    /// establish `ACQUISITION_TRANSPORT_SCOPE`) — this is never inferred
+    /// or guessed after the fact, only ever set by [`build`] at
+    /// construction time from the ambient acquisition scope.
+    pub fn transport(&self) -> Option<crate::features::transport::AcquisitionTransport> {
+        self.transport
     }
 
     /// Html getter for bytes on the page as string.

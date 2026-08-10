@@ -48,23 +48,6 @@ pub enum TransportPolicy {
     Tor(TorTransportConfig),
 }
 
-impl TransportPolicy {
-    /// The short, stable provenance label this policy corresponds to —
-    /// exactly the value recorded in `EvidenceBundle.transport`. Crate-private:
-    /// external callers get provenance from `EvidenceBundle`/
-    /// `TransportAcquisition`, not by calling this directly (see
-    /// `spider::utils::evidence`) — this is an internal implementation
-    /// detail of how that provenance is computed, not a public contract.
-    /// Only called from `spider::utils::evidence`, hence the matching `cfg`.
-    #[cfg(feature = "evidence")]
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            TransportPolicy::Default => "default",
-            TransportPolicy::Tor(_) => "tor",
-        }
-    }
-}
-
 /// A validated Tor SOCKS5h endpoint. Only ever constructed via
 /// [`TorTransportConfig::new`], which enforces the full Tor-safe
 /// contract: `socks5h://` scheme only (proxy-side DNS resolution — the
@@ -384,6 +367,237 @@ pub(crate) fn pin_redirect_policy(
     })
 }
 
+/// Sanitized, network-acquisition-only transport provenance carried by
+/// [`crate::page::Page`]. Deliberately minimal: no SOCKS endpoint, no
+/// credentials, no full [`TransportPolicy`] — just which of the two
+/// audited routes actually performed the fetch. `Page`'s field is
+/// private; only the acquisition code paths in this crate that actually
+/// dispatch a request may stamp it (see
+/// [`crate::page::Page::transport`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcquisitionTransport {
+    /// Fetched over Spider's existing default networking behavior.
+    Default,
+    /// Fetched over the audited fail-closed Tor SOCKS5h transport.
+    Tor,
+}
+
+impl AcquisitionTransport {
+    /// The short, stable provenance label — exactly the value recorded in
+    /// `EvidenceBundle.transport`.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            AcquisitionTransport::Default => "default",
+            AcquisitionTransport::Tor => "tor",
+        }
+    }
+}
+
+tokio::task_local! {
+    /// Ambient signal for "the page(s) built for the rest of this async
+    /// task tree were acquired over this transport". Established once per
+    /// acquisition context (one-shot Tor/Default fetch, or one multi-page
+    /// crawl) and propagated into spawned worker tasks by
+    /// [`crate::utils::spawn_set`] re-entering the same scope — mirroring
+    /// the existing `WEBSITE_SPOOL_DIR` task-local
+    /// (`crate::utils::html_spool`), the established pattern in this
+    /// crate for ambient per-crawl context that must survive `tokio::spawn`
+    /// boundaries without threading a new parameter through every
+    /// intermediate function signature.
+    ///
+    /// Two independent readers consume this:
+    /// - [`crate::page::build`] stamps `Page::transport` from it — the
+    ///   only writer of that field.
+    /// - [`crate::page::host_resolves_locally_cached`] refuses to perform
+    ///   or consult any local DNS lookup for the target host while this
+    ///   scope reads `Tor` — see [`target_dns_suppressed`].
+    pub(crate) static ACQUISITION_TRANSPORT_SCOPE: AcquisitionTransport;
+}
+
+/// The transport of the enclosing [`ACQUISITION_TRANSPORT_SCOPE`], or
+/// `None` when called outside any such scope (e.g. code paths this
+/// frontier does not audit, or ordinary non-crawl test code).
+pub(crate) fn current_acquisition_transport() -> Option<AcquisitionTransport> {
+    ACQUISITION_TRANSPORT_SCOPE.try_with(|value| *value).ok()
+}
+
+/// `true` only when the enclosing acquisition is genuinely Tor. Never
+/// `true` by default, never `true` outside an explicit scope — the
+/// suppression this gates (see callers) must never activate for a
+/// context nobody positively marked as Tor.
+pub(crate) fn target_dns_suppressed() -> bool {
+    current_acquisition_transport() == Some(AcquisitionTransport::Tor)
+}
+
+/// The `AcquisitionTransport` this fixed `TransportPolicy` corresponds to
+/// — the value a crawl's outer `ACQUISITION_TRANSPORT_SCOPE` must be
+/// entered with for its whole duration.
+pub(crate) fn acquisition_transport_for(policy: &TransportPolicy) -> AcquisitionTransport {
+    match policy {
+        TransportPolicy::Default => AcquisitionTransport::Default,
+        TransportPolicy::Tor(_) => AcquisitionTransport::Tor,
+    }
+}
+
+/// The seed-derived boundary a candidate URL must satisfy before it may
+/// be admitted to the crawl frontier or fetched — see module docs on
+/// [`crawl_boundary_allows`] for the exact matrix. Deliberately not
+/// merged into `Website::is_allowed`: this is a transport-security
+/// concern (can this request happen at all, over this pinned transport),
+/// not a crawl-policy concern (depth/budget/robots/allow-deny lists).
+#[derive(Debug, Clone)]
+pub(crate) enum CrawlBoundary {
+    /// Default transport, or Tor pinned to a clearnet seed: clearnet
+    /// candidates are allowed (subject to existing crawl policy
+    /// elsewhere); `.onion` candidates are always rejected. Whether this
+    /// specific clearnet crawl runs over Tor or Default doesn't change
+    /// the boundary decision itself (onion-ness is what's being pinned,
+    /// not which non-onion route carries the traffic) — the transport is
+    /// already fixed and enforced elsewhere (`tor_crawl_preflight`,
+    /// `pin_redirect_policy`), so it isn't duplicated here.
+    Clearnet,
+    /// Tor pinned to an onion seed: only the exact same onion hostname
+    /// (case-insensitive) is allowed; every clearnet candidate and every
+    /// other onion service is rejected. Lowercased once at construction
+    /// so every comparison is a cheap, already-normalized `==`.
+    Onion { host: String },
+}
+
+impl CrawlBoundary {
+    /// Derive the boundary for a crawl from its transport policy and seed
+    /// URL. `.onion` seeds under `Default` transport are never
+    /// constructible here — that combination is already rejected at
+    /// preflight before a boundary is ever derived (see
+    /// `Website::tor_crawl_preflight`).
+    pub(crate) fn from_seed(policy: &TransportPolicy, seed: &url::Url) -> Self {
+        let seed_onion = seed.host_str().is_some_and(is_onion_host);
+        match (policy, seed_onion) {
+            (TransportPolicy::Tor(_), true) => CrawlBoundary::Onion {
+                host: seed.host_str().unwrap_or_default().to_ascii_lowercase(),
+            },
+            (TransportPolicy::Tor(_), false) | (TransportPolicy::Default, _) => {
+                CrawlBoundary::Clearnet
+            }
+        }
+    }
+}
+
+/// Ports never define onion-service identity (a `.onion` address has no
+/// notion of "the same service on a different port" — the hostname alone
+/// is the identity), so this compares hosts only, case-insensitively,
+/// normalized the same way [`CrawlBoundary::from_seed`] and the redirect
+/// pinning in [`pin_redirect_policy`] already normalize `.onion` hosts.
+pub(crate) fn crawl_boundary_allows(boundary: &CrawlBoundary, candidate: &url::Url) -> bool {
+    let candidate_onion = candidate.host_str().is_some_and(is_onion_host);
+    match boundary {
+        CrawlBoundary::Clearnet => !candidate_onion,
+        CrawlBoundary::Onion { host } => {
+            candidate_onion
+                && candidate
+                    .host_str()
+                    .is_some_and(|h| h.to_ascii_lowercase() == *host)
+        }
+    }
+}
+
+/// Connect/read timeouts for the audited Tor client, reused verbatim from
+/// `Website::configure_base_client`'s own *unmultiplied* defaults
+/// (`Duration::from_secs(24)` / `Duration::from_secs(42)`) — not a
+/// Tor-specific invention. `configure_base_client` doubles these only
+/// when Spider's legacy multi-proxy rotation list (`configuration.proxies`)
+/// is configured; the dedicated Tor client never uses that list (rejected
+/// explicitly at preflight — see `Website::tor_crawl_preflight`), so the
+/// unmultiplied canonical values are the correct match, and they provide
+/// the hard bound that keeps a stalled/blackhole SOCKS handshake from
+/// waiting indefinitely. Shared by both the one-shot seam
+/// (`spider::utils::evidence::fetch_via_tor`) and multi-page Tor crawling
+/// — one canonical set of constants, not two.
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) const TOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24);
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) const TOR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(42);
+
+/// Total request deadline for the audited Tor client, reused verbatim
+/// from `Configuration::new()`'s own default `request_timeout`
+/// (`Duration::from_secs(120)`), applied via `reqwest::ClientBuilder::timeout`.
+///
+/// Connect/read timeouts alone are not sufficient: a peer that keeps the
+/// connection alive and periodically sends enough bytes to keep resetting
+/// [`TOR_READ_TIMEOUT`] (a slow-drip response) would never trip either of
+/// them, and could otherwise stall a Tor acquisition indefinitely.
+/// `.timeout()` bounds the request end-to-end — connect, redirects, and
+/// response body — regardless of how activity is paced within it.
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) const TOR_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Redirect hop cap for the audited Tor client, reused verbatim from
+/// `Configuration::new()`'s own default `redirect_limit` (`7`).
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) const TOR_REDIRECT_LIMIT: usize = 7;
+
+/// Build the one canonical Tor-audited `reqwest::Client`: no
+/// environment/system proxy inheritance, exactly one explicit SOCKS5h
+/// proxy, bounded connect/read/total timeouts, a redirect policy that
+/// pins transport across hops while reusing Spider's existing SSRF
+/// redirect guard, and Spider's own default user-agent (so a Tor fetch is
+/// not distinguishable from a Default fetch by header fingerprint alone).
+///
+/// This is the single reusable transport building primitive — both the
+/// one-shot seam (`spider::utils::evidence::fetch_via_tor`) and multi-page
+/// Tor crawling (`Website::tor_crawl_preflight`) call this instead of
+/// each independently constructing a Tor client; there is exactly one Tor
+/// client implementation in this crate.
+///
+/// Hardcoded to return a plain `reqwest::Client` — never the crate's
+/// aliased `Client` type, which resolves to `wreq::Client` or
+/// `reqwest_middleware::ClientWithMiddleware` under the `wreq`/
+/// `cache_request` features respectively. Neither of those alternate
+/// stacks has been audited for the fail-closed guarantees this function
+/// requires (no environment proxy inheritance, no target DNS
+/// pre-resolution, transport-pinned redirects), so that combination is
+/// rejected explicitly at the (matching) `cfg` boundary rather than
+/// silently used — callers outside this `cfg` must reject Tor themselves
+/// (see `Website::tor_crawl_preflight` and `evidence::fetch_via_tor`'s
+/// sibling variants).
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) fn build_tor_client(
+    policy: &TransportPolicy,
+) -> Result<reqwest::Client, TransportError> {
+    let builder = apply_transport_policy(reqwest::Client::builder(), policy)?;
+    let builder = builder
+        .connect_timeout(TOR_CONNECT_TIMEOUT)
+        .read_timeout(TOR_READ_TIMEOUT)
+        .timeout(TOR_TOTAL_TIMEOUT)
+        .user_agent(crate::configuration::get_ua(false))
+        .redirect(pin_redirect_policy(
+            ssrf_screened_base_policy(TOR_REDIRECT_LIMIT),
+            policy.clone(),
+        ));
+    builder
+        .build()
+        .map_err(|error| TransportError::ProxyBuildFailed(error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,12 +732,14 @@ mod tests {
         assert!(validate_target(&onion, &policy).is_ok());
     }
 
-    #[cfg(feature = "evidence")]
+    /// Supersedes the old `TransportPolicy::label` test — provenance
+    /// labels now live on `AcquisitionTransport` (the `Page`-carried,
+    /// actually-observed transport), not the requested policy. See
+    /// `spider::utils::evidence::build_evidence_with_transport`.
     #[test]
-    fn policy_labels_are_the_locked_provenance_values() {
-        let config = TorTransportConfig::new("socks5h://127.0.0.1:9050").unwrap();
-        assert_eq!(TransportPolicy::Default.label(), "default");
-        assert_eq!(TransportPolicy::Tor(config).label(), "tor");
+    fn acquisition_transport_labels_are_the_locked_provenance_values() {
+        assert_eq!(AcquisitionTransport::Default.label(), "default");
+        assert_eq!(AcquisitionTransport::Tor.label(), "tor");
     }
 
     // The "fails closed without transport_tor" contract is proven at the

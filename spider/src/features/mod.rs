@@ -51,6 +51,9 @@ pub mod solvers;
 /// already requires); does not require `transport_tor`.
 #[cfg(feature = "evidence")]
 pub mod acquisition_binding;
+/// Pure provider-neutral binding from resolved artifact metadata to future
+/// download execution intent. Performs no acquisition or filesystem work.
+pub mod artifact_download_binding;
 /// Provider-neutral metadata for versioned repository artifacts. Always
 /// available and performs no acquisition, download, parsing, or verification.
 pub mod artifact_reference;

@@ -24,6 +24,12 @@
 //! TransportAcquisition
 //!       │
 //!       ▼
+//! canonical local materialization ([`materialize`])
+//!       │
+//!       ▼
+//! DiscoveryMaterial = (exact acquired bytes, final containing URL)
+//!       │
+//!       ▼
 //!     [STOP]
 //! ```
 //!
@@ -72,8 +78,40 @@
 //! can actually execute a `Tor` binding.
 
 use crate::features::discovery_target::DiscoveryTarget;
+use crate::features::research_scope::DiscoveryMaterial;
 use crate::features::transport::{self, TransportError, TransportRequest};
 use crate::utils::evidence::{AcquisitionOptions, TransportAcquisition};
+
+/// Why an acquired page could not become parser-neutral discovery material.
+/// No variant retains a URL or body, so errors cannot echo credentials,
+/// query tokens, fragments, or acquired content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryMaterialError {
+    /// The canonical Page parsing-status contract does not consider this
+    /// response usable material. Carries only the numeric status code.
+    UnusableStatus(u16),
+    /// The acquisition retained no body, or its already-acquired canonical
+    /// disk spool could not be materialized.
+    BodyUnavailable,
+}
+
+impl std::fmt::Display for DiscoveryMaterialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiscoveryMaterialError::UnusableStatus(status) => {
+                write!(
+                    f,
+                    "acquired response status {status} is not usable discovery material"
+                )
+            }
+            DiscoveryMaterialError::BodyUnavailable => {
+                write!(f, "acquired response body is unavailable")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DiscoveryMaterialError {}
 
 /// Why a [`DiscoveryTarget`] could not be bound to acquisition intent.
 /// Every variant delegates directly to an existing canonical error type
@@ -195,6 +233,52 @@ pub fn bind_all(
 /// a process without the `transport_tor` feature).
 pub async fn execute(binding: AcquisitionBinding) -> Result<TransportAcquisition, String> {
     crate::utils::evidence::fetch_single_page_with_options(&binding.url, binding.options).await
+}
+
+/// Convert one completed transport acquisition into parser-neutral discovery
+/// material. This performs local materialization only: no request, retry,
+/// redirect, browser, DNS, socket, crawl, or transport resolution occurs.
+///
+/// Status acceptance reuses Spider's canonical parsing-status contract:
+/// successful HTTP statuses and `404 Not Found` are usable; every other
+/// status is rejected before body materialization. In-memory bytes are copied
+/// exactly. Under `balance`, an existing Page spool is reloaded through
+/// [`crate::page::Page::ensure_html_loaded_async`], the canonical API for
+/// already-acquired spooled content — never through an ad-hoc filesystem
+/// reader. The material URL is always [`crate::page::Page::get_url_final`].
+///
+/// Parser selection, target provenance, and transport provenance are
+/// deliberately absent from both input decisions and output shape.
+pub async fn materialize(
+    acquisition: TransportAcquisition,
+) -> Result<DiscoveryMaterial, DiscoveryMaterialError> {
+    materialize_page(acquisition.into_page()).await
+}
+
+async fn materialize_page(
+    page: crate::page::Page,
+) -> Result<DiscoveryMaterial, DiscoveryMaterialError> {
+    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+    let mut page = page;
+
+    if !crate::utils::valid_parsing_status_code(page.status_code) {
+        return Err(DiscoveryMaterialError::UnusableStatus(
+            page.status_code.as_u16(),
+        ));
+    }
+
+    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+    if page.get_bytes().is_none() && !page.ensure_html_loaded_async().await {
+        return Err(DiscoveryMaterialError::BodyUnavailable);
+    }
+
+    let url = page.get_url_final().to_string();
+    let bytes = page
+        .get_bytes()
+        .ok_or(DiscoveryMaterialError::BodyUnavailable)?
+        .to_vec();
+
+    Ok(DiscoveryMaterial { bytes, url })
 }
 
 #[cfg(test)]
@@ -442,6 +526,10 @@ mod tests {
 
     impl HttpFixture {
         async fn start() -> Self {
+            Self::start_response("200 OK", b"acquisition binding execution fixture ok").await
+        }
+
+        async fn start_response(status: &'static str, body: &'static [u8]) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let hits = Arc::new(AtomicUsize::new(0));
@@ -457,9 +545,8 @@ mod tests {
                         hits.fetch_add(1, AtomicOrdering::SeqCst);
                         let mut buf = [0_u8; 4096];
                         let _ = stream.read(&mut buf).await;
-                        let body = b"acquisition binding execution fixture ok";
                         let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         let _ = stream.write_all(response.as_bytes()).await;
@@ -494,6 +581,139 @@ mod tests {
             acquisition.transport(),
             crate::features::transport::TransportPolicy::Default
         ));
+    }
+
+    /// A real completed acquisition becomes neutral material without a second
+    /// request. Exact non-UTF-8 bytes and the containing URL survive.
+    #[tokio::test]
+    async fn successful_acquisition_materializes_exact_bytes_without_refetch() {
+        const BODY: &[u8] = b"\x00exact\xffbytes";
+        let http = HttpFixture::start_response("200 OK", BODY).await;
+        let url = format!("http://{}/document", http.addr);
+        let binding = bind(&requested(&url), default_transport()).unwrap();
+        let acquisition = execute(binding).await.unwrap();
+        assert_eq!(http.hit_count(), 1);
+
+        let material = materialize(acquisition).await.unwrap();
+
+        assert_eq!(http.hit_count(), 1, "materialization must not refetch");
+        assert_eq!(material.bytes, BODY);
+        assert_eq!(material.url, url);
+    }
+
+    /// The existing canonical status contract intentionally accepts 404 body
+    /// material, matching Spider's established parser-ready Page semantics.
+    #[tokio::test]
+    async fn not_found_body_is_canonical_usable_material() {
+        const BODY: &[u8] = b"404 representation";
+        let http = HttpFixture::start_response("404 Not Found", BODY).await;
+        let url = format!("http://{}/missing", http.addr);
+        let acquisition = execute(bind(&requested(&url), default_transport()).unwrap())
+            .await
+            .unwrap();
+
+        let material = materialize(acquisition).await.unwrap();
+
+        assert_eq!(material.bytes, BODY);
+        assert_eq!(material.url, url);
+        assert_eq!(http.hit_count(), 1);
+    }
+
+    /// Other non-success/degraded statuses are rejected deterministically and
+    /// the typed error contains no URL or body data.
+    #[tokio::test]
+    async fn unusable_status_is_rejected_with_secret_safe_typed_error() {
+        const SECRET: &str = "secret-query-token-7391";
+        let http =
+            HttpFixture::start_response("500 Internal Server Error", SECRET.as_bytes()).await;
+        let url = format!("http://{}/failure?token={SECRET}#fragment", http.addr);
+        let acquisition = execute(bind(&requested(&url), default_transport()).unwrap())
+            .await
+            .unwrap();
+
+        let error = materialize(acquisition).await.unwrap_err();
+
+        assert_eq!(error, DiscoveryMaterialError::UnusableStatus(500));
+        assert!(!format!("{error:?}").contains(SECRET));
+        assert!(!format!("{error}").contains(SECRET));
+        assert_eq!(http.hit_count(), 1);
+    }
+
+    /// Missing retained content is a deterministic typed failure, never an
+    /// empty successful material.
+    #[tokio::test]
+    async fn missing_body_is_rejected_deterministically() {
+        let mut page = crate::page::build(
+            "https://example.test/empty",
+            crate::utils::PageResponse {
+                status_code: reqwest::StatusCode::OK,
+                content: Some(b"initially retained".to_vec()),
+                ..Default::default()
+            },
+        );
+        page.set_html_bytes(None);
+
+        assert_eq!(
+            materialize_page(page).await,
+            Err(DiscoveryMaterialError::BodyUnavailable)
+        );
+    }
+
+    /// Page's canonical final URL is the material's containing URL; the
+    /// requested URL is neither reconstructed nor retained in the payload.
+    #[tokio::test]
+    async fn final_redirect_destination_is_material_url() {
+        let page = crate::page::build(
+            "https://example.test/requested",
+            crate::utils::PageResponse {
+                status_code: reqwest::StatusCode::OK,
+                content: Some(b"redirected bytes".to_vec()),
+                final_url: Some("https://final.example.test/document".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let material = materialize_page(page).await.unwrap();
+        assert_eq!(material.bytes, b"redirected bytes");
+        assert_eq!(material.url, "https://final.example.test/document");
+    }
+
+    /// Structural proof: the conversion result exhaustively contains only
+    /// bytes and URL. No parser intent, target kind, transport, SourceItem, or
+    /// evidence field can be copied into this shape unnoticed.
+    #[test]
+    fn material_output_shape_is_parser_transport_and_candidate_neutral() {
+        let material = DiscoveryMaterial {
+            bytes: vec![1, 2, 3],
+            url: "https://example.test/document".to_string(),
+        };
+        let DiscoveryMaterial { bytes, url } = material;
+        assert_eq!(bytes, vec![1, 2, 3]);
+        assert_eq!(url, "https://example.test/document");
+    }
+
+    /// Canonical balance spool materialization reloads already-acquired exact
+    /// bytes locally and performs no network operation.
+    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+    #[tokio::test]
+    async fn previously_spooled_body_materializes_through_page_api() {
+        const BODY: &[u8] = b"already acquired spooled discovery bytes";
+        let mut page = crate::page::build(
+            "https://example.test/spooled",
+            crate::utils::PageResponse {
+                status_code: reqwest::StatusCode::OK,
+                content: Some(BODY.to_vec()),
+                ..Default::default()
+            },
+        );
+        assert!(page.spool_html_to_disk());
+        assert!(page.get_bytes().is_none());
+        assert!(page.is_html_on_disk());
+
+        let material = materialize_page(page).await.unwrap();
+
+        assert_eq!(material.bytes, BODY);
+        assert_eq!(material.url, "https://example.test/spooled");
     }
 
     #[cfg(feature = "transport_tor")]

@@ -45,15 +45,20 @@ pub mod solvers;
 /// RSS and Atom feed parsing and normalization.
 #[cfg(feature = "feed")]
 pub mod feed;
-/// Standard sitemap urlset and sitemapindex parsing and normalization.
-#[cfg(feature = "sitemap")]
-pub mod sitemap;
 /// Google News Sitemap parsing and normalization.
 #[cfg(feature = "news_sitemap")]
 pub mod news_sitemap;
+/// Manual/request-supplied onion seed URL discovery (classification and
+/// `SourceItem` normalization only — zero target acquisition). Available
+/// unconditionally, independent of the `transport_tor` feature: this is
+/// URL classification, not Tor networking.
+pub mod onion_seed;
 /// robots.txt `Sitemap:` directive discovery.
 #[cfg(feature = "robots_sitemap")]
 pub mod robots_sitemap;
+/// Standard sitemap urlset and sitemapindex parsing and normalization.
+#[cfg(feature = "sitemap")]
+pub mod sitemap;
 /// Generic source-discovery vocabulary.
 pub mod source;
 

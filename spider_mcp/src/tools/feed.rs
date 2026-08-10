@@ -275,7 +275,7 @@ mod tests {
                 .map(|index| SourceItem {
                     source_type: "feed".into(),
                     source_item_id: Some(index.to_string()),
-                    discovered_via: "https://example.test/feed".into(),
+                    discovered_via: Some("https://example.test/feed".into()),
                     ..Default::default()
                 })
                 .collect(),

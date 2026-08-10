@@ -366,7 +366,7 @@ fn finish_frame(
             authors: Vec::new(),
             published_at,
             updated_at,
-            discovered_via: sitemap_url.to_string(),
+            discovered_via: Some(sitemap_url.to_string()),
             media_references: Vec::new(),
         },
         news,

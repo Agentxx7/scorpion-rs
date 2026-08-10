@@ -313,7 +313,7 @@ mod tests {
                     .map(|index| SourceItem {
                         source_type: "sitemap".into(),
                         url: Some(format!("https://example.test/{index}")),
-                        discovered_via: "https://example.test/sitemap.xml".into(),
+                        discovered_via: Some("https://example.test/sitemap.xml".into()),
                         ..Default::default()
                     })
                     .collect(),

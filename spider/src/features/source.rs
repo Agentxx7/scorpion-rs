@@ -23,8 +23,14 @@ pub struct SourceItem {
     pub published_at: Option<u64>,
     /// Provider-declared update time as Unix epoch milliseconds.
     pub updated_at: Option<u64>,
-    /// Exact source URL from which this item was discovered.
-    pub discovered_via: String,
+    /// Exact source URL from which this item was discovered — the
+    /// containing feed/sitemap/document that declared it. `None` when
+    /// there genuinely is no such containing document (e.g. a manually
+    /// supplied seed URL named directly by a caller, not discovered
+    /// through anything) — absence is represented truthfully, never with
+    /// an empty string, a self-reference to `url`, or an invented
+    /// placeholder.
+    pub discovered_via: Option<String>,
     /// Provider-declared media associated with this item.
     pub media_references: Vec<MediaReference>,
 }
@@ -58,6 +64,7 @@ mod tests {
         assert_eq!(item.url, None);
         assert_eq!(item.published_at, None);
         assert_eq!(item.updated_at, None);
+        assert_eq!(item.discovered_via, None);
     }
 
     #[cfg(feature = "serde")]
@@ -65,7 +72,7 @@ mod tests {
     fn serialization_is_discovery_only() {
         let value = serde_json::to_value(SourceItem {
             source_type: "feed".into(),
-            discovered_via: "https://example.test/feed.xml".into(),
+            discovered_via: Some("https://example.test/feed.xml".to_string()),
             ..Default::default()
         })
         .unwrap();
@@ -84,5 +91,26 @@ mod tests {
                 "unexpected field {forbidden}"
             );
         }
+    }
+
+    /// `discovered_via: None` (no containing source document — e.g. a
+    /// manually supplied seed) serializes as JSON `null`, existing serde
+    /// policy for every other `Option` field on this type (there is no
+    /// `skip_serializing_if` anywhere here) — never omitted, never an
+    /// empty string standing in for absence.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn absent_discovered_via_serializes_as_null() {
+        let value = serde_json::to_value(SourceItem {
+            source_type: "onion_seed".into(),
+            discovered_via: None,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            value.get("discovered_via").is_some(),
+            "field must be present"
+        );
+        assert_eq!(value["discovered_via"], serde_json::Value::Null);
     }
 }

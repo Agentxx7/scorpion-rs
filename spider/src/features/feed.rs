@@ -192,7 +192,7 @@ fn map_entry(
                     .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
             })
             .flatten(),
-        discovered_via: feed_url.to_string(),
+        discovered_via: Some(feed_url.to_string()),
         media_references: media_references(entry, is_atom),
     }
 }
@@ -339,6 +339,11 @@ mod tests {
         assert_eq!(
             first.media_references[0].mime_type.as_deref(),
             Some("audio/mpeg")
+        );
+        assert_eq!(
+            first.discovered_via.as_deref(),
+            Some("https://example.test/feed.xml"),
+            "discovered_via must be the actual containing feed URL, not absent"
         );
         assert_eq!(result.entries[1].source_item_id, None);
         assert_eq!(

@@ -15,7 +15,11 @@
 //! explicitly, not silently ignored; see `Website::with_transport`).
 //!
 //! Public surface: [`TransportPolicy`], [`TorTransportConfig`] (and its
-//! constructor [`TorTransportConfig::new`]), and [`TransportError`].
+//! constructor [`TorTransportConfig::new`]), [`TransportError`], and
+//! [`is_onion_url`] — the canonical `.onion` URL classifier, exposed for
+//! discovery-time use (`spider::features::onion_seed`) as well as
+//! acquisition-time use. It performs no network activity: classification
+//! only, not validation of Tor reachability or hidden-service liveness.
 //! Everything else in this module (`is_onion_host`, `validate_target`,
 //! `apply_transport_policy`, `pin_redirect_policy`,
 //! `TransportPolicy::label`) is crate-private implementation detail.
@@ -325,13 +329,32 @@ impl TransportRequest {
 /// Canonical, case-insensitive `.onion` hostname detection. Matches the
 /// exact `.onion` suffix and any subdomain beneath it; never a substring
 /// match (`abc.onion.example.com` is NOT onion; `fakeonion` is NOT
-/// onion). Crate-private implementation mechanics — external callers
-/// observe onion-ness indirectly, through `fetch_single_page_with_options`
-/// succeeding/failing and through evidence provenance, not by calling
-/// this detector directly.
+/// onion). Crate-private: operates on a bare host string, not a full URL
+/// — [`is_onion_url`] is the public, URL-level wrapper acquisition-time
+/// (`validate_target`, `pin_redirect_policy`, `CrawlBoundary`) and
+/// discovery-time (`spider::features::onion_seed`) callers actually use.
 pub(crate) fn is_onion_host(host: &str) -> bool {
     let host = host.trim_end_matches('.');
     host.len() > 6 && host.to_ascii_lowercase().ends_with(".onion")
+}
+
+/// Canonical, public `.onion` URL classifier. `true` exactly when `url`
+/// has a host and that host is `.onion` per [`is_onion_host`] — the same
+/// detection Tor acquisition's fail-closed `.onion` protection
+/// (`validate_target`), redirect pinning (`pin_redirect_policy`), and
+/// crawl-boundary checks (`CrawlBoundary`) already rely on internally,
+/// exposed here as the one canonical seam so discovery code
+/// (`spider::features::onion_seed`) never reimplements `.ends_with(".onion")`
+/// or equivalent matching on its own.
+///
+/// Pure classification, no network activity: this does not confirm the
+/// hidden service is reachable, does not validate Onion v2/v3 address
+/// structure beyond what `url::Url` itself requires to parse a host, and
+/// makes no cryptographic claim about the address. Userinfo
+/// (`user:pass@`) never participates — only `url.host_str()` is
+/// inspected — and path/query/fragment never affect the result.
+pub fn is_onion_url(url: &url::Url) -> bool {
+    url.host_str().is_some_and(is_onion_host)
 }
 
 /// Pre-flight guard: reject a `.onion` target under `TransportPolicy::Default`
@@ -345,7 +368,7 @@ pub(crate) fn validate_target(
     url: &url::Url,
     policy: &TransportPolicy,
 ) -> Result<(), TransportError> {
-    let onion = url.host_str().is_some_and(is_onion_host);
+    let onion = is_onion_url(url);
     match (onion, policy) {
         (true, TransportPolicy::Default) => Err(TransportError::OnionRequiresTor),
         _ => Ok(()),
@@ -440,7 +463,7 @@ pub(crate) fn pin_redirect_policy(
     policy: TransportPolicy,
 ) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
-        let next_onion = attempt.url().host_str().is_some_and(is_onion_host);
+        let next_onion = is_onion_url(attempt.url());
 
         match &policy {
             TransportPolicy::Default => {
@@ -451,7 +474,7 @@ pub(crate) fn pin_redirect_policy(
             }
             TransportPolicy::Tor(_) => {
                 let original = attempt.previous().first().unwrap_or_else(|| attempt.url());
-                let original_onion = original.host_str().is_some_and(is_onion_host);
+                let original_onion = is_onion_url(original);
 
                 if original_onion != next_onion {
                     return attempt.error(
@@ -578,7 +601,7 @@ impl CrawlBoundary {
     /// preflight before a boundary is ever derived (see
     /// `Website::tor_crawl_preflight`).
     pub(crate) fn from_seed(policy: &TransportPolicy, seed: &url::Url) -> Self {
-        let seed_onion = seed.host_str().is_some_and(is_onion_host);
+        let seed_onion = is_onion_url(seed);
         match (policy, seed_onion) {
             (TransportPolicy::Tor(_), true) => CrawlBoundary::Onion {
                 host: seed.host_str().unwrap_or_default().to_ascii_lowercase(),
@@ -596,7 +619,7 @@ impl CrawlBoundary {
 /// normalized the same way [`CrawlBoundary::from_seed`] and the redirect
 /// pinning in [`pin_redirect_policy`] already normalize `.onion` hosts.
 pub(crate) fn crawl_boundary_allows(boundary: &CrawlBoundary, candidate: &url::Url) -> bool {
-    let candidate_onion = candidate.host_str().is_some_and(is_onion_host);
+    let candidate_onion = is_onion_url(candidate);
     match boundary {
         CrawlBoundary::Clearnet => !candidate_onion,
         CrawlBoundary::Onion { host } => {
@@ -719,6 +742,26 @@ mod tests {
         assert!(!is_onion_host("fakeonion"));
         assert!(!is_onion_host("onion"));
         assert!(!is_onion_host(""));
+    }
+
+    /// The public URL-level wrapper agrees with the crate-private
+    /// host-level detector exactly, and ignores userinfo/path/query/
+    /// fragment — only `host_str()` participates.
+    #[test]
+    fn is_onion_url_matches_is_onion_host_and_ignores_userinfo_path_query_fragment() {
+        assert!(is_onion_url(&url::Url::parse("http://abc.onion/").unwrap()));
+        assert!(is_onion_url(
+            &url::Url::parse("http://ABC.ONION/path?q=1#frag").unwrap()
+        ));
+        assert!(is_onion_url(
+            &url::Url::parse("http://user:pass@abc.onion/").unwrap()
+        ));
+        assert!(!is_onion_url(
+            &url::Url::parse("http://abc.onion.example.com/").unwrap()
+        ));
+        assert!(!is_onion_url(
+            &url::Url::parse("https://example.com/").unwrap()
+        ));
     }
 
     #[test]

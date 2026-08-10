@@ -103,7 +103,7 @@ fn parse_sync(
                     authors: Vec::new(),
                     published_at: None,
                     updated_at: timestamp_millis(&entry.lastmod),
-                    discovered_via: sitemap_url.to_string(),
+                    discovered_via: Some(sitemap_url.to_string()),
                     media_references: Vec::new(),
                 });
             }
@@ -214,7 +214,10 @@ mod tests {
         assert_eq!(first.published_at, None);
         assert!(first.updated_at.is_some());
         assert_eq!(result.entries[1].updated_at, None);
-        assert_eq!(first.discovered_via, "https://example.test/sitemap.xml");
+        assert_eq!(
+            first.discovered_via.as_deref(),
+            Some("https://example.test/sitemap.xml")
+        );
         assert!(first.media_references.is_empty());
     }
 

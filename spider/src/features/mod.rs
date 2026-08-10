@@ -42,6 +42,15 @@ pub mod gemini_common;
 /// Solve all.
 pub mod solvers;
 
+/// `DiscoveryTarget`: the smallest canonical planning boundary for
+/// discovery pointers (sitemap index child sitemaps, robots.txt-declared
+/// sitemaps, caller/request-supplied URLs) — URLs to acquire *later*,
+/// never `SourceItem` content candidates and never something already
+/// fetched. Zero acquisition; terminates in targets. Always available —
+/// the module itself has no feature gate, though its sitemap/
+/// robots_sitemap `PlanningInput` variants are individually gated behind
+/// their respective existing features.
+pub mod discovery_target;
 /// RSS and Atom feed parsing and normalization.
 #[cfg(feature = "feed")]
 pub mod feed;

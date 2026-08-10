@@ -53,6 +53,17 @@ pub mod news_sitemap;
 /// unconditionally, independent of the `transport_tor` feature: this is
 /// URL classification, not Tor networking.
 pub mod onion_seed;
+/// `ResearchScope`: the smallest canonical declarative discovery-scope
+/// boundary (onion seeds / already-produced candidates only — never
+/// fetched document bytes), plus the `discover` orchestration seam that
+/// normalizes a `ResearchScope` together with already-acquired
+/// `DiscoveryMaterial` (fetched feed/sitemap/news-sitemap document
+/// bytes) into ordered `SourceItem` candidates. Zero acquisition;
+/// terminates in candidates. Always available — the module itself has
+/// no feature gate, though its feed/sitemap/news_sitemap
+/// `DiscoveryMaterial` variants are individually gated behind their
+/// respective existing features.
+pub mod research_scope;
 /// robots.txt `Sitemap:` directive discovery.
 #[cfg(feature = "robots_sitemap")]
 pub mod robots_sitemap;

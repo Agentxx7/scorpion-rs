@@ -91,6 +91,10 @@ pub mod robots_sitemap;
 pub mod sitemap;
 /// Generic source-discovery vocabulary.
 pub mod source;
+/// Parser-, acquisition-, and transport-neutral source-provider identity,
+/// output, descriptor, and deterministic metadata-registry vocabulary.
+/// Always available; concrete provider execution remains a later frontier.
+pub mod source_provider;
 
 /// Canonical HTTP transport policy (`Default` / Tor-over-SOCKS5h), with
 /// fail-closed `.onion` protection and transport-pinned redirects.

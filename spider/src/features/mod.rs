@@ -95,6 +95,10 @@ pub mod research_scope;
 /// robots.txt `Sitemap:` directive discovery.
 #[cfg(feature = "robots_sitemap")]
 pub mod robots_sitemap;
+/// Ephemeral, non-serializable, fully value-redacted request headers for
+/// future execution bindings. Always available and performs no network or
+/// persistence work.
+pub mod secret_request_headers;
 /// Standard sitemap urlset and sitemapindex parsing and normalization.
 #[cfg(feature = "sitemap")]
 pub mod sitemap;

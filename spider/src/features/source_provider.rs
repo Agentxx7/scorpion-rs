@@ -91,6 +91,13 @@ impl ProviderCapabilities {
         targets: false,
         artifacts: true,
     };
+
+    /// A provider that emits normalized items and versioned artifacts.
+    pub const ITEMS_AND_ARTIFACTS: Self = Self {
+        items: true,
+        targets: false,
+        artifacts: true,
+    };
 }
 
 /// Minimal provider metadata used by registry lookup and future orchestration.

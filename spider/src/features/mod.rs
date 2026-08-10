@@ -74,13 +74,14 @@ pub mod onion_seed;
 /// `ResearchScope`: the smallest canonical declarative discovery-scope
 /// boundary (onion seeds / already-produced candidates only — never
 /// fetched document bytes), plus the `discover` orchestration seam that
-/// normalizes a `ResearchScope` together with already-acquired
-/// `DiscoveryMaterial` (fetched feed/sitemap/news-sitemap document
-/// bytes) into ordered `SourceItem` candidates. Zero acquisition;
+/// normalizes a `ResearchScope` together with parser-neutral,
+/// already-acquired `DiscoveryMaterial` (document bytes + containing URL)
+/// paired with explicit `DiscoveryParserIntent` into ordered `SourceItem`
+/// candidates. Zero acquisition;
 /// terminates in candidates. Always available — the module itself has
-/// no feature gate, though its feed/sitemap/news_sitemap
-/// `DiscoveryMaterial` variants are individually gated behind their
-/// respective existing features.
+/// no feature gate. `DiscoveryMaterial` itself is always available; parser
+/// intent variants are individually gated behind their respective existing
+/// feed/sitemap/news_sitemap features.
 pub mod research_scope;
 /// robots.txt `Sitemap:` directive discovery.
 #[cfg(feature = "robots_sitemap")]

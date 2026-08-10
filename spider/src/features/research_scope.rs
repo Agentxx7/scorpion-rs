@@ -40,7 +40,8 @@
 //!
 //! [`discover`] is the one orchestration seam that normalizes a mixed,
 //! caller-ordered list of [`DiscoveryInput`] (each either a
-//! [`ScopeSeed`] or [`DiscoveryMaterial`]) into [`SourceItem`]
+//! [`ScopeSeed`] or parser-neutral [`DiscoveryMaterial`] paired with an
+//! explicit [`DiscoveryParserIntent`]) into [`SourceItem`]
 //! candidates. **Zero acquisition occurs here or anywhere in this
 //! module**: every byte/string a [`DiscoveryInput`] carries was already
 //! supplied by the caller. This module has no HTTP client, no Tor/SOCKS,
@@ -156,79 +157,69 @@ impl FromIterator<ScopeSeed> for ResearchScope {
     }
 }
 
-/// Already-acquired discovery material: fetched document bytes the
-/// caller already retrieved through some acquisition step entirely
-/// outside this module's concern, paired with the document's own URL.
+/// Parser-neutral already-acquired discovery material: fetched document
+/// bytes the caller already retrieved through some acquisition step
+/// entirely outside this module's concern, paired with the document's own
+/// URL.
 /// **Not part of [`ResearchScope`]** — acquisition output is a
 /// structurally distinct concern from declarative scope (see the module
 /// docs' domain-boundary diagram). Constructing a [`DiscoveryMaterial`]
 /// performs no work; normalization happens only inside [`discover`].
-#[derive(Debug, Clone)]
-pub enum DiscoveryMaterial {
-    /// An already-fetched RSS/Atom feed document's bytes, plus the
-    /// feed's own URL (used for `discovered_via`). The bytes must
-    /// already have been retrieved by the caller — this module never
-    /// fetches them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryMaterial {
+    /// Exact bytes already retrieved by the caller.
+    pub bytes: Vec<u8>,
+    /// The acquired document's actual containing URL. Existing parsers use
+    /// this value as `SourceItem::discovered_via`; this type never derives or
+    /// rewrites it.
+    pub url: String,
+}
+
+/// Explicit selection of the canonical parser that should consume a
+/// [`DiscoveryMaterial`]. Parser intent is caller-supplied and independent of
+/// the material's URL, bytes, acquisition transport, and target provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveryParserIntent {
+    /// Route to [`crate::features::feed::parse`].
     #[cfg(feature = "feed")]
-    Feed {
-        /// Exact bytes already retrieved by the caller.
-        bytes: Vec<u8>,
-        /// The feed document's own URL.
-        feed_url: String,
-    },
-    /// An already-fetched standard sitemap document's bytes, plus its
-    /// own URL. Only `urlset` content entries become candidates; a
-    /// `sitemapindex`'s child-sitemap pointers do not (see module docs).
+    Feed,
+    /// Route to [`crate::features::sitemap::parse`].
     #[cfg(feature = "sitemap")]
-    Sitemap {
-        /// Exact bytes already retrieved by the caller.
-        bytes: Vec<u8>,
-        /// The sitemap document's own URL.
-        sitemap_url: String,
-    },
-    /// An already-fetched Google News Sitemap document's bytes, plus its
-    /// own URL. Only the generic `SourceItem` half of each entry becomes
-    /// a candidate — the News-specific metadata
-    /// (`NewsSitemapEntry::news`) is intentionally not merged into the
-    /// generic candidate shape; a caller who needs it should call
-    /// [`crate::features::news_sitemap::parse`] directly.
+    Sitemap,
+    /// Route to [`crate::features::news_sitemap::parse`].
     #[cfg(feature = "news_sitemap")]
-    NewsSitemap {
-        /// Exact bytes already retrieved by the caller.
-        bytes: Vec<u8>,
-        /// The News Sitemap document's own URL.
-        sitemap_url: String,
-    },
+    NewsSitemap,
 }
 
 /// One item for [`discover`] to normalize, in the exact order the caller
-/// wants processed — a [`ScopeSeed`] (declarative) or [`DiscoveryMaterial`]
-/// (already-acquired). This is the orchestration boundary's working
+/// wants processed — a [`ScopeSeed`] (declarative) or parser-neutral
+/// [`DiscoveryMaterial`] paired with an explicit [`DiscoveryParserIntent`].
+/// This is the orchestration boundary's working
 /// unit: it exists only as `discover`'s input shape, and is **never**
 /// stored inside [`ResearchScope`] — that separation is the whole point
 /// of this module's design (see the module docs' domain-boundary
 /// diagram). A caller coordinates scope seeds and discovery material
 /// together by building a `Vec<DiscoveryInput>` (via
-/// [`ResearchScope::into_inputs`] plus `.into()` on any
-/// [`DiscoveryMaterial`] values, interleaved in whatever order is
-/// wanted) and passing it to [`discover`] in one call.
+/// [`ResearchScope::into_inputs`] plus explicit `Material { material, intent }`
+/// values, interleaved in whatever order is wanted) and passing it to
+/// [`discover`] in one call.
 #[derive(Debug, Clone)]
 pub enum DiscoveryInput {
     /// A declarative scope seed.
     Scope(ScopeSeed),
-    /// Already-acquired discovery material.
-    Material(DiscoveryMaterial),
+    /// Already-acquired discovery material plus the parser the caller
+    /// explicitly selected for it.
+    Material {
+        /// Parser-neutral acquired payload.
+        material: DiscoveryMaterial,
+        /// Explicit parser selection; never inferred from `material`.
+        intent: DiscoveryParserIntent,
+    },
 }
 
 impl From<ScopeSeed> for DiscoveryInput {
     fn from(seed: ScopeSeed) -> Self {
         DiscoveryInput::Scope(seed)
-    }
-}
-
-impl From<DiscoveryMaterial> for DiscoveryInput {
-    fn from(material: DiscoveryMaterial) -> Self {
-        DiscoveryInput::Material(material)
     }
 }
 
@@ -328,35 +319,36 @@ pub async fn discover(inputs: &[DiscoveryInput]) -> DiscoveryOutcome {
             }
             DiscoveryInput::Scope(ScopeSeed::Candidate(item)) => Ok(vec![item.clone()]),
             #[cfg(feature = "feed")]
-            DiscoveryInput::Material(DiscoveryMaterial::Feed { bytes, feed_url }) => {
-                crate::features::feed::parse(bytes, feed_url)
-                    .await
-                    .map(|result| result.entries)
-                    .map_err(DiscoveryError::Feed)
-            }
+            DiscoveryInput::Material {
+                material,
+                intent: DiscoveryParserIntent::Feed,
+            } => crate::features::feed::parse(&material.bytes, &material.url)
+                .await
+                .map(|result| result.entries)
+                .map_err(DiscoveryError::Feed),
             #[cfg(feature = "sitemap")]
-            DiscoveryInput::Material(DiscoveryMaterial::Sitemap { bytes, sitemap_url }) => {
-                crate::features::sitemap::parse(bytes, sitemap_url)
-                    .await
-                    .map(|result| result.entries)
-                    .map_err(DiscoveryError::Sitemap)
-            }
+            DiscoveryInput::Material {
+                material,
+                intent: DiscoveryParserIntent::Sitemap,
+            } => crate::features::sitemap::parse(&material.bytes, &material.url)
+                .await
+                .map(|result| result.entries)
+                .map_err(DiscoveryError::Sitemap),
             #[cfg(feature = "news_sitemap")]
-            DiscoveryInput::Material(DiscoveryMaterial::NewsSitemap { bytes, sitemap_url }) => {
-                crate::features::news_sitemap::parse(bytes, sitemap_url)
-                    .await
-                    .map(|result| result.entries.into_iter().map(|entry| entry.item).collect())
-                    .map_err(DiscoveryError::NewsSitemap)
-            }
+            DiscoveryInput::Material {
+                material,
+                intent: DiscoveryParserIntent::NewsSitemap,
+            } => crate::features::news_sitemap::parse(&material.bytes, &material.url)
+                .await
+                .map(|result| result.entries.into_iter().map(|entry| entry.item).collect())
+                .map_err(DiscoveryError::NewsSitemap),
             // Reachable only when none of feed/sitemap/news_sitemap is
-            // enabled — `DiscoveryMaterial` is then an uninhabited type
-            // (all three variants are individually feature-gated), so no
-            // `DiscoveryInput::Material(..)` value can actually exist at
-            // runtime. This arm exists purely to satisfy exhaustiveness
-            // across that feature combination; the empty match on
-            // `*material` is itself exhaustive for an uninhabited type.
+            // enabled — `DiscoveryParserIntent` is then an uninhabited type,
+            // so no `DiscoveryInput::Material { .. }` value can actually
+            // exist at runtime. The neutral `DiscoveryMaterial` remains
+            // independently constructible in that feature combination.
             #[cfg(not(any(feature = "feed", feature = "sitemap", feature = "news_sitemap")))]
-            DiscoveryInput::Material(material) => match *material {},
+            DiscoveryInput::Material { intent, .. } => match *intent {},
         };
         per_input.push(result);
     }
@@ -382,6 +374,20 @@ mod tests {
 
     fn candidate_input(url: &str, source_type: &str) -> DiscoveryInput {
         DiscoveryInput::Scope(ScopeSeed::Candidate(candidate_item(url, source_type)))
+    }
+
+    /// Compile-enforced shape proof: acquired material is exactly bytes plus
+    /// its containing URL. Parser classification and target provenance can
+    /// only be supplied separately on `DiscoveryInput::Material`.
+    #[test]
+    fn discovery_material_is_parser_neutral_bytes_and_url_only() {
+        let material = DiscoveryMaterial {
+            bytes: vec![0, 1, 2, 255],
+            url: "https://example.test/document.bin".to_string(),
+        };
+        let DiscoveryMaterial { bytes, url } = material;
+        assert_eq!(bytes, vec![0, 1, 2, 255]);
+        assert_eq!(url, "https://example.test/document.bin");
     }
 
     /// Structural proof (CRITICAL, per operator review): `ResearchScope`
@@ -527,10 +533,13 @@ mod tests {
         const RSS: &str = r#"<rss version="2.0"><channel><title>T</title><item><guid>one</guid><link>https://example.test/a</link><title>A</title></item></channel></rss>"#;
         let inputs = vec![
             onion("http://abc.onion/"),
-            DiscoveryInput::Material(DiscoveryMaterial::Feed {
-                bytes: RSS.as_bytes().to_vec(),
-                feed_url: "https://example.test/feed.xml".to_string(),
-            }),
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: RSS.as_bytes().to_vec(),
+                    url: "https://example.test/feed.xml".to_string(),
+                },
+                intent: DiscoveryParserIntent::Feed,
+            },
             candidate_input("https://example.test/manual", "custom"),
         ];
         let outcome = discover(&inputs).await;
@@ -545,6 +554,116 @@ mod tests {
         assert_eq!(candidates[2].source_type, "custom");
     }
 
+    /// Explicit Feed intent is authoritative even when the containing URL
+    /// has a deliberately misleading sitemap suffix.
+    #[cfg(feature = "feed")]
+    #[tokio::test]
+    async fn feed_intent_alone_routes_neutral_material_to_feed_parser() {
+        const RSS: &str = r#"<rss version="2.0"><channel><title>T</title><item><guid>one</guid><link>https://example.test/a</link><title>A</title></item></channel></rss>"#;
+        let inputs = vec![DiscoveryInput::Material {
+            material: DiscoveryMaterial {
+                bytes: RSS.as_bytes().to_vec(),
+                url: "https://example.test/not-a-feed.sitemap.xml".to_string(),
+            },
+            intent: DiscoveryParserIntent::Feed,
+        }];
+        let outcome = discover(&inputs).await;
+        assert!(outcome.per_input[0].is_ok());
+        let candidate = outcome.candidates()[0];
+        assert_eq!(candidate.source_type, "feed");
+        assert_eq!(
+            candidate.discovered_via.as_deref(),
+            Some("https://example.test/not-a-feed.sitemap.xml")
+        );
+    }
+
+    /// Explicit Sitemap intent is authoritative even when the containing URL
+    /// has a deliberately misleading feed suffix.
+    #[cfg(feature = "sitemap")]
+    #[tokio::test]
+    async fn sitemap_intent_alone_routes_neutral_material_to_sitemap_parser() {
+        const SITEMAP: &str = r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.test/a</loc></url></urlset>"#;
+        let inputs = vec![DiscoveryInput::Material {
+            material: DiscoveryMaterial {
+                bytes: SITEMAP.as_bytes().to_vec(),
+                url: "https://example.test/not-a-sitemap.rss".to_string(),
+            },
+            intent: DiscoveryParserIntent::Sitemap,
+        }];
+        let outcome = discover(&inputs).await;
+        assert!(outcome.per_input[0].is_ok());
+        let candidate = outcome.candidates()[0];
+        assert_eq!(candidate.source_type, "sitemap");
+        assert_eq!(
+            candidate.discovered_via.as_deref(),
+            Some("https://example.test/not-a-sitemap.rss")
+        );
+    }
+
+    /// Explicit News Sitemap intent routes to the News parser without
+    /// consulting URL suffix, target provenance, or any classifier.
+    #[cfg(feature = "news_sitemap")]
+    #[tokio::test]
+    async fn news_sitemap_intent_alone_routes_neutral_material_to_news_parser() {
+        const NEWS: &str = r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9"><url><loc>https://example.test/a</loc><news:news><news:publication><news:name>N</news:name><news:language>en</news:language></news:publication><news:publication_date>2026-01-01</news:publication_date><news:title>A</news:title></news:news></url></urlset>"#;
+        let inputs = vec![DiscoveryInput::Material {
+            material: DiscoveryMaterial {
+                bytes: NEWS.as_bytes().to_vec(),
+                url: "https://example.test/no-extension".to_string(),
+            },
+            intent: DiscoveryParserIntent::NewsSitemap,
+        }];
+        let outcome = discover(&inputs).await;
+        assert!(outcome.per_input[0].is_ok());
+        let candidate = outcome.candidates()[0];
+        // News Sitemap intentionally reuses the generic "sitemap" source
+        // type, but only its parser maps the namespaced news title.
+        assert_eq!(candidate.source_type, "sitemap");
+        assert_eq!(candidate.title.as_deref(), Some("A"));
+        assert_eq!(
+            candidate.discovered_via.as_deref(),
+            Some("https://example.test/no-extension")
+        );
+    }
+
+    /// The same neutral payload can be paired with distinct intents. The
+    /// payload remains unchanged; only the explicit enum controls which
+    /// typed parser error is returned.
+    #[cfg(all(feature = "feed", feature = "sitemap", feature = "news_sitemap"))]
+    #[tokio::test]
+    async fn same_material_supports_independent_explicit_parser_intents() {
+        let material = DiscoveryMaterial {
+            bytes: b"deliberately invalid for every parser".to_vec(),
+            url: "https://example.test/ambiguous".to_string(),
+        };
+        let inputs = vec![
+            DiscoveryInput::Material {
+                material: material.clone(),
+                intent: DiscoveryParserIntent::Feed,
+            },
+            DiscoveryInput::Material {
+                material: material.clone(),
+                intent: DiscoveryParserIntent::Sitemap,
+            },
+            DiscoveryInput::Material {
+                material: material.clone(),
+                intent: DiscoveryParserIntent::NewsSitemap,
+            },
+        ];
+        let outcome = discover(&inputs).await;
+        assert!(matches!(outcome.per_input[0], Err(DiscoveryError::Feed(_))));
+        assert!(matches!(
+            outcome.per_input[1],
+            Err(DiscoveryError::Sitemap(_))
+        ));
+        assert!(matches!(
+            outcome.per_input[2],
+            Err(DiscoveryError::NewsSitemap(_))
+        ));
+        assert_eq!(material.bytes, b"deliberately invalid for every parser");
+        assert_eq!(material.url, "https://example.test/ambiguous");
+    }
+
     /// 4. Ordering: candidates preserve caller-supplied order across
     /// scope/material input classes, and within a multi-item input, that
     /// adapter's own order.
@@ -554,10 +673,13 @@ mod tests {
         const SITEMAP: &str = r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.test/1</loc></url><url><loc>https://example.test/2</loc></url></urlset>"#;
         let inputs = vec![
             onion("http://z.onion/"),
-            DiscoveryInput::Material(DiscoveryMaterial::Sitemap {
-                bytes: SITEMAP.as_bytes().to_vec(),
-                sitemap_url: "https://example.test/sitemap.xml".to_string(),
-            }),
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: SITEMAP.as_bytes().to_vec(),
+                    url: "https://example.test/sitemap.xml".to_string(),
+                },
+                intent: DiscoveryParserIntent::Sitemap,
+            },
             onion("http://a.onion/"),
         ];
         let outcome = discover(&inputs).await;
@@ -584,6 +706,57 @@ mod tests {
         for candidate in candidates {
             assert_eq!(candidate.url.as_deref(), Some("http://a.onion/"));
         }
+    }
+
+    /// Duplicate acquired-material inputs remain distinct and produce their
+    /// candidates independently; orchestration performs no deduplication.
+    #[cfg(feature = "feed")]
+    #[tokio::test]
+    async fn duplicate_material_inputs_are_preserved() {
+        const RSS: &str = r#"<rss version="2.0"><channel><title>T</title><item><guid>one</guid><link>https://example.test/a</link><title>A</title></item></channel></rss>"#;
+        let input = DiscoveryInput::Material {
+            material: DiscoveryMaterial {
+                bytes: RSS.as_bytes().to_vec(),
+                url: "https://example.test/feed".to_string(),
+            },
+            intent: DiscoveryParserIntent::Feed,
+        };
+        let outcome = discover(&[input.clone(), input]).await;
+        assert_eq!(outcome.per_input.len(), 2);
+        assert!(outcome.per_input.iter().all(Result::is_ok));
+        assert_eq!(outcome.candidates().len(), 2);
+        assert_eq!(outcome.candidates()[0], outcome.candidates()[1]);
+    }
+
+    /// A parser failure occupies only its own input index and never discards
+    /// successful neighboring inputs.
+    #[cfg(feature = "sitemap")]
+    #[tokio::test]
+    async fn parser_failure_is_index_aligned_and_partial_success_survives() {
+        let inputs = vec![
+            onion("http://a.onion/"),
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: b"not a sitemap".to_vec(),
+                    url: "https://example.test/container".to_string(),
+                },
+                intent: DiscoveryParserIntent::Sitemap,
+            },
+            onion("http://b.onion/"),
+        ];
+        let outcome = discover(&inputs).await;
+        assert_eq!(outcome.per_input.len(), 3);
+        assert!(outcome.per_input[0].is_ok());
+        assert!(matches!(
+            outcome.per_input[1],
+            Err(DiscoveryError::Sitemap(_))
+        ));
+        assert!(outcome.per_input[2].is_ok());
+        assert_eq!(
+            outcome.errors().map(|(index, _)| index).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(outcome.candidates().len(), 2);
     }
 
     /// 6. Invalid input reports truthfully, aligned to its input-list
@@ -634,10 +807,13 @@ mod tests {
         const SITEMAP: &str = r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://example.test/a</loc></url></urlset>"#;
         let inputs = vec![
             onion("http://abc.onion/"),
-            DiscoveryInput::Material(DiscoveryMaterial::Sitemap {
-                bytes: SITEMAP.as_bytes().to_vec(),
-                sitemap_url: "https://example.test/sitemap.xml".to_string(),
-            }),
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: SITEMAP.as_bytes().to_vec(),
+                    url: "https://example.test/sitemap.xml".to_string(),
+                },
+                intent: DiscoveryParserIntent::Sitemap,
+            },
         ];
         let outcome = discover(&inputs).await;
         let candidates = outcome.candidates();
@@ -675,9 +851,10 @@ mod tests {
         assert!(outcome.candidates().is_empty());
     }
 
-    /// 9. Feature gating: `DiscoveryMaterial`/`DiscoveryError`'s feed/
+    /// 9. Feature gating: `DiscoveryParserIntent`/`DiscoveryError`'s feed/
     /// sitemap/news_sitemap variants only exist when their respective
-    /// feature is enabled — `ResearchScope`/`ScopeSeed` (and hence
+    /// feature is enabled, while neutral `DiscoveryMaterial` remains
+    /// available — `ResearchScope`/`ScopeSeed` (and hence
     /// `DiscoveryInput::Scope`) are always available (proven simply by
     /// this whole test module compiling and running regardless of which
     /// of those three features are on; the `#[cfg(feature = "...")]`-
@@ -705,10 +882,13 @@ mod tests {
             .push(ScopeSeed::OnionSeed("http://a.onion/".to_string()))
             .push(ScopeSeed::OnionSeed("http://b.onion/".to_string()));
         let mut inputs = scope.into_inputs();
-        inputs.push(DiscoveryInput::Material(DiscoveryMaterial::Feed {
-            bytes: RSS.as_bytes().to_vec(),
-            feed_url: "https://example.test/feed.xml".to_string(),
-        }));
+        inputs.push(DiscoveryInput::Material {
+            material: DiscoveryMaterial {
+                bytes: RSS.as_bytes().to_vec(),
+                url: "https://example.test/feed.xml".to_string(),
+            },
+            intent: DiscoveryParserIntent::Feed,
+        });
         let outcome = discover(&inputs).await;
         let candidates = outcome.candidates();
         assert_eq!(candidates.len(), 3);
@@ -730,20 +910,27 @@ mod tests {
     async fn zero_acquisition_for_hostile_and_malformed_inputs() {
         let inputs = vec![
             onion("http://thishostwillneverresolveorconnectxxxxxxxxxxxxxxxxxxxxxxxxxxxx.onion/"),
-            DiscoveryInput::Material(DiscoveryMaterial::Feed {
-                bytes: b"not xml at all".to_vec(),
-                feed_url: "http://thishostwillneverresolveorconnect.invalid/feed.xml".to_string(),
-            }),
-            DiscoveryInput::Material(DiscoveryMaterial::Sitemap {
-                bytes: b"not xml at all".to_vec(),
-                sitemap_url: "http://thishostwillneverresolveorconnect.invalid/sitemap.xml"
-                    .to_string(),
-            }),
-            DiscoveryInput::Material(DiscoveryMaterial::NewsSitemap {
-                bytes: b"not xml at all".to_vec(),
-                sitemap_url: "http://thishostwillneverresolveorconnect.invalid/news.xml"
-                    .to_string(),
-            }),
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: b"not xml at all".to_vec(),
+                    url: "http://thishostwillneverresolveorconnect.invalid/feed.xml".to_string(),
+                },
+                intent: DiscoveryParserIntent::Feed,
+            },
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: b"not xml at all".to_vec(),
+                    url: "http://thishostwillneverresolveorconnect.invalid/sitemap.xml".to_string(),
+                },
+                intent: DiscoveryParserIntent::Sitemap,
+            },
+            DiscoveryInput::Material {
+                material: DiscoveryMaterial {
+                    bytes: b"not xml at all".to_vec(),
+                    url: "http://thishostwillneverresolveorconnect.invalid/news.xml".to_string(),
+                },
+                intent: DiscoveryParserIntent::NewsSitemap,
+            },
         ];
         let outcome = discover(&inputs).await;
         // Every input completed (no panic, no hang) — an onion seed to a

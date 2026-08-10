@@ -405,7 +405,9 @@ mod tests {
             .iter()
             .map(|output| match output {
                 ProviderDiscovery::Item(item) => item,
-                ProviderDiscovery::Target(_) => panic!("Hub model metadata is an Item"),
+                ProviderDiscovery::Target(_) | ProviderDiscovery::Artifact(_) => {
+                    panic!("Hub model metadata is an Item")
+                }
             })
             .collect::<Vec<_>>();
         assert_eq!(items.len(), 3);

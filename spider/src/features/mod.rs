@@ -51,6 +51,9 @@ pub mod solvers;
 /// already requires); does not require `transport_tor`.
 #[cfg(feature = "evidence")]
 pub mod acquisition_binding;
+/// Provider-neutral metadata for versioned repository artifacts. Always
+/// available and performs no acquisition, download, parsing, or verification.
+pub mod artifact_reference;
 /// `DiscoveryTarget`: the smallest canonical planning boundary for
 /// discovery pointers (sitemap index child sitemaps, robots.txt-declared
 /// sitemaps, caller/request-supplied URLs) — URLs to acquire *later*,

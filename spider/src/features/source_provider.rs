@@ -6,6 +6,7 @@
 //! future provider execution can consume this vocabulary without making the
 //! registry own clients, credentials, transport policy, or parser state.
 
+use crate::features::artifact_reference::ArtifactReference;
 use crate::features::discovery_target::DiscoveryTarget;
 use crate::features::source::SourceItem;
 use std::collections::BTreeMap;
@@ -58,6 +59,8 @@ pub struct ProviderCapabilities {
     pub items: bool,
     /// Provider may emit [`DiscoveryTarget`] values for later acquisition.
     pub targets: bool,
+    /// Provider may emit versioned [`ArtifactReference`] metadata.
+    pub artifacts: bool,
 }
 
 impl ProviderCapabilities {
@@ -65,18 +68,28 @@ impl ProviderCapabilities {
     pub const ITEMS: Self = Self {
         items: true,
         targets: false,
+        artifacts: false,
     };
 
     /// A provider that emits acquisition targets only.
     pub const TARGETS: Self = Self {
         items: false,
         targets: true,
+        artifacts: false,
     };
 
     /// A provider that may emit both independent output shapes.
     pub const ITEMS_AND_TARGETS: Self = Self {
         items: true,
         targets: true,
+        artifacts: false,
+    };
+
+    /// A provider that emits versioned artifact references only.
+    pub const ARTIFACTS: Self = Self {
+        items: false,
+        targets: false,
+        artifacts: true,
     };
 }
 
@@ -123,6 +136,8 @@ pub enum ProviderDiscovery {
     Item(SourceItem),
     /// A validated target for the separate canonical acquisition pipeline.
     Target(DiscoveryTarget),
+    /// Versioned provider-native artifact metadata for possible later download.
+    Artifact(ArtifactReference),
 }
 
 /// Deterministic metadata-only provider registry.
@@ -288,6 +303,27 @@ mod tests {
         ];
         assert!(matches!(&outputs[0], ProviderDiscovery::Item(value) if value == &item));
         assert!(matches!(&outputs[1], ProviderDiscovery::Target(value) if value == &target));
+    }
+
+    #[test]
+    fn artifact_output_remains_explicitly_separate() {
+        let artifact = ArtifactReference {
+            provider_id: ProviderId::from("example"),
+            repository_id: "owner/repository".to_string(),
+            path: "artifact.bin".to_string(),
+            requested_revision: Some("main".to_string()),
+            resolved_revision: None,
+            size_bytes: None,
+            identities: Vec::new(),
+            download_url: None,
+            discovered_via: None,
+        };
+        let output = ProviderDiscovery::Artifact(artifact.clone());
+
+        assert!(matches!(output, ProviderDiscovery::Artifact(value) if value == artifact));
+        assert!(ProviderCapabilities::ARTIFACTS.artifacts);
+        assert!(!ProviderCapabilities::ARTIFACTS.items);
+        assert!(!ProviderCapabilities::ARTIFACTS.targets);
     }
 
     #[test]

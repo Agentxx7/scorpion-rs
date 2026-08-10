@@ -391,6 +391,7 @@ search_brave = ["search"]
 search_bing = ["search"]
 search_tavily = ["search"]
 search_searxng = ["search"]
+source_github = ["serde"]
 
 # Spider Cloud integration - anti-bot, proxy, API modes
 spider_cloud = ["serde", "reqwest_json"]

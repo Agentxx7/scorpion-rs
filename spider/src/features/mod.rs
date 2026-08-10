@@ -63,6 +63,9 @@ pub mod discovery_target;
 /// RSS and Atom feed parsing and normalization.
 #[cfg(feature = "feed")]
 pub mod feed;
+/// Provider-native GitHub repository discovery through the official REST API.
+#[cfg(feature = "source_github")]
+pub mod github_source_provider;
 /// Google News Sitemap parsing and normalization.
 #[cfg(feature = "news_sitemap")]
 pub mod news_sitemap;

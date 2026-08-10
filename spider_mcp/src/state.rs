@@ -110,6 +110,19 @@ pub struct CrawlSession {
     /// the crawl and releases any browser it holds. Not serialized.
     #[serde(skip)]
     pub abort: Option<tokio::task::AbortHandle>,
+    /// Section N (public Tor transport surface frontier): human-readable
+    /// message when `status == Failed` because of a Tor transport
+    /// preflight rejection — a background crawl that never produced a
+    /// page must never look like a silent, empty `Complete`. `None` for
+    /// every session that isn't a transport failure (including ordinary
+    /// `Failed` sessions from other causes, e.g. the screenshot
+    /// fail-closed path).
+    pub error: Option<String>,
+    /// Machine-readable classification of `error`, from
+    /// `crate::transport::error_code` — matched directly on the
+    /// `TransportError` variant, never parsed back out of `error`'s
+    /// prose. `None` whenever `error` is `None`.
+    pub error_code: Option<String>,
 }
 
 /// Aborts the wrapped task when dropped. Used to cancel an inline MCP crawl if
@@ -136,7 +149,7 @@ fn running_session_ttl() -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
-#[derive(Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CrawlSessionStatus {
     Running,
@@ -162,6 +175,8 @@ mod tests {
             pages: Vec::new(),
             started_at,
             abort: None,
+            error: None,
+            error_code: None,
         }
     }
 

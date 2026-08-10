@@ -144,7 +144,7 @@ mod tests {
         let cli = Cli::try_parse_from(["spider", "fetch", "https://example.test"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Commands::FETCH { url }) if url == "https://example.test"
+            Some(Commands::FETCH { url, .. }) if url == "https://example.test"
         ));
     }
 
@@ -161,7 +161,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cli.command,
-            Some(Commands::FEED { url, limit: Some(5) }) if url == "https://example.test/feed.xml"
+            Some(Commands::FEED { url, limit: Some(5), .. }) if url == "https://example.test/feed.xml"
         ));
     }
 

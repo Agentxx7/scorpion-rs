@@ -10,6 +10,10 @@ pub struct SitemapReadParams {
     pub url: String,
     /// Return only the first N candidates in source order.
     pub limit: Option<usize>,
+    /// Transport for acquiring the sitemap document itself. Omit for
+    /// Default (normal networking). Candidate URLs the sitemap lists are
+    /// never fetched, so this never applies to them.
+    pub transport: Option<crate::transport::TransportParam>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -31,7 +35,8 @@ struct SitemapReadResult {
 
 /// Fetch and parse one standard sitemap while preserving retrieval evidence.
 pub async fn run(params: SitemapReadParams) -> Result<String, String> {
-    let page = super::fetch_single_page(&params.url).await?;
+    let policy = crate::transport::resolve(params.transport)?;
+    let page = super::fetch_document(&params.url, policy).await?;
     let bytes = page
         .get_bytes()
         .ok_or_else(|| "Sitemap page arrived without a retained representation".to_string())?;
@@ -164,7 +169,13 @@ mod tests {
         F: FnOnce(&str) -> Vec<u8>,
     {
         let (url, body, paths, stop, handle) = localhost(path, build_body);
-        let output = run(SitemapReadParams { url, limit }).await.unwrap();
+        let output = run(SitemapReadParams {
+            url,
+            limit,
+            transport: None,
+        })
+        .await
+        .unwrap();
         let value = serde_json::from_str(&output).unwrap();
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
@@ -238,14 +249,50 @@ mod tests {
         );
     }
 
+    /// H: a Tor `spider_sitemap_read` acquisition reaches the sitemap
+    /// document exclusively via SOCKS, and (Section T) never fetches the
+    /// candidate URLs it lists — discovery stays separate from
+    /// acquisition under Tor too.
+    #[cfg(feature = "transport_tor")]
+    #[tokio::test]
+    async fn tor_sitemap_read_reaches_document_only_via_socks_and_never_fetches_candidates() {
+        let body = br#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>http://sitemap-tor-mcp-test.invalid/article-a</loc></url><url><loc>http://sitemap-tor-mcp-test.invalid/article-b</loc></url></urlset>"#;
+        let http = crate::test_support::HttpFixture::start(std::str::from_utf8(body).unwrap());
+        let socks = crate::test_support::SocksFixture::start(
+            Some(http.addr),
+            crate::test_support::SocksBehavior::Splice,
+        );
+        let url = format!(
+            "http://sitemap-tor-mcp-test.invalid:{}/sitemap.xml",
+            http.addr.port()
+        );
+
+        let output = run(SitemapReadParams {
+            url,
+            limit: None,
+            transport: Some(crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some(format!("socks5h://{}", socks.addr)),
+            }),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(http.hit_count(), 1);
+        assert_eq!(socks.connect_count(), 1);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["result_count"], 2);
+    }
+
     #[test]
-    fn input_schema_has_exactly_url_and_limit() {
+    fn input_schema_has_exactly_url_limit_and_transport() {
         let schema = schemars::schema_for!(SitemapReadParams);
         let value = serde_json::to_value(schema).unwrap();
         let properties = value["properties"].as_object().unwrap();
-        assert_eq!(properties.len(), 2);
+        assert_eq!(properties.len(), 3);
         assert!(properties.contains_key("url"));
         assert!(properties.contains_key("limit"));
+        assert!(properties.contains_key("transport"));
         for forbidden in [
             "query",
             "source_hint",

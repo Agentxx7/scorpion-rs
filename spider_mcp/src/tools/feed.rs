@@ -10,6 +10,10 @@ pub struct FeedReadParams {
     pub url: String,
     /// Return only the first N entries in provider order.
     pub limit: Option<usize>,
+    /// Transport for acquiring the feed document itself. Omit for Default
+    /// (normal networking). Discovered entry URLs are never fetched, so
+    /// this never applies to them.
+    pub transport: Option<crate::transport::TransportParam>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -33,7 +37,8 @@ struct FeedReadResult {
 
 /// Fetch and parse one RSS or Atom feed while preserving retrieval evidence.
 pub async fn run(params: FeedReadParams) -> Result<String, String> {
-    let page = super::fetch_single_page(&params.url).await?;
+    let policy = crate::transport::resolve(params.transport)?;
+    let page = super::fetch_document(&params.url, policy).await?;
     let bytes = page
         .get_bytes()
         .ok_or_else(|| "Feed page arrived without a retained representation".to_string())?;
@@ -141,7 +146,13 @@ mod tests {
 
     async fn accepted(body: &[u8], limit: Option<usize>) -> (serde_json::Value, usize) {
         let (url, requests, stop, handle) = localhost(body);
-        let output = run(FeedReadParams { url, limit }).await.unwrap();
+        let output = run(FeedReadParams {
+            url,
+            limit,
+            transport: None,
+        })
+        .await
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
@@ -210,13 +221,45 @@ mod tests {
         assert_eq!(value["evidence"]["observed_status_code"], 200);
     }
 
+    /// V4: a Tor `spider_feed_read` acquisition reaches the feed document
+    /// exclusively via SOCKS, and (Section T) never fetches the entries'
+    /// own URLs — discovery stays separate from acquisition under Tor too.
+    #[cfg(feature = "transport_tor")]
+    #[tokio::test]
+    async fn tor_feed_read_reaches_document_only_via_socks_and_never_fetches_entries() {
+        let http = crate::test_support::HttpFixture::start(RSS);
+        let socks = crate::test_support::SocksFixture::start(
+            Some(http.addr),
+            crate::test_support::SocksBehavior::Splice,
+        );
+        let url = format!("http://feed-tor-mcp-test.invalid:{}/feed", http.addr.port());
+
+        let output = run(FeedReadParams {
+            url,
+            limit: None,
+            transport: Some(crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some(format!("socks5h://{}", socks.addr)),
+            }),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(http.hit_count(), 1);
+        assert_eq!(socks.connect_count(), 1);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["result_count"], 2);
+    }
+
     #[test]
-    fn input_schema_has_only_url_and_limit() {
+    fn input_schema_has_only_url_limit_and_transport() {
         let schema = schemars::schema_for!(FeedReadParams);
         let value = serde_json::to_value(schema).unwrap();
-        let properties = &value["properties"];
-        assert!(properties.get("url").is_some());
-        assert!(properties.get("limit").is_some());
+        let properties = value["properties"].as_object().unwrap();
+        assert_eq!(
+            properties.keys().collect::<Vec<_>>(),
+            ["limit", "transport", "url"]
+        );
         assert!(properties.get("query").is_none());
         assert!(properties.get("source_hint").is_none());
         assert!(properties.get("language").is_none());

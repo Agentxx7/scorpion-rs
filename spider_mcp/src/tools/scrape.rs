@@ -40,6 +40,9 @@ pub struct ScrapeParams {
     /// contain rendered DOM bytes instead. Default false — normal output is
     /// unaffected either way.
     pub evidence: Option<bool>,
+    /// Transport for this acquisition. Omit for Default (normal
+    /// networking).
+    pub transport: Option<crate::transport::TransportParam>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -298,14 +301,37 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
     let wants_auto = format_str == "auto";
     let wants_screenshot = super::apply_screenshot_options(&mut website, format_str);
 
+    let transport_policy = crate::transport::resolve(params.transport)?;
+    let tor_requested = matches!(
+        transport_policy,
+        spider::features::transport::TransportPolicy::Tor(_)
+    );
+    let use_headless = params.headless.unwrap_or(false) || wants_screenshot;
+    // Fail closed before any target networking, browser launch included
+    // (Section I/L): Tor crawling is HTTP-only. `wants_screenshot` also
+    // implies headless, so a screenshot request under Tor is rejected too
+    // — never silently downgraded to a non-screenshot fetch.
+    if tor_requested && use_headless {
+        return Err(
+            "transport.mode=\"tor\" cannot be combined with headless=true or \
+             return_format=\"screenshot\" — Tor crawling is HTTP-only"
+                .to_string(),
+        );
+    }
+    if tor_requested {
+        website.with_transport(transport_policy);
+    }
+
     let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
 
     let mut rx = website.subscribe(0);
 
-    let use_headless = params.headless.unwrap_or(false) || wants_screenshot;
     let used_browser = cfg!(feature = "chrome") && use_headless;
 
-    tokio::spawn(async move {
+    // Captured so a Tor preflight rejection surfaces as a specific error
+    // instead of the generic "No content returned" message below
+    // (Section H/N).
+    let crawl_task = tokio::spawn(async move {
         #[cfg(feature = "chrome")]
         {
             if use_headless {
@@ -319,6 +345,7 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
             let _ = use_headless;
             website.crawl().await;
         }
+        website.last_transport_error().cloned()
     });
 
     let mut results = Vec::new();
@@ -365,6 +392,9 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
     }
 
     if results.is_empty() {
+        if let Ok(Some(transport_error)) = crawl_task.await {
+            return Err(transport_error.to_string());
+        }
         return Err(format!("No content returned for {}", params.url));
     }
 
@@ -1147,6 +1177,7 @@ mod tests {
             user_agent: None,
             cookie: None,
             proxy: None,
+            transport: None,
             evidence: Some(true),
         })
         .await
@@ -1177,6 +1208,7 @@ mod tests {
             user_agent: None,
             cookie: None,
             proxy: None,
+            transport: None,
             evidence: Some(false),
         })
         .await
@@ -1212,6 +1244,7 @@ mod tests {
                 user_agent: None,
                 cookie: None,
                 proxy: None,
+                transport: None,
                 evidence: Some(true),
             })
             .await
@@ -1235,6 +1268,7 @@ mod tests {
                 user_agent: None,
                 cookie: None,
                 proxy: None,
+                transport: None,
                 evidence: Some(false),
             })
             .await
@@ -1271,6 +1305,7 @@ mod tests {
             user_agent: None,
             cookie: None,
             proxy: None,
+            transport: None,
             evidence: Some(true),
         })
         .await
@@ -1310,6 +1345,7 @@ mod tests {
             user_agent: None,
             cookie: None,
             proxy: None,
+            transport: None,
             evidence: Some(evidence),
         }
     }
@@ -1424,6 +1460,7 @@ mod tests {
             user_agent: None,
             cookie: None,
             proxy: None,
+            transport: None,
             evidence: Some(true),
         })
         .await
@@ -1445,5 +1482,218 @@ mod tests {
 
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // Public Tor transport surface (V2, V10, V12, V13, V14).
+    // -----------------------------------------------------------------
+
+    fn tor_params(url: String, transport: crate::transport::TransportParam) -> ScrapeParams {
+        ScrapeParams {
+            url,
+            return_format: Some("raw".into()),
+            headless: Some(false),
+            wait_for: None,
+            wait_for_delay_ms: None,
+            wait_for_idle_network: None,
+            user_agent: None,
+            cookie: None,
+            proxy: None,
+            transport: Some(transport),
+            evidence: Some(true),
+        }
+    }
+
+    /// V2/V13: a Tor `spider_scrape` HTTP acquisition reaches the target
+    /// exclusively via SOCKS, and its evidence carries truthful Tor
+    /// provenance.
+    #[cfg(feature = "transport_tor")]
+    #[tokio::test]
+    async fn tor_scrape_reaches_target_only_via_socks_with_truthful_evidence() {
+        let http = crate::test_support::HttpFixture::start("<html><body>tor scrape</body></html>");
+        let socks = crate::test_support::SocksFixture::start(
+            Some(http.addr),
+            crate::test_support::SocksBehavior::Splice,
+        );
+        let url = format!("http://scrape-tor-mcp-test.invalid:{}/", http.addr.port());
+
+        let output = run(tor_params(
+            url,
+            crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some(format!("socks5h://{}", socks.addr)),
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(http.hit_count(), 1);
+        assert_eq!(socks.connect_count(), 1);
+        let evidence: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(evidence["transport"], "tor");
+        assert_eq!(evidence["dns"], "proxy");
+    }
+
+    /// V14: an ordinary Default `spider_scrape` (transport omitted) still
+    /// reports truthful `"default"` evidence — unaffected by the new
+    /// field's existence.
+    #[tokio::test]
+    async fn default_scrape_evidence_reports_default_transport() {
+        let http = crate::test_support::HttpFixture::start("<html><body>default</body></html>");
+        let url = format!("http://{}/", http.addr);
+        let output = run(ScrapeParams {
+            url,
+            return_format: Some("raw".into()),
+            headless: Some(false),
+            wait_for: None,
+            wait_for_delay_ms: None,
+            wait_for_idle_network: None,
+            user_agent: None,
+            cookie: None,
+            proxy: None,
+            transport: None,
+            evidence: Some(true),
+        })
+        .await
+        .unwrap();
+        let evidence: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(evidence["transport"], "default");
+        assert_eq!(evidence["dns"], serde_json::Value::Null);
+    }
+
+    /// V10: `transport.mode="tor"` combined with `headless=true` is
+    /// rejected before any browser launch or target networking.
+    #[tokio::test]
+    async fn tor_scrape_headless_rejected_before_launch() {
+        let http = crate::test_support::HttpFixture::start("<html></html>");
+        let socks = crate::test_support::SocksFixture::start(
+            Some(http.addr),
+            crate::test_support::SocksBehavior::Splice,
+        );
+        let url = format!("http://{}/", http.addr);
+        let mut params = tor_params(
+            url,
+            crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some(format!("socks5h://{}", socks.addr)),
+            },
+        );
+        params.headless = Some(true);
+
+        let result = run(params).await;
+        assert!(result.is_err());
+        assert_eq!(http.hit_count(), 0);
+        assert_eq!(socks.connect_count(), 0);
+    }
+
+    /// V12: a SOCKS-layer failure causes zero direct hits on a target
+    /// that would have responded if contacted directly, bypassing Tor.
+    /// Matches Spider's established "network failure is truthful
+    /// degraded-status evidence, not a hard process `Err`" contract (see
+    /// `discovery::fetch_tests::fetch_connection_failure_is_truthful_evidence_not_a_process_error`
+    /// in the CLI) — the proof here is the target fixture, never
+    /// reached, not the tool call's `Result` variant.
+    #[cfg(feature = "transport_tor")]
+    #[tokio::test]
+    async fn tor_scrape_socks_failure_causes_no_direct_fallback() {
+        let http = crate::test_support::HttpFixture::start("<html>should never be reached</html>");
+        let socks = crate::test_support::SocksFixture::start(
+            None,
+            crate::test_support::SocksBehavior::Fail,
+        );
+        let url = format!(
+            "http://socks-fail-scrape-mcp-test.invalid:{}/",
+            http.addr.port()
+        );
+
+        let output = run(tor_params(
+            url,
+            crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some(format!("socks5h://{}", socks.addr)),
+            },
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            http.hit_count(),
+            0,
+            "the directly-reachable target fixture must never be contacted when SOCKS fails"
+        );
+        assert!(socks.connect_count() >= 1);
+        let evidence: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_ne!(evidence["status_code"], 200);
+        assert_eq!(evidence["transport"], serde_json::Value::Null);
+    }
+
+    /// V7: `mode="tor"` with no `proxy` field is rejected before any
+    /// target networking — there is no implicit or environment-derived
+    /// Tor endpoint.
+    #[tokio::test]
+    async fn tor_scrape_missing_proxy_rejected_before_target_network() {
+        let http = crate::test_support::HttpFixture::start("<html>unreachable</html>");
+        let url = format!(
+            "http://missing-proxy-scrape-mcp-test.invalid:{}/",
+            http.addr.port()
+        );
+
+        let result = run(tor_params(
+            url,
+            crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: None,
+            },
+        ))
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(http.hit_count(), 0);
+    }
+
+    /// V8: a malformed Tor proxy endpoint (wrong scheme) is rejected
+    /// before any target networking.
+    #[tokio::test]
+    async fn tor_scrape_malformed_proxy_rejected_before_target_network() {
+        let http = crate::test_support::HttpFixture::start("<html>unreachable</html>");
+        let url = format!(
+            "http://malformed-proxy-scrape-mcp-test.invalid:{}/",
+            http.addr.port()
+        );
+
+        let result = run(tor_params(
+            url,
+            crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some("socks5://127.0.0.1:9050".to_string()),
+            },
+        ))
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(http.hit_count(), 0);
+    }
+
+    /// V9: an unknown `transport.mode` value is rejected before any
+    /// target networking — and, per Section F of the blocker-fix
+    /// frontier, before it can even become a typed request: with
+    /// `TransportModeParam`'s closed schema, the whole `ScrapeParams`
+    /// deserialization fails at the JSON boundary, one layer above
+    /// `run()`. There is no `ScrapeParams` value carrying `mode: "onion"`
+    /// to pass to `run()` any more, so this proves it the same way an
+    /// MCP client's malformed call would actually be rejected: parsing
+    /// the full tool params JSON, not constructing a Rust struct by hand.
+    #[test]
+    fn unknown_mode_rejected_at_scrape_params_deserialization_before_run() {
+        let json = serde_json::json!({
+            "url": "http://unknown-mode-scrape-mcp-test.invalid/",
+            "transport": { "mode": "onion" },
+        });
+        let result: Result<ScrapeParams, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "an unrecognized transport.mode must fail deserialization, not silently \
+             become Default"
+        );
     }
 }

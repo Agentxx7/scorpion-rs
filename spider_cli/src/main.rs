@@ -38,6 +38,7 @@ pub mod oauth;
 pub mod options;
 #[cfg(feature = "search_searxng")]
 pub mod search;
+pub mod transport;
 
 use clap::Parser;
 use options::{Cli, Commands};
@@ -226,6 +227,27 @@ async fn print_discovery_result(result: Result<String, String>) {
     }
 }
 
+/// Section H (CRITICAL): `Website::crawl`/`crawl_raw` return `()` — a Tor
+/// preflight rejection (incompatible configuration, `.onion` under
+/// Default, Tor not compiled, …) never surfaces on its own and must not
+/// be allowed to look like "successful command, empty output". Every
+/// crawl/scrape/download spawn captures its `JoinHandle` and returns
+/// `website.last_transport_error().cloned()` from the task; this is the
+/// single place that result is turned into stderr + a nonzero exit. A
+/// task panic (`Err`, unusual — not itself a transport concern) and "no
+/// transport error" (`Ok(None)`) are both no-ops.
+fn exit_on_transport_error(
+    result: Result<
+        Option<spider::features::transport::TransportError>,
+        spider::tokio::task::JoinError,
+    >,
+) {
+    if let Ok(Some(transport_error)) = result {
+        eprintln!("Error: {transport_error}");
+        std::process::exit(2);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -318,24 +340,83 @@ async fn main() {
     ))]
     {
         #[cfg(feature = "fetch")]
-        if let Some(Commands::FETCH { url }) = &cli.command {
-            return print_discovery_result(discovery::run_fetch(url).await).await;
+        if let Some(Commands::FETCH {
+            url,
+            transport_args,
+        }) = &cli.command
+        {
+            let result = match crate::transport::resolve(
+                transport_args.transport,
+                transport_args.tor_proxy.clone(),
+            ) {
+                Ok(policy) => discovery::run_fetch(url, policy).await,
+                Err(message) => Err(message),
+            };
+            return print_discovery_result(result).await;
         }
         #[cfg(feature = "feed")]
-        if let Some(Commands::FEED { url, limit }) = &cli.command {
-            return print_discovery_result(discovery::run_feed(url, *limit).await).await;
+        if let Some(Commands::FEED {
+            url,
+            limit,
+            transport_args,
+        }) = &cli.command
+        {
+            let result = match crate::transport::resolve(
+                transport_args.transport,
+                transport_args.tor_proxy.clone(),
+            ) {
+                Ok(policy) => discovery::run_feed(url, *limit, policy).await,
+                Err(message) => Err(message),
+            };
+            return print_discovery_result(result).await;
         }
         #[cfg(feature = "sitemap")]
-        if let Some(Commands::SITEMAP { url, limit }) = &cli.command {
-            return print_discovery_result(discovery::run_sitemap(url, *limit).await).await;
+        if let Some(Commands::SITEMAP {
+            url,
+            limit,
+            transport_args,
+        }) = &cli.command
+        {
+            let result = match crate::transport::resolve(
+                transport_args.transport,
+                transport_args.tor_proxy.clone(),
+            ) {
+                Ok(policy) => discovery::run_sitemap(url, *limit, policy).await,
+                Err(message) => Err(message),
+            };
+            return print_discovery_result(result).await;
         }
         #[cfg(feature = "news_sitemap")]
-        if let Some(Commands::NEWS_SITEMAP { url, limit }) = &cli.command {
-            return print_discovery_result(discovery::run_news_sitemap(url, *limit).await).await;
+        if let Some(Commands::NEWS_SITEMAP {
+            url,
+            limit,
+            transport_args,
+        }) = &cli.command
+        {
+            let result = match crate::transport::resolve(
+                transport_args.transport,
+                transport_args.tor_proxy.clone(),
+            ) {
+                Ok(policy) => discovery::run_news_sitemap(url, *limit, policy).await,
+                Err(message) => Err(message),
+            };
+            return print_discovery_result(result).await;
         }
         #[cfg(feature = "robots_sitemap")]
-        if let Some(Commands::ROBOTS_SITEMAP { url, limit }) = &cli.command {
-            return print_discovery_result(discovery::run_robots_sitemap(url, *limit).await).await;
+        if let Some(Commands::ROBOTS_SITEMAP {
+            url,
+            limit,
+            transport_args,
+        }) = &cli.command
+        {
+            let result = match crate::transport::resolve(
+                transport_args.transport,
+                transport_args.tor_proxy.clone(),
+            ) {
+                Ok(policy) => discovery::run_robots_sitemap(url, *limit, policy).await,
+                Err(message) => Err(message),
+            };
+            return print_discovery_result(result).await;
         }
         #[cfg(feature = "search_searxng")]
         if let Some(Commands::SEARCH {
@@ -524,6 +605,77 @@ async fn main() {
     let use_headless = cli.headless && !cli.http;
     let return_format = cli.return_format.clone();
 
+    // `--transport`/`--tor-proxy` are scoped per-command (Section C of the
+    // blocker-fix frontier) — CRAWL/SCRAPE/DOWNLOAD carry their own
+    // `TransportArgs` (flattened, same as fetch/feed/sitemap/etc.), never a
+    // top-level `Cli` field, so `search`/`mcp` reject the flags at the
+    // parser level, including when written before the subcommand name.
+    // Only CRAWL/SCRAPE/DOWNLOAD/None can still be `cli.command` here —
+    // AUTHENTICATE/discovery/search/mcp all `return` above.
+    let transport_args = match &cli.command {
+        Some(Commands::CRAWL { transport_args, .. }) => transport_args.clone(),
+        Some(Commands::SCRAPE { transport_args, .. }) => transport_args.clone(),
+        Some(Commands::DOWNLOAD { transport_args, .. }) => transport_args.clone(),
+        _ => crate::options::sub_command::TransportArgs::default(),
+    };
+
+    // Resolve --transport/--tor-proxy exactly once (Section B/G), before
+    // any target networking, and reject incompatible routes up front
+    // (Section I) — headless/browser mode, the legacy --proxy-url proxy
+    // list, and an active Spider Cloud configuration are all
+    // audited-unsafe combinations with Tor. `Website::tor_crawl_preflight`
+    // (core) independently re-checks these and more (defense in depth —
+    // see the error-propagation block below, which surfaces whatever it
+    // rejects too), but failing here gives an immediate, specific message
+    // before a `Website` is even built.
+    let transport_policy =
+        match crate::transport::resolve(transport_args.transport, transport_args.tor_proxy.clone())
+        {
+            Ok(policy) => policy,
+            Err(message) => {
+                eprintln!("Error: {message}");
+                std::process::exit(2);
+            }
+        };
+    let tor_requested = matches!(
+        transport_policy,
+        spider::features::transport::TransportPolicy::Tor(_)
+    );
+    if tor_requested {
+        if use_headless {
+            eprintln!(
+                "Error: --transport tor cannot be combined with --headless — Tor crawling is \
+                 HTTP-only; use --http (the default) or omit --headless."
+            );
+            std::process::exit(2);
+        }
+        if website.configuration.proxies.is_some() {
+            eprintln!(
+                "Error: --transport tor cannot be combined with --proxy-url — Tor uses its own \
+                 audited SOCKS5h route exclusively."
+            );
+            std::process::exit(2);
+        }
+        #[cfg(feature = "spider_cloud")]
+        if website.configuration.spider_cloud.is_some() {
+            eprintln!(
+                "Error: --transport tor cannot be combined with Spider Cloud \
+                 (--spider-cloud-key / SPIDER_CLOUD_API_KEY / stored credentials) — Spider \
+                 Cloud routing is not audited for Tor."
+            );
+            std::process::exit(2);
+        }
+        #[cfg(all(feature = "spider_cloud", feature = "chrome"))]
+        if website.configuration.spider_browser.is_some() {
+            eprintln!(
+                "Error: --transport tor cannot be combined with Spider Browser Cloud — remote \
+                 CDP browser routing is not audited for Tor."
+            );
+            std::process::exit(2);
+        }
+        website.with_transport(transport_policy);
+    }
+
     match website
         .build()
     {
@@ -534,6 +686,7 @@ async fn main() {
                 Some(Commands::CRAWL {
                     sync,
                     output_links,
+                    ..
                 }) => {
                     if sync {
                         // remove concurrency
@@ -542,9 +695,15 @@ async fn main() {
 
                     let mut stdout = tokio::io::stdout();
 
-                    tokio::spawn(async move {
+                    // Captured (not fire-and-forget) so a Tor preflight
+                    // rejection can never surface as a successful command
+                    // with empty output (Section H) — always awaited below,
+                    // regardless of --output-links, so the crawl always
+                    // actually completes before the process exits.
+                    let crawl_task = tokio::spawn(async move {
                         crawl_with_mode(&mut website, use_headless).await;
                         log_website_status(&website);
+                        website.last_transport_error().cloned()
                     });
 
                     if output_links {
@@ -560,8 +719,12 @@ async fn main() {
                             }
                         }
                     }
+
+                    exit_on_transport_error(crawl_task.await);
                 }
-                Some(Commands::DOWNLOAD { target_destination }) => {
+                Some(Commands::DOWNLOAD {
+                    target_destination, ..
+                }) => {
                     let tmp_dir = target_destination
                         .to_owned()
                         .unwrap_or(String::from("./_temp_spider_downloads/"));
@@ -574,9 +737,10 @@ async fn main() {
 
                     let download_path = PathBuf::from(tmp_path);
 
-                    tokio::spawn(async move {
+                    let crawl_task = tokio::spawn(async move {
                         crawl_with_mode(&mut website, use_headless).await;
                         log_website_status(&website);
+                        website.last_transport_error().cloned()
                     });
 
                     while let Ok(res) = rx2.recv().await {
@@ -621,10 +785,13 @@ async fn main() {
                             }
                         }
                     }
+
+                    exit_on_transport_error(crawl_task.await);
                 }
                 Some(Commands::SCRAPE {
                     output_html,
                     output_links,
+                    ..
                 }) => {
                     let mut stdout = tokio::io::stdout();
 
@@ -643,9 +810,10 @@ async fn main() {
                         ..Default::default()
                     };
 
-                    tokio::spawn(async move {
+                    let crawl_task = tokio::spawn(async move {
                         crawl_with_mode(&mut website, use_headless).await;
                         log_website_status(&website);
+                        website.last_transport_error().cloned()
                     });
 
                     while let Ok(res) = rx2.recv().await {
@@ -688,6 +856,8 @@ async fn main() {
                             Err(e) =>  eprintln!("{:?}", e)
                         }
                     }
+
+                    exit_on_transport_error(crawl_task.await);
                 }
                 Some(Commands::AUTHENTICATE { .. }) => {},
                 // Discovery/fetch commands are handled earlier and always

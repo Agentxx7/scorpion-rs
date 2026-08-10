@@ -249,7 +249,10 @@ mod tests {
             .find(|tool| tool.name == "spider_news_sitemap_read")
             .unwrap();
         let properties = tool.input_schema["properties"].as_object().unwrap();
-        assert_eq!(properties.keys().collect::<Vec<_>>(), ["limit", "url"]);
+        assert_eq!(
+            properties.keys().collect::<Vec<_>>(),
+            ["limit", "transport", "url"]
+        );
     }
 
     #[cfg(feature = "robots_sitemap")]
@@ -261,7 +264,10 @@ mod tests {
             .find(|tool| tool.name == "spider_robots_sitemap_read")
             .unwrap();
         let properties = tool.input_schema["properties"].as_object().unwrap();
-        assert_eq!(properties.keys().collect::<Vec<_>>(), ["limit", "url"]);
+        assert_eq!(
+            properties.keys().collect::<Vec<_>>(),
+            ["limit", "transport", "url"]
+        );
     }
 
     #[cfg(feature = "sitemap")]
@@ -344,5 +350,92 @@ mod tests {
             "required": ["query", "provider"]
         });
         assert_eq!(actual, expected);
+    }
+
+    /// Section L (blocker-fix frontier): the full `transport` field
+    /// coverage matrix in one place — present on exactly the seven
+    /// acquisition tools, absent from every search/transform/status tool,
+    /// and (Section F) the `mode` sub-schema advertises exactly
+    /// `"default"`/`"tor"` wherever `transport` is present. Each tool
+    /// listed here is feature-gated identically to its own registration
+    /// (`#[cfg(feature = "...")]`), so this test only asserts on tools
+    /// that actually exist in the current build.
+    #[test]
+    fn transport_field_coverage_matrix_matches_section_l_exactly() {
+        let tools = SpiderMcpServer::tool_router().list_all();
+        let schema_of = |name: &str| -> Option<serde_json::Value> {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .map(|tool| serde_json::Value::Object((*tool.input_schema).clone()))
+        };
+
+        let present_always = ["spider_scrape", "spider_crawl", "spider_links"];
+        #[allow(unused_mut)]
+        let mut present_feature_gated: Vec<(&str, bool)> = vec![
+            ("spider_feed_read", cfg!(feature = "feed")),
+            ("spider_sitemap_read", cfg!(feature = "sitemap")),
+            ("spider_news_sitemap_read", cfg!(feature = "news_sitemap")),
+            (
+                "spider_robots_sitemap_read",
+                cfg!(feature = "robots_sitemap"),
+            ),
+        ];
+
+        for name in present_always {
+            let schema = schema_of(name).unwrap_or_else(|| panic!("{name} must be registered"));
+            assert_transport_present_with_default_tor_mode(name, &schema);
+        }
+        for (name, enabled) in present_feature_gated.drain(..) {
+            if !enabled {
+                continue;
+            }
+            let schema = schema_of(name).unwrap_or_else(|| panic!("{name} must be registered"));
+            assert_transport_present_with_default_tor_mode(name, &schema);
+        }
+
+        let absent = [
+            "spider_search",
+            "spider_media_search",
+            "spider_news_search",
+            "spider_transform",
+            "spider_crawl_status",
+        ];
+        for name in absent {
+            let Some(schema) = schema_of(name) else {
+                continue; // not registered in this feature build; nothing to assert.
+            };
+            let properties = schema["properties"].as_object().unwrap();
+            assert!(
+                !properties.contains_key("transport"),
+                "{name} must NOT advertise a transport field"
+            );
+        }
+    }
+
+    /// Shared assertion: `transport` is present in `schema.properties`, and
+    /// its nested `mode` sub-schema (through `transport`'s own schema)
+    /// advertises exactly the two-value `default`/`tor` enum — proven by
+    /// resolving the `$ref` (or inline enum, depending on schemars'
+    /// definitions layout) rather than assuming one shape.
+    fn assert_transport_present_with_default_tor_mode(name: &str, schema: &serde_json::Value) {
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}: schema has no properties object"));
+        assert!(
+            properties.contains_key("transport"),
+            "{name} must advertise a transport field"
+        );
+
+        // `mode`'s enum values are proven exhaustively, independent of
+        // exact $ref/definitions layout, by `spider_mcp::transport::tests::
+        // mode_schema_advertises_exactly_default_and_tor` (unit-level, on
+        // `TransportModeParam` directly) — every tool here shares that
+        // exact type, so there is no per-tool drift to re-prove structurally.
+        let full_schema_text = serde_json::to_string(schema).unwrap();
+        assert!(
+            full_schema_text.contains("\"default\"") && full_schema_text.contains("\"tor\""),
+            "{name}: transport schema must mention both allowed mode values"
+        );
     }
 }

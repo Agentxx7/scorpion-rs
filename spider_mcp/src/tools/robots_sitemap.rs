@@ -11,6 +11,10 @@ pub struct RobotsSitemapReadParams {
     pub url: String,
     /// Return only the first N declared sitemap URLs in source order.
     pub limit: Option<usize>,
+    /// Transport for acquiring the robots.txt document itself. Omit for
+    /// Default (normal networking). Declared Sitemap: URLs are never
+    /// fetched, so this never applies to them.
+    pub transport: Option<crate::transport::TransportParam>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -32,7 +36,8 @@ struct RobotsSitemapReadResult {
 /// evidence, and return declared `Sitemap:` URLs without fetching any of
 /// them, any child sitemap, or any article/media URL.
 pub async fn run(params: RobotsSitemapReadParams) -> Result<String, String> {
-    let page = super::fetch_single_page(&params.url).await?;
+    let policy = crate::transport::resolve(params.transport)?;
+    let page = super::fetch_document(&params.url, policy).await?;
     let bytes = page
         .get_bytes()
         .ok_or_else(|| "Robots page arrived without a retained representation".to_string())?;
@@ -138,7 +143,13 @@ mod tests {
         limit: Option<usize>,
     ) -> (serde_json::Value, Vec<String>, Vec<u8>) {
         let (url, paths, stop, handle) = localhost(status_line, body.clone());
-        let output = run(RobotsSitemapReadParams { url, limit }).await.unwrap();
+        let output = run(RobotsSitemapReadParams {
+            url,
+            limit,
+            transport: None,
+        })
+        .await
+        .unwrap();
         let value = serde_json::from_str(&output).unwrap();
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
@@ -256,16 +267,54 @@ mod tests {
         let result = run(RobotsSitemapReadParams {
             url: "http://127.0.0.1:1/robots.txt".to_string(),
             limit: None,
+            transport: None,
         })
         .await;
         assert!(result.is_err());
     }
 
+    /// H: a Tor `spider_robots_sitemap_read` acquisition reaches the
+    /// robots.txt document exclusively via SOCKS, and (Section T) never
+    /// fetches the declared Sitemap: URLs.
+    #[cfg(feature = "transport_tor")]
+    #[tokio::test]
+    async fn tor_robots_sitemap_read_reaches_document_only_via_socks_and_never_fetches_declared() {
+        let body = b"Sitemap: http://robots-tor-mcp-test.invalid/sitemap.xml\nSitemap: http://robots-tor-mcp-test.invalid/news.xml\n";
+        let http = crate::test_support::HttpFixture::start(std::str::from_utf8(body).unwrap());
+        let socks = crate::test_support::SocksFixture::start(
+            Some(http.addr),
+            crate::test_support::SocksBehavior::Splice,
+        );
+        let url = format!(
+            "http://robots-tor-mcp-test.invalid:{}/robots.txt",
+            http.addr.port()
+        );
+
+        let output = run(RobotsSitemapReadParams {
+            url,
+            limit: None,
+            transport: Some(crate::transport::TransportParam {
+                mode: Some(crate::transport::TransportModeParam::Tor),
+                proxy: Some(format!("socks5h://{}", socks.addr)),
+            }),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(http.hit_count(), 1);
+        assert_eq!(socks.connect_count(), 1);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["result_count"], 2);
+    }
+
     #[test]
-    fn input_schema_has_exactly_url_and_limit() {
+    fn input_schema_has_exactly_url_limit_and_transport() {
         let value = serde_json::to_value(schemars::schema_for!(RobotsSitemapReadParams)).unwrap();
         let properties = value["properties"].as_object().unwrap();
-        assert_eq!(properties.keys().collect::<Vec<_>>(), ["limit", "url"]);
+        assert_eq!(
+            properties.keys().collect::<Vec<_>>(),
+            ["limit", "transport", "url"]
+        );
     }
 
     #[test]

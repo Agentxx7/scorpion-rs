@@ -21,17 +21,29 @@ use spider::website::Website;
 use spider_transformations::transformation::content::ReturnFormat;
 use std::time::Duration;
 
-/// Fetch exactly one page through Spider's ordinary non-browser HTTP path.
-/// The canonical implementation now lives in `spider::utils::evidence` (the
-/// core acquisition/evidence seam shared with the CLI); re-exported here so
-/// every existing crate-local call site keeps working unchanged.
+/// Fetch exactly one page through Spider's ordinary non-browser HTTP path,
+/// honoring the given transport policy — the single seam every
+/// source-reader tool (feed/sitemap/news_sitemap/robots_sitemap) funnels
+/// through (Section L: `TransportRequest -> TransportPolicy ->
+/// AcquisitionOptions -> fetch_single_page_with_options`). No second Tor
+/// client is ever constructed here.
 #[cfg(any(
     feature = "feed",
     feature = "sitemap",
     feature = "news_sitemap",
     feature = "robots_sitemap"
 ))]
-pub(crate) use spider::utils::evidence::fetch_single_page;
+pub(crate) async fn fetch_document(
+    url: &str,
+    transport: spider::features::transport::TransportPolicy,
+) -> Result<spider::page::Page, String> {
+    spider::utils::evidence::fetch_single_page_with_options(
+        url,
+        spider::utils::evidence::AcquisitionOptions { transport },
+    )
+    .await
+    .map(spider::utils::evidence::TransportAcquisition::into_page)
+}
 
 /// Apply common wait-for options to a Website builder.
 pub fn apply_wait_options(

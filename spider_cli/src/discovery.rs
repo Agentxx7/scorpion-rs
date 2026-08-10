@@ -20,6 +20,7 @@
     feature = "robots_sitemap"
 ))]
 use serde::Serialize;
+use spider::utils::evidence::build_evidence;
 #[cfg(any(
     feature = "feed",
     feature = "sitemap",
@@ -27,14 +28,34 @@ use serde::Serialize;
     feature = "robots_sitemap"
 ))]
 use spider::utils::evidence::EvidenceBundle;
-use spider::utils::evidence::{build_evidence, fetch_single_page};
+
+/// Acquire exactly one document honoring the given transport policy — the
+/// single seam every discovery/fetch command in this module funnels
+/// through (Section F: `TransportRequest -> TransportPolicy ->
+/// AcquisitionOptions -> fetch_single_page_with_options`). No second Tor
+/// client is ever constructed here — this calls straight into the same
+/// audited seam the core crawl capability uses.
+async fn fetch_document(
+    url: &str,
+    transport: spider::features::transport::TransportPolicy,
+) -> Result<spider::page::Page, String> {
+    spider::utils::evidence::fetch_single_page_with_options(
+        url,
+        spider::utils::evidence::AcquisitionOptions { transport },
+    )
+    .await
+    .map(spider::utils::evidence::TransportAcquisition::into_page)
+}
 
 /// `spider fetch <url>` — exactly one evidence-first resource acquisition.
 /// No crawl following, no browser, no content transformation, no
 /// discovery. The output losslessly exposes the canonical `EvidenceBundle`.
 #[cfg(feature = "fetch")]
-pub async fn run_fetch(url: &str) -> Result<String, String> {
-    let page = fetch_single_page(url).await?;
+pub async fn run_fetch(
+    url: &str,
+    transport: spider::features::transport::TransportPolicy,
+) -> Result<String, String> {
+    let page = fetch_document(url, transport).await?;
     let content = page
         .get_bytes()
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
@@ -92,7 +113,9 @@ mod fetch_tests {
     async fn fetch_is_one_request_valid_json_with_truthful_evidence() {
         const BODY: &[u8] = b"hello from scorpion fetch";
         let (url, requests, stop, handle) = localhost(BODY);
-        let output = run_fetch(&url).await.unwrap();
+        let output = run_fetch(&url, spider::features::transport::TransportPolicy::Default)
+            .await
+            .unwrap();
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
 
@@ -110,7 +133,11 @@ mod fetch_tests {
 
     #[tokio::test]
     async fn fetch_invalid_url_is_explicit_error() {
-        let result = run_fetch("not a url").await;
+        let result = run_fetch(
+            "not a url",
+            spider::features::transport::TransportPolicy::Default,
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -127,9 +154,12 @@ mod fetch_tests {
     #[tokio::test]
     async fn fetch_connection_failure_is_truthful_evidence_not_a_process_error() {
         // Port chosen to be almost certainly unbound in any test environment.
-        let output = run_fetch("http://127.0.0.1:1/resource")
-            .await
-            .expect("a connection failure is representable as evidence, not an Err");
+        let output = run_fetch(
+            "http://127.0.0.1:1/resource",
+            spider::features::transport::TransportPolicy::Default,
+        )
+        .await
+        .expect("a connection failure is representable as evidence, not an Err");
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["observed_status_code"], serde_json::Value::Null);
         assert_eq!(value["response_body_hash"], serde_json::Value::Null);
@@ -162,8 +192,12 @@ mod feed_cmd {
         parse_error: Option<FeedParseError>,
     }
 
-    pub async fn run(url: &str, limit: Option<usize>) -> Result<String, String> {
-        let page = fetch_single_page(url).await?;
+    pub async fn run(
+        url: &str,
+        limit: Option<usize>,
+        transport: spider::features::transport::TransportPolicy,
+    ) -> Result<String, String> {
+        let page = super::fetch_document(url, transport).await?;
         let bytes = page
             .get_bytes()
             .ok_or_else(|| "Feed page arrived without a retained representation".to_string())?;
@@ -281,7 +315,13 @@ mod feed_cmd {
             limit: Option<usize>,
         ) -> (serde_json::Value, Vec<String>, &'static [u8]) {
             let (url, paths, stop, handle) = localhost(body);
-            let output = run(&url, limit).await.unwrap();
+            let output = run(
+                &url,
+                limit,
+                spider::features::transport::TransportPolicy::Default,
+            )
+            .await
+            .unwrap();
             let value: serde_json::Value = serde_json::from_str(&output).unwrap();
             stop.store(true, Ordering::Relaxed);
             handle.join().unwrap();
@@ -366,7 +406,13 @@ mod feed_cmd {
                 }
             });
 
-            let output = run(&url, None).await.unwrap();
+            let output = run(
+                &url,
+                None,
+                spider::features::transport::TransportPolicy::Default,
+            )
+            .await
+            .unwrap();
             stop.store(true, Ordering::Relaxed);
             handle.join().unwrap();
 
@@ -383,7 +429,12 @@ mod feed_cmd {
         /// error, non-zero-exit at the `main.rs` dispatch layer.
         #[tokio::test]
         async fn feed_invalid_url_is_explicit_error() {
-            let result = run("not a url", None).await;
+            let result = run(
+                "not a url",
+                None,
+                spider::features::transport::TransportPolicy::Default,
+            )
+            .await;
             assert!(result.is_err());
         }
     }
@@ -416,8 +467,12 @@ mod sitemap_cmd {
         parse_error: Option<SitemapParseError>,
     }
 
-    pub async fn run(url: &str, limit: Option<usize>) -> Result<String, String> {
-        let page = fetch_single_page(url).await?;
+    pub async fn run(
+        url: &str,
+        limit: Option<usize>,
+        transport: spider::features::transport::TransportPolicy,
+    ) -> Result<String, String> {
+        let page = super::fetch_document(url, transport).await?;
         let bytes = page
             .get_bytes()
             .ok_or_else(|| "Sitemap page arrived without a retained representation".to_string())?;
@@ -538,7 +593,13 @@ mod sitemap_cmd {
             limit: Option<usize>,
         ) -> (serde_json::Value, Vec<String>, &'static [u8]) {
             let (url, paths, stop, handle) = localhost(body);
-            let output = run(&url, limit).await.unwrap();
+            let output = run(
+                &url,
+                limit,
+                spider::features::transport::TransportPolicy::Default,
+            )
+            .await
+            .unwrap();
             let value: serde_json::Value = serde_json::from_str(&output).unwrap();
             stop.store(true, Ordering::Relaxed);
             handle.join().unwrap();
@@ -612,8 +673,12 @@ mod news_sitemap_cmd {
         parse_error: Option<NewsSitemapParseError>,
     }
 
-    pub async fn run(url: &str, limit: Option<usize>) -> Result<String, String> {
-        let page = fetch_single_page(url).await?;
+    pub async fn run(
+        url: &str,
+        limit: Option<usize>,
+        transport: spider::features::transport::TransportPolicy,
+    ) -> Result<String, String> {
+        let page = super::fetch_document(url, transport).await?;
         let bytes = page.get_bytes().ok_or_else(|| {
             "News Sitemap page arrived without a retained representation".to_string()
         })?;
@@ -723,7 +788,13 @@ mod news_sitemap_cmd {
             limit: Option<usize>,
         ) -> (serde_json::Value, Vec<String>, &'static [u8]) {
             let (url, paths, stop, handle) = localhost(body);
-            let output = run(&url, limit).await.unwrap();
+            let output = run(
+                &url,
+                limit,
+                spider::features::transport::TransportPolicy::Default,
+            )
+            .await
+            .unwrap();
             let value: serde_json::Value = serde_json::from_str(&output).unwrap();
             stop.store(true, Ordering::Relaxed);
             handle.join().unwrap();
@@ -797,8 +868,12 @@ mod robots_sitemap_cmd {
         parse_error: Option<RobotsSitemapParseError>,
     }
 
-    pub async fn run(url: &str, limit: Option<usize>) -> Result<String, String> {
-        let page = fetch_single_page(url).await?;
+    pub async fn run(
+        url: &str,
+        limit: Option<usize>,
+        transport: spider::features::transport::TransportPolicy,
+    ) -> Result<String, String> {
+        let page = super::fetch_document(url, transport).await?;
         let bytes = page
             .get_bytes()
             .ok_or_else(|| "Robots page arrived without a retained representation".to_string())?;
@@ -904,7 +979,13 @@ mod robots_sitemap_cmd {
             limit: Option<usize>,
         ) -> (serde_json::Value, Vec<String>, String) {
             let (url, paths, stop, handle) = localhost(body.clone());
-            let output = run(&url, limit).await.unwrap();
+            let output = run(
+                &url,
+                limit,
+                spider::features::transport::TransportPolicy::Default,
+            )
+            .await
+            .unwrap();
             let value: serde_json::Value = serde_json::from_str(&output).unwrap();
             stop.store(true, Ordering::Relaxed);
             handle.join().unwrap();

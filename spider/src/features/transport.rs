@@ -79,11 +79,25 @@ pub struct TorTransportConfig {
 }
 
 impl TorTransportConfig {
-    /// Validate a Tor SOCKS endpoint. Accepts only `socks5h://host:port`
-    /// with no embedded userinfo. Every other scheme (`socks5://`,
-    /// `socks://`, `http://`, `https://`, anything else) and any
-    /// malformed or credential-bearing value is rejected — never
-    /// rewritten, never silently skipped.
+    /// Validate a Tor SOCKS endpoint. Accepts **exactly** an authority
+    /// endpoint — `socks5h://HOST:PORT` — and nothing else:
+    ///
+    /// - scheme must be `socks5h` (never `socks5://`, `socks://`,
+    ///   `http(s)://`, or anything else)
+    /// - a host is required
+    /// - a port is required *explicitly* — there is no implicit/default
+    ///   Tor port, so `socks5h://127.0.0.1` (no port) is rejected exactly
+    ///   like a missing host
+    /// - no userinfo/credentials (`user:pass@`, `user@`)
+    /// - no path, query, or fragment — `socks5h://127.0.0.1:9050/`,
+    ///   `?x=1`, or `#frag` are all rejected; this is an authority-only
+    ///   endpoint, not a request URL
+    ///
+    /// Every malformed or out-of-grammar value is rejected outright —
+    /// never rewritten, never silently normalized, never silently
+    /// skipped. There is no environment-derived or implicit default Tor
+    /// endpoint anywhere in this crate; a caller must always supply one
+    /// explicitly.
     pub fn new(endpoint: &str) -> Result<Self, TransportError> {
         let url = url::Url::parse(endpoint)
             .map_err(|error| TransportError::InvalidEndpoint(error.to_string()))?;
@@ -97,6 +111,27 @@ impl TorTransportConfig {
         if url.host_str().is_none() {
             return Err(TransportError::InvalidEndpoint(
                 "missing host in Tor SOCKS endpoint".to_string(),
+            ));
+        }
+        if url.port().is_none() {
+            return Err(TransportError::InvalidEndpoint(
+                "missing explicit port in Tor SOCKS endpoint — there is no default Tor port"
+                    .to_string(),
+            ));
+        }
+        if !url.path().is_empty() {
+            return Err(TransportError::InvalidEndpoint(
+                "Tor SOCKS endpoint must not carry a path".to_string(),
+            ));
+        }
+        if url.query().is_some() {
+            return Err(TransportError::InvalidEndpoint(
+                "Tor SOCKS endpoint must not carry a query string".to_string(),
+            ));
+        }
+        if url.fragment().is_some() {
+            return Err(TransportError::InvalidEndpoint(
+                "Tor SOCKS endpoint must not carry a fragment".to_string(),
             ));
         }
 
@@ -213,6 +248,79 @@ impl fmt::Display for TransportError {
 }
 
 impl std::error::Error for TransportError {}
+
+/// Stable, wire/user-facing transport intent — deliberately **not** the
+/// same shape as [`TransportPolicy`]. `TransportPolicy` is Spider's
+/// internal execution vocabulary (and `TorTransportConfig` inside it
+/// enforces validation at construction, not at rest); `TransportRequest`
+/// is the small, stable DTO a public surface (Scorpion CLI, MCP) parses
+/// *its own* wire format into, then converts here exactly once via
+/// [`TransportRequest::into_policy`]. Neither the CLI nor MCP should ever
+/// serialize/deserialize a raw `TransportPolicy` as their public contract
+/// — this type is the seam that keeps that from happening, and the one
+/// place both surfaces' request-validation logic actually lives, so it
+/// can never independently drift between them.
+///
+/// `Default::default()` is `TransportMode::Default` with no proxy — the
+/// same backward-compatible "existing behavior" starting point every
+/// other transport-aware default in this crate uses.
+#[derive(Debug, Clone, Default)]
+pub struct TransportRequest {
+    /// Which transport family this request selects.
+    pub mode: TransportMode,
+    /// The Tor SOCKS5h endpoint, required when `mode` is
+    /// [`TransportMode::Tor`] and meaningless (must be `None`) when
+    /// `mode` is [`TransportMode::Default`] — see [`into_policy`](Self::into_policy)
+    /// for the exact validation matrix.
+    pub proxy: Option<String>,
+}
+
+/// The transport family half of a [`TransportRequest`]. Intentionally a
+/// closed two-variant enum: an unrecognized mode string is a public
+/// surface's own parsing/deserialization concern (reject before this type
+/// is ever constructed), not something this type represents as a third
+/// "unknown" state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportMode {
+    /// Preserve current Spider/Scorpion networking behavior exactly.
+    #[default]
+    Default,
+    /// Fail-closed Tor-over-SOCKS5h — see [`TransportPolicy::Tor`].
+    Tor,
+}
+
+impl TransportRequest {
+    /// Convert this request into the canonical [`TransportPolicy`] Spider
+    /// actually executes against — the one and only place this
+    /// conversion happens, reused verbatim by both the CLI and MCP
+    /// adapters. Fails closed, before any target networking, on every
+    /// malformed combination:
+    ///
+    /// | `mode`    | `proxy`    | Result                                   |
+    /// |-----------|------------|-------------------------------------------|
+    /// | `Default` | `None`     | `Ok(TransportPolicy::Default)`             |
+    /// | `Default` | `Some(_)`  | `Err` — a proxy without `mode = tor` is a request-shape error, not silently ignored |
+    /// | `Tor`     | `Some(ep)` | `Ok(TransportPolicy::Tor(..))` if `ep` validates (see [`TorTransportConfig::new`]), else that same `Err` |
+    /// | `Tor`     | `None`     | `Err` — Tor requires an explicit endpoint; there is no implicit/default Tor proxy |
+    pub fn into_policy(self) -> Result<TransportPolicy, TransportError> {
+        match (self.mode, self.proxy) {
+            (TransportMode::Default, None) => Ok(TransportPolicy::Default),
+            (TransportMode::Default, Some(_)) => Err(TransportError::IncompatibleConfiguration(
+                "a proxy endpoint was supplied but mode is \"default\" — set mode to \"tor\" \
+                 to use it, or omit the proxy field"
+                    .to_string(),
+            )),
+            (TransportMode::Tor, Some(endpoint)) => {
+                TorTransportConfig::new(&endpoint).map(TransportPolicy::Tor)
+            }
+            (TransportMode::Tor, None) => Err(TransportError::IncompatibleConfiguration(
+                "mode is \"tor\" but no proxy endpoint was supplied — Tor requires an explicit \
+                 socks5h://HOST:PORT endpoint; there is no implicit or environment-derived default"
+                    .to_string(),
+            )),
+        }
+    }
+}
 
 /// Canonical, case-insensitive `.onion` hostname detection. Matches the
 /// exact `.onion` suffix and any subdomain beneath it; never a substring
@@ -654,6 +762,45 @@ mod tests {
         );
     }
 
+    /// Section C (public Tor transport surface frontier): the accepted
+    /// grammar is exactly `socks5h://HOST:PORT` — every named valid shape
+    /// (IPv4, hostname, bracketed IPv6) accepted; every named invalid
+    /// shape (missing port, path, query, fragment) rejected.
+    #[test]
+    fn tor_endpoint_grammar_accepts_only_bare_authority() {
+        for valid in [
+            "socks5h://127.0.0.1:9050",
+            "socks5h://localhost:9050",
+            "socks5h://[::1]:9050",
+        ] {
+            assert!(
+                TorTransportConfig::new(valid).is_ok(),
+                "{valid} must be accepted"
+            );
+        }
+
+        assert!(matches!(
+            TorTransportConfig::new("socks5h://127.0.0.1").unwrap_err(),
+            TransportError::InvalidEndpoint(_)
+        ));
+        assert!(matches!(
+            TorTransportConfig::new("socks5h://127.0.0.1:9050/").unwrap_err(),
+            TransportError::InvalidEndpoint(_)
+        ));
+        assert!(matches!(
+            TorTransportConfig::new("socks5h://127.0.0.1:9050/path").unwrap_err(),
+            TransportError::InvalidEndpoint(_)
+        ));
+        assert!(matches!(
+            TorTransportConfig::new("socks5h://127.0.0.1:9050?x=1").unwrap_err(),
+            TransportError::InvalidEndpoint(_)
+        ));
+        assert!(matches!(
+            TorTransportConfig::new("socks5h://127.0.0.1:9050#frag").unwrap_err(),
+            TransportError::InvalidEndpoint(_)
+        ));
+    }
+
     #[test]
     fn tor_endpoint_debug_never_exposes_credentials() {
         let config = TorTransportConfig::new("socks5h://127.0.0.1:9050").unwrap();
@@ -758,5 +905,87 @@ mod tests {
         let result =
             apply_transport_policy(reqwest::ClientBuilder::new(), &TransportPolicy::Tor(config));
         assert!(result.is_ok());
+    }
+
+    /// Section B/D (public Tor transport surface frontier): the shared
+    /// `TransportRequest -> TransportPolicy` validation matrix, exactly as
+    /// documented on `TransportRequest::into_policy`.
+    mod transport_request {
+        use super::*;
+
+        #[test]
+        fn default_mode_no_proxy_is_default_policy() {
+            let policy = TransportRequest {
+                mode: TransportMode::Default,
+                proxy: None,
+            }
+            .into_policy()
+            .unwrap();
+            assert!(matches!(policy, TransportPolicy::Default));
+        }
+
+        #[test]
+        fn default_mode_with_proxy_is_rejected() {
+            let result = TransportRequest {
+                mode: TransportMode::Default,
+                proxy: Some("socks5h://127.0.0.1:9050".to_string()),
+            }
+            .into_policy();
+            assert!(matches!(
+                result,
+                Err(TransportError::IncompatibleConfiguration(_))
+            ));
+        }
+
+        #[test]
+        fn tor_mode_with_valid_proxy_is_tor_policy() {
+            let policy = TransportRequest {
+                mode: TransportMode::Tor,
+                proxy: Some("socks5h://127.0.0.1:9050".to_string()),
+            }
+            .into_policy()
+            .unwrap();
+            assert!(matches!(policy, TransportPolicy::Tor(_)));
+        }
+
+        #[test]
+        fn tor_mode_without_proxy_is_rejected() {
+            let result = TransportRequest {
+                mode: TransportMode::Tor,
+                proxy: None,
+            }
+            .into_policy();
+            assert!(matches!(
+                result,
+                Err(TransportError::IncompatibleConfiguration(_))
+            ));
+        }
+
+        /// An invalid endpoint under `mode = tor` surfaces
+        /// `TorTransportConfig::new`'s own error verbatim — the request
+        /// layer doesn't wrap/obscure it.
+        #[test]
+        fn tor_mode_with_malformed_proxy_surfaces_endpoint_error() {
+            let result = TransportRequest {
+                mode: TransportMode::Tor,
+                proxy: Some("http://127.0.0.1:9050".to_string()),
+            }
+            .into_policy();
+            assert_eq!(
+                result.unwrap_err(),
+                TransportError::UnsupportedScheme("http".into())
+            );
+        }
+
+        #[test]
+        fn default_is_default_mode_no_proxy() {
+            let request = TransportRequest::default();
+            assert_eq!(request.mode, TransportMode::Default);
+            assert_eq!(request.proxy, None);
+            assert!(matches!(
+                request.into_policy().unwrap(),
+                TransportPolicy::Default
+            ));
+        }
     }
 }

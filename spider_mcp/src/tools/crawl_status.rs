@@ -44,6 +44,8 @@ pub fn summarize(state: &SharedState, crawl_id: &str) -> Result<serde_json::Valu
         "status": session.status,
         "page_count": session.pages.len(),
         "pages": session.pages,
+        "error": session.error,
+        "error_code": session.error_code,
     }))
 }
 
@@ -116,6 +118,8 @@ mod tests {
             pages,
             started_at: Instant::now(),
             abort: None,
+            error: None,
+            error_code: None,
         }
     }
 
@@ -143,9 +147,10 @@ mod tests {
             status_code: 200,
             links: vec!["http://example.test/a".to_string()],
         }];
-        state
-            .sessions
-            .insert("done-1".into(), session(CrawlSessionStatus::Complete, pages));
+        state.sessions.insert(
+            "done-1".into(),
+            session(CrawlSessionStatus::Complete, pages),
+        );
 
         let summary = summarize(&state, "done-1").expect("complete session must be found");
         assert_eq!(summary["status"], "complete");
@@ -166,13 +171,61 @@ mod tests {
         assert_eq!(summary["status"], "failed");
     }
 
+    /// 3b (Section N): a Tor transport preflight rejection reported through
+    /// a background crawl session must surface both the human-readable
+    /// `error` and the machine-readable `error_code` in the status
+    /// summary — the classification is never lost between the session and
+    /// this read path.
+    #[test]
+    fn failed_session_reports_transport_error_and_error_code() {
+        let state = SharedState::new();
+        let mut failed = session(CrawlSessionStatus::Failed, vec![]);
+        failed.error = Some(
+            "mode is \"tor\" but no proxy endpoint was supplied — Tor requires an explicit \
+             socks5h://HOST:PORT endpoint; there is no implicit or environment-derived default"
+                .to_string(),
+        );
+        failed.error_code = Some("incompatible_configuration".to_string());
+        state.sessions.insert("fail-transport-1".into(), failed);
+
+        let summary =
+            summarize(&state, "fail-transport-1").expect("failed session must still be found");
+        assert_eq!(summary["status"], "failed");
+        assert_eq!(summary["page_count"], 0);
+        assert_eq!(summary["error_code"], "incompatible_configuration");
+        assert!(summary["error"]
+            .as_str()
+            .unwrap()
+            .contains("no proxy endpoint was supplied"));
+    }
+
+    /// A non-transport failure (e.g. the pre-existing screenshot
+    /// fail-closed path) leaves `error`/`error_code` `null` — the new
+    /// fields are additive, not a requirement on every `Failed` session.
+    #[test]
+    fn failed_session_without_transport_error_has_null_error_fields() {
+        let state = SharedState::new();
+        state.sessions.insert(
+            "fail-plain-1".into(),
+            session(CrawlSessionStatus::Failed, vec![]),
+        );
+
+        let summary = summarize(&state, "fail-plain-1").unwrap();
+        assert_eq!(summary["status"], "failed");
+        assert!(summary["error"].is_null());
+        assert!(summary["error_code"].is_null());
+    }
+
     /// 4. Unknown crawl_id returns an explicit not-found result, not an
     /// empty success.
     #[test]
     fn unknown_crawl_id_is_explicit_not_found() {
         let state = SharedState::new();
         let result = summarize(&state, "does-not-exist");
-        assert!(result.is_err(), "unknown crawl_id must not silently succeed");
+        assert!(
+            result.is_err(),
+            "unknown crawl_id must not silently succeed"
+        );
         assert!(result.unwrap_err().contains("does-not-exist"));
     }
 
@@ -181,7 +234,10 @@ mod tests {
     fn unknown_crawl_id_resource_read_fails_explicitly() {
         let state = SharedState::new();
         let result = read_resource("crawl://does-not-exist/summary", &state);
-        assert!(result.is_err(), "unknown crawl_id must not silently succeed via the resource");
+        assert!(
+            result.is_err(),
+            "unknown crawl_id must not silently succeed via the resource"
+        );
     }
 
     /// URI parsing is the other half of resource reachability — exercised

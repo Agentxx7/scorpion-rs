@@ -46,7 +46,16 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["chrome", "chrome_screenshot", "spider_cloud", "search_searxng", "feed", "sitemap", "news_sitemap", "robots_sitemap"]
+default = ["chrome", "chrome_screenshot", "spider_cloud", "search_searxng", "feed", "sitemap", "news_sitemap", "robots_sitemap", "transport_tor"]
+# Forwards to `spider/transport_tor` — the audited fail-closed Tor SOCKS5h
+# transport, exposed as an optional `transport` field on the applicable
+# tool schemas. Part of `default` so the released `spider-mcp` binary (and
+# `scorpion mcp`, which runs this exact server — see `lib.rs`) actually
+# supports the Tor capability it advertises. A `--no-default-features`
+# custom build still exposes the schema field (schema generation never
+# depends on this feature) but fails closed at runtime with an explicit
+# "Tor not compiled" error instead of silently using Default transport.
+transport_tor = ["spider/transport_tor"]
 feed = ["spider/feed"]
 sitemap = ["spider/sitemap"]
 news_sitemap = ["spider/news_sitemap"]

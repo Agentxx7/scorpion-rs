@@ -11,7 +11,10 @@
 mod evidence;
 mod server;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod tools;
+mod transport;
 
 use rmcp::ServiceExt;
 use server::SpiderMcpServer;

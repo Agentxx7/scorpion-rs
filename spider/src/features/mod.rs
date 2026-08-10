@@ -57,6 +57,10 @@ pub mod robots_sitemap;
 /// Generic source-discovery vocabulary.
 pub mod source;
 
+/// Canonical HTTP transport policy (`Default` / Tor-over-SOCKS5h), with
+/// fail-closed `.onion` protection and transport-pinned redirects.
+pub mod transport;
+
 #[cfg(all(not(feature = "simd"), any(feature = "openai", feature = "gemini")))]
 pub(crate) use serde_json;
 #[cfg(all(feature = "simd", any(feature = "openai", feature = "gemini")))]

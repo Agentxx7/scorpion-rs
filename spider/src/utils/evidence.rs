@@ -11,6 +11,7 @@
 //! captures — nothing here changes crawling, fetching, or rendering
 //! behavior.
 
+use crate::features::transport::{self, TransportPolicy};
 use crate::page::Page;
 use crate::website::Website;
 
@@ -103,6 +104,19 @@ pub struct EvidenceBundle {
     /// available unconditionally here because the `evidence` feature
     /// requires `serde` (which pulls in `serde_json`).
     pub metadata: Option<serde_json::Value>,
+    /// Which transport actually performed this acquisition — `"default"`
+    /// or `"tor"`. Populated only by [`build_evidence_with_transport`];
+    /// `None` for evidence built via the original [`build_evidence`],
+    /// which never claims a transport it didn't observe. Never claims the
+    /// configured SOCKS endpoint is genuinely Tor — only that the Tor
+    /// transport policy was the one selected for this fetch.
+    pub transport: Option<String>,
+    /// How target-hostname DNS resolution was performed: `"proxy"` when
+    /// resolution happened proxy-side (Tor/SOCKS5h — the local process
+    /// never resolved the target host), `None` when unspecified/ordinary
+    /// local resolution applies (`default` transport, or evidence built
+    /// via the original [`build_evidence`]).
+    pub dns: Option<String>,
 }
 
 /// Build retrieval evidence for one fetched page. Content and screenshot
@@ -165,7 +179,37 @@ pub fn build_evidence(
         screenshot: wants_screenshot.then_some(content).flatten(),
         screenshot_hash,
         metadata: None,
+        transport: None,
+        dns: None,
     }
+}
+
+/// Build retrieval evidence for one fetched page, additionally recording
+/// which transport performed the acquisition. Additive sibling of
+/// [`build_evidence`] — existing call sites that only know `Default`
+/// transport are unaffected and keep calling `build_evidence` directly.
+/// `transport` and `dns` are the only fields this adds; every other field
+/// is computed identically to `build_evidence`.
+///
+/// Takes a [`TransportAcquisition`] rather than a bare `&TransportPolicy`
+/// so this can never be called with a policy unrelated to how `page` was
+/// actually fetched: a `TransportAcquisition` can only be produced by
+/// [`fetch_single_page_with_options`] itself, so its `.transport()` is
+/// always the policy that *actually* performed this acquisition, never an
+/// arbitrary caller-supplied label attached after the fact.
+pub fn build_evidence_with_transport(
+    acquisition: &TransportAcquisition,
+    content: Option<String>,
+    wants_screenshot: bool,
+    used_browser: bool,
+) -> EvidenceBundle {
+    let mut bundle = build_evidence(&acquisition.page, content, wants_screenshot, used_browser);
+    bundle.transport = Some(acquisition.transport.label().to_string());
+    bundle.dns = match &acquisition.transport {
+        TransportPolicy::Default => None,
+        TransportPolicy::Tor(_) => Some("proxy".to_string()),
+    };
+    bundle
 }
 
 /// Fetch exactly one page through Spider's ordinary non-browser HTTP path:
@@ -187,6 +231,221 @@ pub async fn fetch_single_page(url: &str) -> Result<Page, String> {
         .recv()
         .await
         .map_err(|_| "Retrieval completed without producing a page".to_string())
+}
+
+/// Options for the transport-aware one-shot acquisition seam. `transport`
+/// selects `Default` (existing behavior) or `Tor` (fail-closed SOCKS5h).
+/// `Default::default()` is `TransportPolicy::Default`, matching
+/// [`fetch_single_page`]'s existing behavior exactly.
+#[derive(Debug, Clone, Default)]
+pub struct AcquisitionOptions {
+    /// The transport policy this acquisition must use.
+    pub transport: TransportPolicy,
+}
+
+/// A fetched `Page` bound to the transport policy that *actually*
+/// performed the fetch. The only way to obtain one is
+/// [`fetch_single_page_with_options`]'s return value — there is no public
+/// constructor — so a caller can never mint a `TransportAcquisition`
+/// claiming `Tor` for a `Page` that was really fetched over `Default`
+/// transport (or vice versa). This is what makes
+/// [`build_evidence_with_transport`]'s provenance trustworthy: it reads
+/// `.transport()` off this type instead of accepting an unrelated,
+/// independently-suppliable policy argument from the caller.
+#[derive(Debug)]
+pub struct TransportAcquisition {
+    page: Page,
+    transport: TransportPolicy,
+}
+
+impl TransportAcquisition {
+    /// The fetched page.
+    pub fn page(&self) -> &Page {
+        &self.page
+    }
+
+    /// The transport policy that actually performed this acquisition.
+    pub fn transport(&self) -> &TransportPolicy {
+        &self.transport
+    }
+
+    /// Consume this acquisition, discarding the transport binding and
+    /// returning the bare `Page` — for callers that only need the page
+    /// and don't need (or have already extracted) transport provenance.
+    pub fn into_page(self) -> Page {
+        self.page
+    }
+}
+
+/// Fetch exactly one page honoring the given transport policy — the
+/// options-aware, backward-compatible superset of [`fetch_single_page`].
+///
+/// `AcquisitionOptions { transport: TransportPolicy::Default }` delegates
+/// to the exact same `Website`-based path `fetch_single_page` already
+/// uses (byte-for-byte the same call sequence) — zero behavior change for
+/// every existing caller.
+///
+/// `TransportPolicy::Tor` never touches `Website`/`configure_http_client`:
+/// Tor traffic is issued through a small, dedicated `reqwest::Client`
+/// built solely from the validated SOCKS5h endpoint (see
+/// [`crate::features::transport`]), so it can never inherit unaudited
+/// proxy-rotation, Spider Cloud, `wreq`, or Chrome/smart-mode behavior.
+/// `.onion` targets are rejected before any DNS lookup or network
+/// activity when the active policy is `Default`.
+///
+/// # Failure contract
+///
+/// `Err` is returned only for failures that occur *before* a request is
+/// ever attempted: an unparseable `url`, a `.onion` target under
+/// `Default` transport, or a transport *configuration* problem (an
+/// invalid/unsupported Tor endpoint, `transport_tor` not compiled in, or
+/// an incompatible build combination). None of these ever reach the
+/// network.
+///
+/// Once a request is actually attempted, this matches [`fetch_single_page`]'s
+/// established contract exactly: a network-level failure (connection
+/// refused, SOCKS failure, TLS failure, timeout, DNS failure, non-2xx
+/// response, …) is `Ok(TransportAcquisition)` whose `.page()` carries a
+/// non-success status — never a fabricated success, but also never a
+/// hard `Err` for something that reached the wire. This is intentional,
+/// not an oversight: `Page` (not `Result`) has always been Spider's
+/// vocabulary for "a request was attempted and this is what came back",
+/// and Tor acquisition reuses that vocabulary rather than inventing a
+/// second one. Callers that need to distinguish "the Tor circuit itself
+/// failed" from "the origin returned an error" should inspect
+/// `.page().status_code`.
+///
+/// There is no fallback in either case: a Tor failure — at any layer —
+/// never causes a retry over `Default` transport.
+pub async fn fetch_single_page_with_options(
+    url: &str,
+    options: AcquisitionOptions,
+) -> Result<TransportAcquisition, String> {
+    let parsed = url::Url::parse(url).map_err(|_| "Invalid URL".to_string())?;
+    transport::validate_target(&parsed, &options.transport).map_err(|error| error.to_string())?;
+
+    match &options.transport {
+        TransportPolicy::Default => fetch_single_page(url)
+            .await
+            .map(|page| TransportAcquisition {
+                page,
+                transport: options.transport,
+            }),
+        TransportPolicy::Tor(_) => {
+            let page = fetch_via_tor(url, &options.transport).await?;
+            Ok(TransportAcquisition {
+                page,
+                transport: options.transport,
+            })
+        }
+    }
+}
+
+/// Connect/read timeouts for the dedicated Tor one-shot client, reused
+/// verbatim from `Website::configure_base_client`'s own *unmultiplied*
+/// defaults (`Duration::from_secs(24)` / `Duration::from_secs(42)`) — not
+/// a Tor-specific invention. `configure_base_client` doubles these only
+/// when Spider's legacy multi-proxy rotation list
+/// (`configuration.proxies`) is configured; the dedicated Tor client
+/// never uses that list (see module docs), so the unmultiplied canonical
+/// values are the correct match, and they provide the hard bound that
+/// keeps a stalled/blackhole SOCKS handshake from waiting indefinitely.
+/// Only referenced by the real Tor client-construction path (see its
+/// `cfg`), hence the matching gate here.
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+const TOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24);
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+const TOR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(42);
+
+/// Total request deadline for the dedicated Tor one-shot client, reused
+/// verbatim from `Configuration::new()`'s own default `request_timeout`
+/// (`Duration::from_secs(120)`), applied via `reqwest::ClientBuilder::timeout`.
+///
+/// Connect/read timeouts alone are not sufficient: a peer that keeps the
+/// connection alive and periodically sends enough bytes to keep resetting
+/// `TOR_READ_TIMEOUT` (a slow-drip response) would never trip either of
+/// them, and could otherwise stall a Tor acquisition indefinitely.
+/// `.timeout()` bounds the request end-to-end — connect, redirects, and
+/// response body — regardless of how activity is paced within it.
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+const TOR_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Redirect hop cap for the Tor one-shot client, reused verbatim from
+/// `Configuration::new()`'s own default `redirect_limit` (`7`).
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+const TOR_REDIRECT_LIMIT: usize = 7;
+
+/// Fetch one page through the dedicated, minimal Tor client: no
+/// environment/system proxy inheritance, exactly one explicit SOCKS5h
+/// proxy, bounded connect/read/total timeouts, and a redirect policy that pins
+/// transport across hops while reusing Spider's existing SSRF redirect
+/// guard. User-agent is sourced from the same `configuration::get_ua`
+/// Default acquisition uses, so a Tor fetch is not distinguishable from a
+/// Default fetch by header fingerprint alone.
+///
+/// Hardcoded to a plain `reqwest::Client` — never the crate's aliased
+/// `Client` type, which resolves to `wreq::Client` or
+/// `reqwest_middleware::ClientWithMiddleware` under the `wreq`/
+/// `cache_request` features respectively. Neither of those alternate
+/// stacks has been audited for the fail-closed guarantees this module
+/// requires (no environment proxy inheritance, no target DNS
+/// pre-resolution, transport-pinned redirects), so that combination is
+/// rejected explicitly at build time below rather than silently used.
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+async fn fetch_via_tor(url: &str, policy: &TransportPolicy) -> Result<Page, String> {
+    let builder = transport::apply_transport_policy(reqwest::Client::builder(), policy)
+        .map_err(|error| error.to_string())?;
+    let builder = builder
+        .connect_timeout(TOR_CONNECT_TIMEOUT)
+        .read_timeout(TOR_READ_TIMEOUT)
+        .timeout(TOR_TOTAL_TIMEOUT)
+        .user_agent(crate::configuration::get_ua(false))
+        .redirect(transport::pin_redirect_policy(
+            transport::ssrf_screened_base_policy(TOR_REDIRECT_LIMIT),
+            policy.clone(),
+        ));
+    let client = builder.build().map_err(|error| error.to_string())?;
+    Ok(Page::new_page(url, &client).await)
+}
+
+/// `transport_tor` is compiled, but so is `wreq` and/or `cache_request` —
+/// neither alternate client stack is Tor-audited (see [`fetch_via_tor`]
+/// above), so the combination is rejected explicitly rather than silently
+/// using an unaudited client.
+#[cfg(all(
+    feature = "transport_tor",
+    any(feature = "wreq", feature = "cache_request")
+))]
+async fn fetch_via_tor(_url: &str, _policy: &TransportPolicy) -> Result<Page, String> {
+    let message = "Tor transport requires a build without the wreq or cache_request features — \
+         neither alternate client stack is audited for Tor-safe (fail-closed) behavior"
+        .to_string();
+    Err(crate::features::transport::TransportError::IncompatibleConfiguration(message).to_string())
+}
+
+#[cfg(not(feature = "transport_tor"))]
+async fn fetch_via_tor(_url: &str, _policy: &TransportPolicy) -> Result<Page, String> {
+    Err(crate::features::transport::TransportError::TorNotCompiled.to_string())
 }
 
 #[cfg(test)]
@@ -254,6 +513,28 @@ mod tests {
     #[tokio::test]
     async fn fetch_single_page_rejects_invalid_url() {
         let result = fetch_single_page("not a url").await;
+        assert!(result.is_err());
+    }
+
+    /// Without the `transport_tor` feature, requesting `TransportPolicy::Tor`
+    /// through the public one-shot seam fails closed with an explicit `Err`
+    /// before any network activity — never silently falls back to `Default`.
+    /// This is the public-contract-level proof that replaces the old
+    /// `transport::apply_transport_policy`-level unit test, which no longer
+    /// exists in this configuration (see that function's `cfg`).
+    #[cfg(not(feature = "transport_tor"))]
+    #[tokio::test]
+    async fn tor_acquisition_fails_closed_without_transport_tor_feature() {
+        let config =
+            crate::features::transport::TorTransportConfig::new("socks5h://127.0.0.1:9050")
+                .unwrap();
+        let result = fetch_single_page_with_options(
+            "http://example.test/",
+            AcquisitionOptions {
+                transport: TransportPolicy::Tor(config),
+            },
+        )
+        .await;
         assert!(result.is_err());
     }
 }

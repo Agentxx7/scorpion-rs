@@ -198,6 +198,13 @@ reqwest = { version = "0.13", features = [
 serde_json = "1"
 env_logger = "0.11"
 criterion = { version = "0.8", features = ["async_tokio", "html_reports"] }
+# Adds "test-util" to the same tokio dependency used at build time (Cargo
+# unifies features across normal + dev dependencies for one version) so
+# `#[tokio::test(start_paused = true)]` is available to deterministically
+# test bounded-timeout behavior (e.g. a blackhole SOCKS handshake) without
+# waiting out the real timeout in wall-clock time. Test-only; does not
+# affect the published crate's default feature set.
+tokio = { version = "1", features = ["test-util"] }
 # Used by local (gitignored) integration probes under `spider/tests/_*.rs`
 # to classify observed network URLs and snapshot markdown. Neither crate
 # depends on `spider`, so they're safe as dev-deps (no circular resolution
@@ -281,6 +288,16 @@ news_sitemap = ["dep:chrono"]
 robots_sitemap = []
 feed = ["dep:feed-rs"]
 evidence = ["dep:sha2", "dep:infer", "serde"]
+# Enables TransportPolicy::Tor (fail-closed SOCKS5h). Distinct from the
+# legacy `socks` feature, which only affects the unrelated multi-proxy
+# rotation list (`configuration.proxies`) and carries no Tor-specific
+# semantics; this feature does not redefine that one.
+# `evidence` is a real dependency, not incidental: the only Tor-capable
+# code path today is the evidence one-shot acquisition seam
+# (`spider::utils::evidence::fetch_single_page_with_options`) — Tor
+# transport has no other caller in this crate, so requesting it without
+# that seam compiled in would be dead weight, not a narrower build.
+transport_tor = ["reqwest/socks", "evidence"]
 cache_request = ["dep:http-global-cache","dep:reqwest-middleware", "dep:http-cache-reqwest", "dep:http", "dep:http-cache"]
 cache = ["cache_request", "http-global-cache/cache", "http-cache-reqwest/manager-cacache"]
 cache_mem = ["cache_request", "http-global-cache/cache_mem"]

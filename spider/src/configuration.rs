@@ -396,6 +396,13 @@ pub struct Configuration {
     pub redirect_limit: usize,
     /// The redirect policy type to use.
     pub redirect_policy: RedirectPolicy,
+    /// The HTTP transport policy for this acquisition context (`Default` or
+    /// Tor-over-SOCKS5h). See [`crate::features::transport`]. Only the
+    /// one-shot acquisition seam
+    /// (`spider::utils::evidence::fetch_single_page_with_options`) currently
+    /// honors `Tor` end to end; general multi-page crawling fails closed
+    /// rather than silently ignoring it — see `Website::with_transport`.
+    pub transport_policy: crate::features::transport::TransportPolicy,
     /// Whether `redirect_limit` was explicitly set by the caller.
     ///
     /// Set to `true` by `with_redirect_limit()` and by the external-config loader

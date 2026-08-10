@@ -10,6 +10,7 @@ use crate::{page::build, utils::PageResponse};
 use crate::features::chrome_common::RequestInterceptConfiguration;
 #[cfg(feature = "disk")]
 use crate::features::disk::DatabaseHandler;
+use crate::features::transport::TransportPolicy;
 use crate::packages::robotparser::parser::RobotFileParser;
 use crate::page::{
     AntiBotTech, Page, PageLinkBuildSettings, ADDRESS_UNREACHABLE_ERROR,
@@ -2755,6 +2756,71 @@ impl Website {
         self.release_channel_backlog();
     }
 
+    /// Fix the transport policy (`Default` or Tor-over-SOCKS5h) for this
+    /// acquisition context. See [`crate::features::transport`].
+    ///
+    /// Only the one-shot acquisition seam
+    /// (`spider::utils::evidence::fetch_single_page_with_options`) is
+    /// currently audited to honor `TransportPolicy::Tor` end to end. Every
+    /// public `Website` method that can initiate networking — the general
+    /// multi-page crawl family (`crawl`, `crawl_smart`, `crawl_raw`,
+    /// `crawl_sitemap`, `crawl_sitemap_chrome`, the `scrape*` family which
+    /// delegates to it), the send/setup/fetch-chrome family
+    /// (`configure_setup`, `configure_setup_norobots`, `crawl_raw_send`,
+    /// `crawl_chrome_send`, `fetch_chrome`, `fetch_chrome_persisted`) —
+    /// builds its client through machinery this frontier has not audited
+    /// for Tor-safe behavior (legacy proxy rotation, Spider Cloud
+    /// injection, the `wreq` client stack, Chrome/smart escalation), so
+    /// calling any of them with `TransportPolicy::Tor` active fails closed
+    /// (zero requests) rather than silently crawling over `Default`
+    /// transport. This is a capability boundary, not a bug: general
+    /// multi-page Tor crawling is an explicitly out-of-scope future
+    /// frontier, not part of what this transport policy claims to support
+    /// today.
+    pub fn with_transport(&mut self, policy: TransportPolicy) -> &mut Self {
+        self.configuration.transport_policy = policy;
+        self
+    }
+
+    /// Read-only fail-closed check shared by every gated network entry
+    /// point: `true` when it is safe to proceed. Refuses when
+    /// `TransportPolicy::Tor` is active (see [`Self::with_transport`]).
+    /// Takes `&self` so it can be used from entry points that only borrow
+    /// `Website` immutably (`crawl_raw_send`, `crawl_chrome_send`,
+    /// `fetch_chrome`, `fetch_chrome_persisted`) — those cannot record the
+    /// rejection as `CrawlStatus::Invalid` without widening their existing
+    /// `&self` signature, which is out of scope here; they still perform
+    /// zero network activity, they just can't self-report it via
+    /// `get_status()` the way [`Self::transport_gate`]'s callers can. The
+    /// rejection is always logged via `tracing::error!` when the
+    /// `tracing` feature is enabled.
+    fn transport_gate_ref(&self) -> bool {
+        let tor_active = matches!(self.configuration.transport_policy, TransportPolicy::Tor(_));
+        if tor_active {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                "refusing to crawl: TransportPolicy::Tor is only audited for the \
+                 one-shot acquisition seam (fetch_single_page_with_options), not \
+                 general multi-page crawling"
+            );
+        }
+        !tor_active
+    }
+
+    /// Fail-closed guard for network entry points that hold `&mut self`:
+    /// same check as [`Self::transport_gate_ref`], additionally recording
+    /// the rejection as `CrawlStatus::Invalid` so callers can observe it
+    /// via `get_status()` — the smallest fail-closed status mechanism
+    /// available without widening any existing method's return type.
+    /// Returns `true` when it is safe to continue.
+    fn transport_gate(&mut self) -> bool {
+        let ok = self.transport_gate_ref();
+        if !ok {
+            self.status = CrawlStatus::Invalid;
+        }
+        ok
+    }
+
     /// Release the broadcast ring backlog held by the internal placeholder receivers.
     ///
     /// [`Self::subscribe`] / [`Self::queue`] store an `Arc<broadcast::Receiver<_>>`
@@ -2790,7 +2856,14 @@ impl Website {
     }
 
     /// configure the robots parser on initial crawl attempt and run.
+    ///
+    /// Takes a caller-supplied `client`, so this is directly network-capable
+    /// regardless of what built that client — gated at entry rather than
+    /// relying on the caller having already checked the transport policy.
     pub async fn configure_robots_parser(&mut self, client: &Client) {
+        if !self.transport_gate() {
+            return;
+        }
         if self.configuration.respect_robots_txt {
             let robot_file_parser = self
                 .robot_file_parser
@@ -2825,13 +2898,25 @@ impl Website {
     /// unspecified or otherwise reserved addresses, and non-HTTP(S)
     /// schemes.
     ///
+    /// Deliberately transport-agnostic — it does not reject `.onion`.
+    /// `.onion`'s transport requirement (`Default` rejects it entirely;
+    /// Tor permits it subject to same-service redirect pinning) is
+    /// context-dependent and is enforced by callers that know the active
+    /// [`crate::features::transport::TransportPolicy`]: see
+    /// `Website::setup_redirect_policy` for the `Default`-transport crawl
+    /// path, and [`crate::features::transport::pin_redirect_policy`] for
+    /// the dedicated one-shot Tor client in `spider::utils::evidence`.
+    /// Folding onion-rejection in here unconditionally would incorrectly
+    /// block legitimate onion-to-same-onion redirects when this guard is
+    /// reused as the Tor client's base policy.
+    ///
     /// The configured seed URL is fetched directly and never passes
     /// through the redirect policy, so an intentionally-internal start
     /// URL still works — only an *unexpected* redirect into internal
     /// space is blocked, which is the SSRF exfiltration vector an
     /// attacker-controlled page uses (cf. GHSA-8v6v-g4rh-jmcm). Operates
     /// on the already-parsed `Url` so it adds no allocation per hop.
-    fn is_ssrf_redirect(url: &Url) -> bool {
+    pub(crate) fn is_ssrf_redirect(url: &Url) -> bool {
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
         fn is_internal_v4(v4: Ipv4Addr) -> bool {
@@ -2972,12 +3057,35 @@ impl Website {
     }
 
     /// Setup redirect policy for reqwest.
+    ///
+    /// Every redirect hop is first screened for `.onion`: `Website::transport_gate`
+    /// refuses to let `TransportPolicy::Tor` reach `crawl`/`crawl_smart`/`crawl_raw`
+    /// at all (only the dedicated one-shot Tor client in
+    /// `spider::utils::evidence` is audited for Tor — see
+    /// [`crate::features::transport`]), so any redirect that reaches this
+    /// policy is necessarily running under `Default` transport, under
+    /// which `.onion` is always rejected. Delegates every other decision
+    /// to the existing Loose/None/Strict policy unchanged — no second
+    /// redirect engine.
     pub fn setup_redirect_policy(&self) -> Policy {
-        match self.configuration.redirect_policy {
+        use crate::client::redirect::Attempt;
+
+        let base = match self.configuration.redirect_policy {
             RedirectPolicy::Loose => Self::ssrf_limited_policy(self.configuration.redirect_limit),
             RedirectPolicy::None => Policy::none(),
             RedirectPolicy::Strict => self.setup_strict_policy(),
-        }
+        };
+
+        Policy::custom(move |attempt: Attempt| {
+            if attempt
+                .url()
+                .host_str()
+                .is_some_and(crate::features::transport::is_onion_host)
+            {
+                return attempt.error("TransportPolicy::Default cannot redirect into .onion");
+            }
+            base.redirect(attempt)
+        })
     }
 
     /// Configure the headers to use.
@@ -4135,8 +4243,16 @@ impl Website {
         (client, self.configure_handler())
     }
 
-    /// Setup config for crawl.
-    pub async fn setup(
+    /// Setup config for crawl. Crate-private: an internal step of the
+    /// gated crawl entry points (`crawl`, `crawl_raw`, `crawl_smart`,
+    /// `crawl_sitemap`, `crawl_sitemap_chrome`, `configure_setup`), not a
+    /// standalone public entry point — it returns a `Client` built without
+    /// consulting `transport_policy` and can trigger a real robots.txt
+    /// fetch (via `configure_robots_parser`), so an external caller must
+    /// not be able to reach it directly and bypass those callers' own
+    /// `transport_gate` checks. No external caller in this workspace uses
+    /// it, so narrowing visibility is not a breaking change here.
+    pub(crate) async fn setup(
         &mut self,
     ) -> (Client, Option<(Arc<AtomicI8>, tokio::task::JoinHandle<()>)>) {
         let setup = self.setup_base();
@@ -4218,7 +4334,7 @@ impl Website {
 
     /// Expand links for crawl base establish using a **command-based fetch**.
     #[cfg(feature = "cmd")]
-    pub async fn _crawl_establish_cmd(
+    pub(crate) async fn _crawl_establish_cmd(
         &mut self,
         cmd: std::path::PathBuf,
         cmd_args: Vec<String>,
@@ -4398,7 +4514,7 @@ impl Website {
 
     /// Expand links for crawl base establish.
     #[cfg(not(feature = "glob"))]
-    pub async fn _crawl_establish(
+    pub(crate) async fn _crawl_establish(
         &mut self,
         client: &Client,
         base: &mut RelativeSelectors,
@@ -4713,9 +4829,18 @@ impl Website {
     /// Start to crawl website concurrently using a cmd executable.
     /// - `cmd` is the executable (absolute preferred)
     /// - `cmd_args` are fixed args; can include "{url}" placeholder, otherwise url is appended.
+    ///
+    /// Pre-existing unused code, unrelated to this transport-policy fix:
+    /// narrowing this from `pub` to `pub(crate)` (closing an unaudited
+    /// Tor-bypass path — see `Website::with_transport`) makes rustc's
+    /// dead-code lint visible here for the first time, since `pub` items
+    /// are exempt from it. Left as `#[allow(dead_code)]` rather than
+    /// removed, since removing genuinely unrelated code is out of scope
+    /// for this fix.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     #[cfg(feature = "cmd")]
-    pub async fn crawl_concurrent_cmd(
+    #[allow(dead_code)]
+    pub(crate) async fn crawl_concurrent_cmd(
         &mut self,
         cmd: std::path::PathBuf,
         cmd_args: Vec<String>,
@@ -5093,7 +5218,7 @@ impl Website {
         feature = "chrome",
         not(feature = "glob")
     ))]
-    pub async fn crawl_establish(
+    pub(crate) async fn crawl_establish(
         &mut self,
         client: &Client,
         base: &mut RelativeSelectors,
@@ -5556,7 +5681,7 @@ impl Website {
 
     /// Expand links for crawl.
     #[cfg(all(not(feature = "decentralized"), feature = "chrome",))]
-    pub async fn crawl_establish_chrome_one(
+    pub(crate) async fn crawl_establish_chrome_one(
         &self,
         client: &Client,
         base: &mut RelativeSelectors,
@@ -5963,7 +6088,7 @@ impl Website {
         not(feature = "decentralized"),
         not(feature = "chrome")
     ))]
-    pub async fn crawl_establish_webdriver_one(
+    pub(crate) async fn crawl_establish_webdriver_one(
         &self,
         client: &Client,
         base: &mut RelativeSelectors,
@@ -6114,7 +6239,7 @@ impl Website {
 
     /// Expand links for crawl.
     #[cfg(all(not(feature = "glob"), feature = "decentralized"))]
-    pub async fn crawl_establish(
+    pub(crate) async fn crawl_establish(
         &mut self,
         client: &Client,
         _: &(CompactString, smallvec::SmallVec<[CompactString; 2]>),
@@ -6181,7 +6306,7 @@ impl Website {
 
     /// Expand links for crawl.
     #[cfg(all(feature = "glob", feature = "decentralized"))]
-    pub async fn crawl_establish(
+    pub(crate) async fn crawl_establish(
         &mut self,
         client: &Client,
         _: &(CompactString, smallvec::SmallVec<[CompactString; 2]>),
@@ -6242,7 +6367,7 @@ impl Website {
 
     /// Expand links for crawl.
     #[cfg(all(feature = "glob", feature = "chrome", not(feature = "decentralized")))]
-    pub async fn crawl_establish(
+    pub(crate) async fn crawl_establish(
         &mut self,
         client: &Client,
         base: &mut RelativeSelectors,
@@ -6582,7 +6707,7 @@ impl Website {
 
     /// Expand links for crawl.
     #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
-    pub async fn crawl_establish_smart(
+    pub(crate) async fn crawl_establish_smart(
         &mut self,
         client: &Client,
         base: &mut RelativeSelectors,
@@ -6852,8 +6977,20 @@ impl Website {
     }
 
     /// fetch the page with chrome
+    ///
+    /// Crate-private: an associated function (no `&self`), used only by
+    /// smart-mode's internal Chrome-fallback retry logic within this
+    /// module — no external caller in this workspace uses it (confirmed
+    /// by audit). Gated directly on `config.transport_policy` (the only
+    /// transport-policy signal it can observe, since it has no `&self`)
+    /// rather than relying solely on its callers already being gated:
+    /// this performs real Chrome navigation to `url` and must not do so
+    /// under `TransportPolicy::Tor`, which browser rendering has never
+    /// been audited for (see `Website::with_transport`). On rejection,
+    /// `page` is left untouched — the same "no new content produced"
+    /// outcome its callers already handle for other render failures.
     #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
-    pub async fn render_chrome_page(
+    pub(crate) async fn render_chrome_page(
         config: &Configuration,
         client: &Client,
         page: &mut Page,
@@ -6861,6 +6998,16 @@ impl Website {
         base: &Option<Box<Url>>,
         browser: &crate::features::chrome::OnceBrowser,
     ) {
+        if matches!(config.transport_policy, TransportPolicy::Tor(_)) {
+            #[cfg(feature = "tracing")]
+            tracing::error!(
+                "refusing Chrome render: TransportPolicy::Tor is only audited for the \
+                 one-shot acquisition seam (fetch_single_page_with_options), not browser \
+                 rendering"
+            );
+            return;
+        }
+
         if let Some(browser_controller) = browser
             .get_or_init(|| crate::website::Website::setup_browser_base(config, base, None))
             .await
@@ -7328,7 +7475,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
                 if self.try_cache_shortcircuit().await {
                     self.set_crawl_status();
@@ -7366,7 +7513,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
                 if self.try_cache_shortcircuit().await {
                     self.set_crawl_status();
@@ -7408,7 +7555,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
                 let (client, handle) = self.setup().await;
                 let (handle, join_handle) = match handle {
@@ -7438,6 +7585,9 @@ impl Website {
 
     /// Configures the website crawling process for concurrent execution with the ability to send it across threads for subscriptions.
     pub async fn configure_setup(&mut self) {
+        if !self.transport_gate() {
+            return;
+        }
         self.status = CrawlStatus::Active;
         self.start();
         self.setup().await;
@@ -7448,6 +7598,9 @@ impl Website {
     /// Configures the website crawling process for concurrent execution with the ability to send it across threads for subscriptions without robot protection.
     /// You can manually call `website.configure_robots_parser` after.
     pub fn configure_setup_norobots(&mut self) {
+        if !self.transport_gate() {
+            return;
+        }
         self.status = CrawlStatus::Active;
         self.start();
         self.setup_base();
@@ -7464,7 +7617,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate_ref() {
                 let (client, handle) = (
                     match &self.client {
                         Some(c) => c.to_owned(),
@@ -7503,7 +7656,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate_ref() {
                 let (client, handle) = (
                     match &self.client {
                         Some(c) => c.to_owned(),
@@ -7541,7 +7694,7 @@ impl Website {
     #[cfg(all(feature = "chrome", not(feature = "decentralized")))]
     /// Initiates a single fetch with chrome for one page with the ability to send it across threads for subscriptions.
     pub async fn fetch_chrome(&self, url: Option<&str>) {
-        if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+        if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate_ref() {
             let (client, handle) = (
                 match &self.client {
                     Some(c) => c.to_owned(),
@@ -7567,7 +7720,7 @@ impl Website {
         url: Option<&str>,
         browser: &crate::features::chrome::BrowserController,
     ) {
-        if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+        if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate_ref() {
             let (client, handle) = (
                 match &self.client {
                     Some(c) => c.to_owned(),
@@ -7604,7 +7757,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
                 if self.try_cache_shortcircuit().await {
                     self.set_crawl_status();
@@ -7647,7 +7800,7 @@ impl Website {
         #[cfg(feature = "balance")]
         let __spool_arc = self.ensure_spool_dir();
         let __body = async {
-            if !self.status.eq(&CrawlStatus::FirewallBlocked) {
+            if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
                 if self.try_cache_shortcircuit().await {
                     self.set_crawl_status();
@@ -11471,7 +11624,11 @@ impl Website {
         not(feature = "chrome"),
         feature = "webdriver"
     ))]
-    pub async fn crawl_concurrent(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
+    pub(crate) async fn crawl_concurrent(
+        &mut self,
+        client: &Client,
+        handle: &Option<Arc<AtomicI8>>,
+    ) {
         // Use WebDriver if configured, otherwise fall back to raw HTTP
         if self.configuration.webdriver_config.is_some() {
             self.crawl_concurrent_webdriver(client, handle).await
@@ -11486,14 +11643,22 @@ impl Website {
         not(feature = "chrome"),
         not(feature = "webdriver")
     ))]
-    pub async fn crawl_concurrent(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
+    pub(crate) async fn crawl_concurrent(
+        &mut self,
+        client: &Client,
+        handle: &Option<Arc<AtomicI8>>,
+    ) {
         self.crawl_concurrent_raw(client, handle).await
     }
 
     /// Start to crawl website concurrently.
     #[cfg(feature = "decentralized")]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn crawl_concurrent(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
+    pub(crate) async fn crawl_concurrent(
+        &mut self,
+        client: &Client,
+        handle: &Option<Arc<AtomicI8>>,
+    ) {
         let mut q = self.channel_queue.as_ref().map(|q| q.0.subscribe());
 
         self.configuration.configure_allowlist();
@@ -11640,7 +11805,7 @@ impl Website {
     /// Start to crawl website concurrently using HTTP by default and chrome Javascript Rendering as needed. The glob feature does not work with this at the moment.
     #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn crawl_concurrent_smart(
+    pub(crate) async fn crawl_concurrent_smart(
         &mut self,
         client: &Client,
         handle: &Option<Arc<AtomicI8>>,
@@ -12058,7 +12223,7 @@ impl Website {
     /// Sitemap crawl entire lists. Note: this method does not re-crawl the links of the pages found on the sitemap. This does nothing without the `sitemap` flag.
     #[cfg(not(feature = "sitemap"))]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn sitemap_crawl(
+    pub(crate) async fn sitemap_crawl(
         &mut self,
         _client: &Client,
         _handle: &Option<Arc<AtomicI8>>,
@@ -12068,7 +12233,7 @@ impl Website {
 
     /// Sitemap crawl entire lists chain. Note: this method does not re-crawl the links of the pages found on the sitemap. This does nothing without the `sitemap` flag.
     #[cfg(not(feature = "sitemap"))]
-    pub async fn sitemap_crawl_chain(
+    pub(crate) async fn sitemap_crawl_chain(
         &mut self,
         _client: &Client,
         _handle: &Option<Arc<AtomicI8>>,
@@ -12877,7 +13042,7 @@ impl Website {
 
     /// Sitemap crawl entire lists. Note: this method does not re-crawl the links of the pages found on the sitemap. This does nothing without the `sitemap` flag.
     #[cfg(feature = "sitemap")]
-    pub async fn sitemap_crawl(
+    pub(crate) async fn sitemap_crawl(
         &mut self,
         client: &Client,
         handle: &Option<Arc<AtomicI8>>,
@@ -12908,7 +13073,7 @@ impl Website {
         feature = "chrome",
         not(feature = "decentralized")
     ))]
-    pub async fn sitemap_crawl_chain(
+    pub(crate) async fn sitemap_crawl_chain(
         &mut self,
         client: &Client,
         handle: &Option<Arc<AtomicI8>>,
@@ -12948,15 +13113,30 @@ impl Website {
     }
 
     /// Sitemap parse entire lists. Note: this method does not re-crawl the links of the pages found on the sitemap. This does nothing without the `sitemap` flag.
+    ///
+    /// Crate-private: only ever called from within the already-gated
+    /// sitemap crawl chain (`sitemap_crawl_raw`), never a standalone
+    /// public entry point — no external caller in this workspace uses it
+    /// (confirmed by audit), and its awkward multi-`&mut` signature is
+    /// itself internal orchestration state, not a general-purpose public
+    /// contract. Still independently gated below (rather than relying
+    /// solely on its callers) since it takes a caller-supplied `client`
+    /// and performs a real target request (`client.get(...).send()`)
+    /// directly — the same defense-in-depth pattern used for
+    /// `configure_robots_parser`.
     #[cfg(feature = "sitemap")]
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub async fn sitemap_parse(
+    pub(crate) async fn sitemap_parse(
         &mut self,
         client: &Client,
         first_request: &mut bool,
         sitemap_url: &mut Box<CompactString>,
         attempted_correct: &mut bool,
     ) -> bool {
+        if !self.transport_gate() {
+            return false;
+        }
+
         let mut valid = !*attempted_correct;
 
         if valid {
@@ -13305,6 +13485,15 @@ impl Website {
     }
 
     /// Render a page using WebDriver.
+    ///
+    /// No internal caller in this workspace uses this method (confirmed
+    /// by audit) — it is a genuine standalone public entry point for
+    /// callers who manage their own WebDriver session. Gated at entry:
+    /// `TransportPolicy::Tor` is only audited for the one-shot HTTP
+    /// acquisition seam, never proxied through WebDriver, so this refuses
+    /// (returns `None`, the same outcome already used for every other
+    /// navigation/content failure below) before any navigation is
+    /// attempted rather than silently rendering over `Default` transport.
     #[cfg(feature = "webdriver")]
     pub async fn render_webdriver_page(
         &self,
@@ -13314,6 +13503,10 @@ impl Website {
         use crate::features::webdriver::{
             attempt_navigation, get_page_content, setup_driver_events,
         };
+
+        if !self.transport_gate_ref() {
+            return None;
+        }
 
         let timeout = self
             .configuration
@@ -16175,12 +16368,358 @@ mod tests {
             "https://api.github.com/repos",
             "http://93.184.216.34/",
             "http://[2606:4700:4700::1111]/",
+            // `.onion`'s transport requirement is enforced by callers that
+            // know the active transport policy (see doc comment above),
+            // not by this transport-agnostic SSRF guard.
+            "http://abc.onion/",
         ] {
             assert!(
                 !super::Website::is_ssrf_redirect(&Url::parse(allowed).unwrap()),
                 "should allow {allowed}"
             );
         }
+    }
+
+    /// Section C/K escape tests: every gated public `Website` network
+    /// entry point must perform zero network activity when
+    /// `TransportPolicy::Tor` is active — these never reach a listener at
+    /// all (real or fake), since the gate rejects before any request is
+    /// attempted, so the URL host below is never actually contacted.
+    fn tor_gated_website() -> crate::website::Website {
+        let mut website = crate::website::Website::new("http://transport-gate-test.invalid/");
+        website.with_transport(crate::features::transport::TransportPolicy::Tor(
+            crate::features::transport::TorTransportConfig::new("socks5h://127.0.0.1:1").unwrap(),
+        ));
+        website
+    }
+
+    #[cfg(not(feature = "decentralized"))]
+    #[tokio::test]
+    async fn crawl_fails_closed_under_tor_policy() {
+        let mut website = tor_gated_website();
+        website.crawl().await;
+        assert_eq!(website.get_status(), &crate::website::CrawlStatus::Invalid);
+        assert!(website.links_visited.is_empty());
+    }
+
+    #[cfg(not(feature = "decentralized"))]
+    #[tokio::test]
+    async fn crawl_raw_fails_closed_under_tor_policy() {
+        let mut website = tor_gated_website();
+        website.crawl_raw().await;
+        assert_eq!(website.get_status(), &crate::website::CrawlStatus::Invalid);
+        assert!(website.links_visited.is_empty());
+    }
+
+    #[cfg(all(not(feature = "decentralized"), feature = "sitemap"))]
+    #[tokio::test]
+    async fn crawl_sitemap_fails_closed_under_tor_policy() {
+        let mut website = tor_gated_website();
+        website.crawl_sitemap().await;
+        assert_eq!(website.get_status(), &crate::website::CrawlStatus::Invalid);
+        assert!(website.links_visited.is_empty());
+    }
+
+    #[tokio::test]
+    async fn configure_setup_fails_closed_under_tor_policy() {
+        let mut website = tor_gated_website();
+        website.configure_setup().await;
+        assert_eq!(
+            website.get_status(),
+            &crate::website::CrawlStatus::Invalid,
+            "must not be forced to Active when the transport gate rejects"
+        );
+        assert!(!website.send_configured);
+    }
+
+    #[test]
+    fn configure_setup_norobots_fails_closed_under_tor_policy() {
+        let mut website = tor_gated_website();
+        website.configure_setup_norobots();
+        assert_eq!(
+            website.get_status(),
+            &crate::website::CrawlStatus::Invalid,
+            "must not be forced to Active when the transport gate rejects"
+        );
+        assert!(!website.send_configured);
+    }
+
+    /// `crawl_raw_send` takes `&self`, so it cannot record
+    /// `CrawlStatus::Invalid` (see `transport_gate_ref`'s doc comment) —
+    /// the observable proof here is that zero pages are ever emitted on
+    /// the subscription channel, within a short bound, rather than
+    /// hanging or emitting a page for the never-contacted target.
+    #[cfg(not(feature = "decentralized"))]
+    #[tokio::test]
+    async fn crawl_raw_send_emits_no_pages_under_tor_policy() {
+        let mut website = tor_gated_website();
+        let mut rx = website.subscribe(1);
+        website.crawl_raw_send(None).await;
+        website.unsubscribe();
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            outcome.is_err() || outcome.unwrap().is_err(),
+            "expected no page to be emitted for a Tor-gated crawl_raw_send"
+        );
+    }
+
+    #[cfg(all(feature = "chrome", not(feature = "decentralized")))]
+    #[tokio::test]
+    async fn fetch_chrome_emits_no_pages_under_tor_policy() {
+        let mut website = tor_gated_website();
+        let mut rx = website.subscribe(1);
+        website.fetch_chrome(None).await;
+        website.unsubscribe();
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            outcome.is_err() || outcome.unwrap().is_err(),
+            "expected no page to be emitted for a Tor-gated fetch_chrome"
+        );
+    }
+
+    #[cfg(all(feature = "chrome", not(feature = "decentralized")))]
+    #[tokio::test]
+    async fn crawl_chrome_send_emits_no_pages_under_tor_policy() {
+        let mut website = tor_gated_website();
+        let mut rx = website.subscribe(1);
+        website.crawl_chrome_send(None).await;
+        website.unsubscribe();
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
+        assert!(
+            outcome.is_err() || outcome.unwrap().is_err(),
+            "expected no page to be emitted for a Tor-gated crawl_chrome_send"
+        );
+    }
+
+    #[cfg(all(
+        feature = "sitemap",
+        feature = "chrome",
+        not(feature = "decentralized")
+    ))]
+    #[tokio::test]
+    async fn crawl_sitemap_chrome_fails_closed_under_tor_policy() {
+        let mut website = tor_gated_website();
+        website.crawl_sitemap_chrome().await;
+        assert_eq!(website.get_status(), &crate::website::CrawlStatus::Invalid);
+        assert!(website.links_visited.is_empty());
+    }
+
+    /// Last-API-escape regression: `sitemap_parse` is now `pub(crate)`
+    /// (closing the standalone-external-call escape) and independently
+    /// gated (defense in depth against internal-caller mistakes). Uses a
+    /// real local target fixture — not a `.invalid` host — so a hit count
+    /// of zero is a genuine proof, not an artifact of an unreachable URL.
+    #[cfg(all(not(feature = "decentralized"), feature = "sitemap"))]
+    #[tokio::test]
+    async fn sitemap_parse_fails_closed_under_tor_policy_zero_target_hits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                hits_clone.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                });
+            }
+        });
+
+        let mut website = crate::website::Website::new(&format!("http://{addr}/"));
+        website.with_transport(crate::features::transport::TransportPolicy::Tor(
+            crate::features::transport::TorTransportConfig::new("socks5h://127.0.0.1:1").unwrap(),
+        ));
+
+        let client: crate::Client = website.configure_http_client();
+        let mut first_request = false;
+        let mut sitemap_url: Box<crate::compact_str::CompactString> = Box::default();
+        let mut attempted_correct = false;
+
+        let result = website
+            .sitemap_parse(
+                &client,
+                &mut first_request,
+                &mut sitemap_url,
+                &mut attempted_correct,
+            )
+            .await;
+
+        assert!(!result, "sitemap_parse must report unsupported under Tor");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the target fixture must never be contacted when TransportPolicy::Tor is active"
+        );
+    }
+
+    /// Last-API-escape regression: `render_chrome_page` (now `pub(crate)`,
+    /// closing the standalone-external-call escape) is gated directly on
+    /// `config.transport_policy` — the only transport signal it can
+    /// observe, since it takes no `&self`. Proves both that the OnceCell
+    /// browser handle is never initialized (no launch attempted) and that
+    /// a real local target fixture sees zero hits.
+    #[cfg(all(not(feature = "decentralized"), feature = "smart"))]
+    #[tokio::test]
+    async fn render_chrome_page_fails_closed_under_tor_policy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                hits_clone.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                });
+            }
+        });
+
+        let mut config = crate::configuration::Configuration::new();
+        config.transport_policy = crate::features::transport::TransportPolicy::Tor(
+            crate::features::transport::TorTransportConfig::new("socks5h://127.0.0.1:1").unwrap(),
+        );
+        let url = format!("http://{addr}/");
+        let client: crate::Client =
+            unsafe { crate::ClientBuilder::new().build().unwrap_unchecked() };
+        let mut page = crate::page::Page::default();
+        let browser: crate::features::chrome::OnceBrowser = tokio::sync::OnceCell::new();
+
+        crate::website::Website::render_chrome_page(
+            &config, &client, &mut page, &url, &None, &browser,
+        )
+        .await;
+
+        assert!(
+            browser.get().is_none(),
+            "no browser launch attempt may occur under TransportPolicy::Tor"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the target fixture must never be contacted when TransportPolicy::Tor is active"
+        );
+    }
+
+    /// Last-API-escape regression: `render_webdriver_page` refuses before
+    /// any navigation attempt when `TransportPolicy::Tor` is active. Uses
+    /// a minimal local fixture that speaks just enough of the WebDriver
+    /// wire protocol (`POST /session` -> a session id) to let
+    /// `thirtyfour::WebDriver::new` establish a session — establishing
+    /// the session itself is a prerequisite the *caller* performs before
+    /// ever reaching `render_webdriver_page`, exactly mirroring real
+    /// usage; what's under test is that `render_webdriver_page` itself
+    /// then makes zero *further* requests (no `POST .../url` navigate, no
+    /// `GET .../source`) once a session already exists.
+    #[cfg(feature = "webdriver")]
+    #[tokio::test]
+    async fn render_webdriver_page_fails_closed_under_tor_policy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let post_session_hits = Arc::new(AtomicUsize::new(0));
+        let post_session_hits_clone = post_session_hits.clone();
+        let other_hits = Arc::new(AtomicUsize::new(0));
+        let other_hits_clone = other_hits.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                let post_session_hits = post_session_hits_clone.clone();
+                let other_hits = other_hits_clone.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = request.lines().next().unwrap_or("");
+
+                    if first_line.starts_with("POST /session") {
+                        post_session_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = serde_json::json!({
+                            "value": {
+                                "sessionId": "scorpion-test-session",
+                                "capabilities": {}
+                            }
+                        })
+                        .to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    } else {
+                        // Any request beyond session creation (navigate,
+                        // get-source, delete-session, …) — must never
+                        // happen once the Tor gate has rejected.
+                        other_hits.fetch_add(1, Ordering::SeqCst);
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                    }
+                });
+            }
+        });
+
+        let server_url = format!("http://{addr}/");
+        let caps = thirtyfour::DesiredCapabilities::firefox();
+        let driver = std::sync::Arc::new(
+            thirtyfour::WebDriver::new(&server_url, caps)
+                .await
+                .expect("fixture must accept the new-session handshake"),
+        );
+        assert!(
+            post_session_hits.load(Ordering::SeqCst) >= 1,
+            "session handshake must have reached the fixture at least once"
+        );
+
+        let mut website = crate::website::Website::new("http://webdriver-gate-test.invalid/");
+        website.with_transport(crate::features::transport::TransportPolicy::Tor(
+            crate::features::transport::TorTransportConfig::new("socks5h://127.0.0.1:1").unwrap(),
+        ));
+
+        let result = website
+            .render_webdriver_page("http://webdriver-gate-test.invalid/", &driver)
+            .await;
+
+        assert!(result.is_none(), "must refuse to render under Tor");
+        assert_eq!(
+            other_hits.load(Ordering::SeqCst),
+            0,
+            "no navigation/content request may occur once the session exists, under Tor"
+        );
+        // `driver` is intentionally never `.quit()`-ed: `quit(self)` needs
+        // ownership, but this fixture shares it as `Arc<WebDriver>` to
+        // match `render_webdriver_page`'s real `&Arc<WebDriver>` contract.
+        // Its background keep-alive task may print an unrelated harmless
+        // "runtime is shutting down" panic to stderr when this test's
+        // runtime tears down — isolated to that detached task, and does
+        // not affect this test's own pass/fail outcome.
     }
 
     #[cfg(not(feature = "decentralized"))]

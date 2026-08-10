@@ -15,12 +15,11 @@
 //! explicitly, not silently ignored; see `Website::with_transport`).
 //!
 //! Public surface: [`TransportPolicy`], [`TorTransportConfig`] (and its
-//! constructor [`TorTransportConfig::new`]), [`TransportError`], and
-//! [`is_onion_url`] — the canonical `.onion` URL classifier, exposed for
-//! discovery-time use (`spider::features::onion_seed`) as well as
-//! acquisition-time use. It performs no network activity: classification
-//! only, not validation of Tor reachability or hidden-service liveness.
-//! Everything else in this module (`is_onion_host`, `validate_target`,
+//! constructor [`TorTransportConfig::new`]), [`TransportError`],
+//! [`is_onion_url`] — the canonical `.onion` URL classifier — and
+//! [`validate_target`] — the canonical fail-closed URL/transport
+//! compatibility guard. Both URL-level seams are pure and perform no
+//! network activity. Everything else in this module (`is_onion_host`,
 //! `apply_transport_policy`, `pin_redirect_policy`,
 //! `TransportPolicy::label`) is crate-private implementation detail.
 
@@ -357,17 +356,22 @@ pub fn is_onion_url(url: &url::Url) -> bool {
     url.host_str().is_some_and(is_onion_host)
 }
 
-/// Pre-flight guard: reject a `.onion` target under `TransportPolicy::Default`
-/// before any DNS lookup or network activity occurs. Always `Ok(())` for
-/// non-onion targets under any policy, and for onion targets under
-/// `TransportPolicy::Tor` (still subject to ordinary URL validation
-/// elsewhere). Crate-private implementation mechanics. Only called from
-/// `spider::utils::evidence`, hence the matching `cfg`.
-#[cfg(feature = "evidence")]
-pub(crate) fn validate_target(
-    url: &url::Url,
-    policy: &TransportPolicy,
-) -> Result<(), TransportError> {
+/// Canonical pre-flight URL/transport compatibility guard. Rejects a
+/// `.onion` target under [`TransportPolicy::Default`] before any DNS lookup
+/// or network activity occurs. Always `Ok(())` for non-onion targets under
+/// either policy, and for onion targets under [`TransportPolicy::Tor`].
+/// There is no fallback, policy upgrade, or coercion.
+///
+/// The caller supplies an already-parsed [`url::Url`]. This seam deliberately
+/// does **not** define general target-scheme policy: it neither parses malformed
+/// input nor rejects schemes such as `ftp`, `file`, or `data`. Callers remain
+/// responsible for any operation-specific scheme restrictions before or after
+/// this compatibility check.
+///
+/// Pure validation only: no DNS, sockets, filesystem access, environment
+/// lookup, authentication, or request execution. Available without the
+/// `evidence` or `transport_tor` features.
+pub fn validate_target(url: &url::Url, policy: &TransportPolicy) -> Result<(), TransportError> {
     let onion = is_onion_url(url);
     match (onion, policy) {
         (true, TransportPolicy::Default) => Err(TransportError::OnionRequiresTor),
@@ -898,7 +902,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[cfg(feature = "evidence")]
     #[test]
     fn default_policy_permits_clearnet_but_not_onion() {
         let policy = TransportPolicy::Default;
@@ -911,7 +914,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "evidence")]
     #[test]
     fn tor_policy_permits_both_onion_and_clearnet_targets() {
         let config = TorTransportConfig::new("socks5h://127.0.0.1:9050").unwrap();
@@ -920,6 +922,17 @@ mod tests {
         let onion = url::Url::parse("http://abc.onion/").unwrap();
         assert!(validate_target(&clearnet, &policy).is_ok());
         assert!(validate_target(&onion, &policy).is_ok());
+    }
+
+    /// Target compatibility is intentionally not a general URL-scheme policy.
+    /// Preserve that established boundary when exposing the seam publicly.
+    #[test]
+    fn target_validation_does_not_invent_scheme_restrictions() {
+        let policy = TransportPolicy::Default;
+        for target in ["ftp://example.test/file", "file:///tmp/file", "data:,value"] {
+            let parsed = url::Url::parse(target).unwrap();
+            assert!(validate_target(&parsed, &policy).is_ok(), "{target}");
+        }
     }
 
     /// Supersedes the old `TransportPolicy::label` test — provenance

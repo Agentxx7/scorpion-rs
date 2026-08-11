@@ -16,10 +16,15 @@
 //!
 //! Public surface: [`TransportPolicy`], [`TorTransportConfig`] (and its
 //! constructor [`TorTransportConfig::new`]), [`TransportError`],
-//! [`is_onion_url`] — the canonical `.onion` URL classifier — and
+//! [`is_onion_url`] — the canonical `.onion` URL classifier —
 //! [`validate_target`] — the canonical fail-closed URL/transport
-//! compatibility guard. Both URL-level seams are pure and perform no
-//! network activity. Everything else in this module (`is_onion_host`,
+//! compatibility guard — and [`execute_streaming_request`] — the
+//! canonical streaming request/response seam (status, final URL,
+//! headers, and an unconsumed async body stream, without collecting the
+//! body or constructing a [`crate::page::Page`]). All of these are pure
+//! or, for [`execute_streaming_request`], stop the instant response
+//! metadata is established — no body byte is read on this module's
+//! behalf. Everything else in this module (`is_onion_host`,
 //! `apply_transport_policy`, `pin_redirect_policy`,
 //! `TransportPolicy::label`) is crate-private implementation detail.
 
@@ -213,6 +218,16 @@ pub enum TransportError {
     /// Chrome/smart mode, proxy rotation, or Spider Cloud — none of
     /// those paths have been audited for Tor pinning yet).
     IncompatibleConfiguration(String),
+    /// A built client failed to execute the request — connect/TLS/network
+    /// failure, or a redirect hop that [`pin_redirect_policy`]/
+    /// [`ssrf_screened_base_policy`] rejected. `reqwest` itself does not
+    /// distinguish a policy-rejected redirect from any other mid-request
+    /// failure at the type level (both surface through the same
+    /// `reqwest::Error`), so this variant does not invent a distinction
+    /// the underlying library doesn't make; the message text carries
+    /// whichever reason actually applied. Always established *before* any
+    /// response body byte is read — see [`execute_streaming_request`].
+    RequestExecutionFailed(String),
 }
 
 impl fmt::Display for TransportError {
@@ -245,6 +260,9 @@ impl fmt::Display for TransportError {
             }
             TransportError::IncompatibleConfiguration(message) => {
                 write!(f, "transport policy is incompatible with this configuration: {message}")
+            }
+            TransportError::RequestExecutionFailed(message) => {
+                write!(f, "transport request execution failed: {message}")
             }
         }
     }
@@ -419,14 +437,16 @@ pub(crate) fn apply_transport_policy(
 /// existing SSRF redirect guard (`Website::is_ssrf_redirect`), capped at
 /// `limit` hops. Deliberately hardcoded to `reqwest::redirect::Policy`
 /// (never the crate's `wreq`-aliased `Client`/`Policy` types) because
-/// every Tor-transport client this module builds is itself a plain
+/// every client this module builds (Tor *or* the streaming Default
+/// client — see [`build_streaming_client`]) is itself a plain
 /// `reqwest::Client` — the `wreq` client stack is explicitly not
-/// Tor-audited (see module docs) and never reaches this function.
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+/// audited by this module (see module docs) and never reaches this
+/// function. Contains no Tor-specific logic (it never reads
+/// `TorTransportConfig`), so — unlike [`apply_transport_policy`] and
+/// [`build_tor_client`], which actually construct the Tor proxy and stay
+/// gated behind `transport_tor` — this is available whenever the plain
+/// `reqwest` client stack is in use, Tor-capable build or not.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
 pub(crate) fn ssrf_screened_base_policy(limit: usize) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
         if crate::website::Website::is_ssrf_redirect(attempt.url()) {
@@ -454,14 +474,13 @@ pub(crate) fn ssrf_screened_base_policy(limit: usize) -> reqwest::redirect::Poli
 ///   redirect policy, SSRF screening included.
 ///
 /// Crate-private implementation mechanics — applied internally by
-/// `fetch_single_page_with_options`'s Tor path; not a public contract.
-/// Same `cfg` as [`apply_transport_policy`]/[`ssrf_screened_base_policy`]:
-/// only the real Tor client-construction path calls this.
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+/// `fetch_single_page_with_options`'s Tor path and by
+/// [`build_streaming_client`]'s Default path; not a public contract.
+/// Contains no Tor-specific logic of its own beyond pattern-matching on
+/// [`TransportPolicy`] itself (never reads `TorTransportConfig`'s
+/// endpoint), so this is available under the same `cfg` as
+/// [`ssrf_screened_base_policy`] — not narrowed to `transport_tor`.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
 pub(crate) fn pin_redirect_policy(
     base: reqwest::redirect::Policy,
     policy: TransportPolicy,
@@ -635,55 +654,45 @@ pub(crate) fn crawl_boundary_allows(boundary: &CrawlBoundary, candidate: &url::U
     }
 }
 
-/// Connect/read timeouts for the audited Tor client, reused verbatim from
-/// `Website::configure_base_client`'s own *unmultiplied* defaults
-/// (`Duration::from_secs(24)` / `Duration::from_secs(42)`) — not a
-/// Tor-specific invention. `configure_base_client` doubles these only
-/// when Spider's legacy multi-proxy rotation list (`configuration.proxies`)
-/// is configured; the dedicated Tor client never uses that list (rejected
+/// Connect/read timeouts for this module's audited clients, reused
+/// verbatim from `Website::configure_base_client`'s own *unmultiplied*
+/// defaults (`Duration::from_secs(24)` / `Duration::from_secs(42)`) — not
+/// a Tor-specific invention (see doc history on this constant), which is
+/// exactly why [`build_streaming_client`]'s Default path reuses the same
+/// values rather than inventing a second baseline. `configure_base_client`
+/// doubles these only when Spider's legacy multi-proxy rotation list
+/// (`configuration.proxies`) is configured; neither the dedicated Tor
+/// client nor the streaming Default client ever uses that list (rejected
 /// explicitly at preflight — see `Website::tor_crawl_preflight`), so the
 /// unmultiplied canonical values are the correct match, and they provide
-/// the hard bound that keeps a stalled/blackhole SOCKS handshake from
-/// waiting indefinitely. Shared by both the one-shot seam
-/// (`spider::utils::evidence::fetch_via_tor`) and multi-page Tor crawling
-/// — one canonical set of constants, not two.
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+/// the hard bound that keeps a stalled/blackhole handshake from waiting
+/// indefinitely. Shared by the one-shot Tor seam
+/// (`spider::utils::evidence::fetch_via_tor`), multi-page Tor crawling,
+/// and [`build_streaming_client`] — one canonical set of constants, not
+/// several.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
 pub(crate) const TOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24);
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
 pub(crate) const TOR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(42);
 
-/// Total request deadline for the audited Tor client, reused verbatim
-/// from `Configuration::new()`'s own default `request_timeout`
+/// Total request deadline for this module's audited clients, reused
+/// verbatim from `Configuration::new()`'s own default `request_timeout`
 /// (`Duration::from_secs(120)`), applied via `reqwest::ClientBuilder::timeout`.
 ///
 /// Connect/read timeouts alone are not sufficient: a peer that keeps the
 /// connection alive and periodically sends enough bytes to keep resetting
 /// [`TOR_READ_TIMEOUT`] (a slow-drip response) would never trip either of
-/// them, and could otherwise stall a Tor acquisition indefinitely.
+/// them, and could otherwise stall an acquisition indefinitely.
 /// `.timeout()` bounds the request end-to-end — connect, redirects, and
-/// response body — regardless of how activity is paced within it.
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+/// response body — regardless of how activity is paced within it. Also
+/// used by [`build_streaming_client`]'s Default path.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
 pub(crate) const TOR_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Redirect hop cap for the audited Tor client, reused verbatim from
-/// `Configuration::new()`'s own default `redirect_limit` (`7`).
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+/// Redirect hop cap for this module's audited clients, reused verbatim
+/// from `Configuration::new()`'s own default `redirect_limit` (`7`). Also
+/// used by [`build_streaming_client`]'s Default path.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
 pub(crate) const TOR_REDIRECT_LIMIT: usize = 7;
 
 /// Build the one canonical Tor-audited `reqwest::Client`: no
@@ -731,6 +740,156 @@ pub(crate) fn build_tor_client(
     builder
         .build()
         .map_err(|error| TransportError::ProxyBuildFailed(error.to_string()))
+}
+
+/// Build the one canonical **streaming-capable** `reqwest::Client` for a
+/// given [`TransportPolicy`] — `Default` or `Tor`. This is the transport
+/// primitive behind [`execute_streaming_request`]; it never issues a
+/// request itself, only constructs the client.
+///
+/// - `Default`: a plain `reqwest::Client` with no proxy, the same
+///   SSRF-screened, transport-pinned redirect policy, connect/read/total
+///   timeouts, and user-agent as the audited Tor client (see
+///   [`TOR_CONNECT_TIMEOUT`] and neighbors — reused verbatim, not
+///   Tor-specific values; see their doc comments). This is deliberately
+///   **not** `Website::configure_base_client`'s full behavior (legacy
+///   proxy rotation, per-crawl header/DNS-cache/Spider-Cloud
+///   configuration) — this module owns a small, narrow, independently
+///   audited client, the same architectural choice already made for Tor
+///   (see module docs); it does not rewrite or reach into `Website`'s own
+///   client construction, and constructs no `Website` value.
+/// - `Tor`: when `transport_tor` is compiled in, delegates entirely to
+///   the existing, already-audited [`build_tor_client`] — there is
+///   exactly one Tor client implementation in this crate, not two. When
+///   `transport_tor` is *not* compiled in, fails closed with
+///   [`TransportError::TorNotCompiled`] — the same honest failure
+///   `spider::utils::evidence::fetch_via_tor`'s own `not(transport_tor)`
+///   sibling variant already returns — Default execution is unaffected.
+#[cfg(all(
+    feature = "transport_tor",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) fn build_streaming_client(
+    policy: &TransportPolicy,
+) -> Result<reqwest::Client, TransportError> {
+    match policy {
+        TransportPolicy::Default => build_default_streaming_client(),
+        TransportPolicy::Tor(_) => build_tor_client(policy),
+    }
+}
+
+/// See [`build_streaming_client`] above (the `transport_tor`-compiled
+/// variant). This sibling exists for builds *without* `transport_tor`:
+/// `Default` streaming execution does not need Tor at all, so it must
+/// keep working; only `Tor` fails closed here.
+#[cfg(all(
+    not(feature = "transport_tor"),
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) fn build_streaming_client(
+    policy: &TransportPolicy,
+) -> Result<reqwest::Client, TransportError> {
+    match policy {
+        TransportPolicy::Default => build_default_streaming_client(),
+        TransportPolicy::Tor(_) => Err(TransportError::TorNotCompiled),
+    }
+}
+
+/// The `Default`-policy half of [`build_streaming_client`], factored out
+/// so both the `transport_tor`-on and `transport_tor`-off variants build
+/// an identical Default client from one definition rather than two
+/// copies that could silently drift apart.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+fn build_default_streaming_client() -> Result<reqwest::Client, TransportError> {
+    reqwest::Client::builder()
+        .connect_timeout(TOR_CONNECT_TIMEOUT)
+        .read_timeout(TOR_READ_TIMEOUT)
+        .timeout(TOR_TOTAL_TIMEOUT)
+        .user_agent(crate::configuration::get_ua(false))
+        .redirect(pin_redirect_policy(
+            ssrf_screened_base_policy(TOR_REDIRECT_LIMIT),
+            TransportPolicy::Default,
+        ))
+        .build()
+        .map_err(|error| TransportError::ProxyBuildFailed(error.to_string()))
+}
+
+/// Execute one canonical, streaming, **non-body-consuming** HTTP GET
+/// against `url` under `policy`, applying `headers`, and return the
+/// moment response status/final URL/headers are established — before any
+/// response body byte is read.
+///
+/// This is the smallest transport-owned request/response seam:
+///
+/// ```text
+/// url + TransportPolicy + SecretRequestHeaders
+///       │
+///       ▼
+/// validate_target (fail-closed .onion/Default rejection)
+///       │
+///       ▼
+/// build_streaming_client (Default or Tor, same audited primitives
+///                          fetch_via_tor/build_tor_client already use)
+///       │
+///       ▼
+/// apply SecretRequestHeaders::apply_to
+///       │
+///       ▼
+/// client.get(url).send().await   <- stops here; body untouched
+///       │
+///       ▼
+/// Ok(reqwest::Response)  <- .status()/.url()/.headers() available now;
+///                            .bytes_stream()/.chunk() left for the
+///                            caller to consume, on their own schedule
+/// ```
+///
+/// Deliberately returns the plain `reqwest::Response` itself rather than
+/// a crate-defined wrapper: status, final URL (post-redirect), headers,
+/// and an unconsumed `impl Stream<Item = Result<bytes::Bytes,
+/// reqwest::Error>>` (via `.bytes_stream()`, the `stream` reqwest feature
+/// already enabled crate-wide) are all already exactly what
+/// `reqwest::Response` exposes without consuming the body — inventing a
+/// second type here would just re-export the same accessors under a new
+/// name. This function never calls `.bytes()`, `.text()`, `.chunk()`, or
+/// `.bytes_stream()` itself, never constructs a [`crate::page::Page`],
+/// and never constructs a `Website`.
+///
+/// Mid-stream body failures are **not** represented in this function's
+/// `Result` — they cannot be: the body has not been read yet when this
+/// function returns `Ok`. They surface later, truthfully, as `Err` items
+/// yielded by the caller's own consumption of `.bytes_stream()` (a
+/// `reqwest::Error` per chunk) — exactly `reqwest::Response`'s existing,
+/// well-defined contract; nothing about that contract is reimplemented or
+/// weakened here.
+///
+/// Fails closed exactly like every other acquisition seam in this crate:
+/// `.onion` targets under `Default` are rejected by `validate_target`
+/// before any client is built; `Tor` under a build without
+/// `transport_tor` fails with [`TransportError::TorNotCompiled`] before
+/// any network activity; a redirect that would change transport or trip
+/// the SSRF guard is rejected mid-request by the exact same
+/// `pin_redirect_policy`/`ssrf_screened_base_policy` the audited Tor
+/// client already uses.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+pub async fn execute_streaming_request(
+    url: &url::Url,
+    policy: &TransportPolicy,
+    headers: &crate::features::secret_request_headers::SecretRequestHeaders,
+) -> Result<reqwest::Response, TransportError> {
+    validate_target(url, policy)?;
+    let client = build_streaming_client(policy)?;
+
+    let mut request_headers = reqwest::header::HeaderMap::new();
+    headers.apply_to(&mut request_headers);
+
+    let request = client.get(url.clone()).headers(request_headers);
+
+    ACQUISITION_TRANSPORT_SCOPE
+        .scope(acquisition_transport_for(policy), request.send())
+        .await
+        .map_err(|error| TransportError::RequestExecutionFailed(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1042,6 +1201,294 @@ mod tests {
                 request.into_policy().unwrap(),
                 TransportPolicy::Default
             ));
+        }
+    }
+
+    /// `execute_streaming_request` / `build_streaming_client` — real,
+    /// local, deterministic network fixtures. Matches the established
+    /// blocking-free `tokio::net::TcpListener` fixture convention already
+    /// used by `spider/tests/transport_tor.rs` and
+    /// `acquisition_binding.rs`'s own test module. No public
+    /// network/Tor dependency, no internet-dependent test.
+    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    mod streaming_request {
+        use super::*;
+        use crate::features::secret_request_headers::SecretRequestHeaders;
+        use std::net::SocketAddr;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio_stream::StreamExt;
+
+        struct HttpFixture {
+            addr: SocketAddr,
+            last_request: Arc<Mutex<Vec<u8>>>,
+        }
+
+        impl HttpFixture {
+            async fn start(
+                status: &'static str,
+                extra_headers: &'static str,
+                body: &'static [u8],
+            ) -> Self {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let last_request = Arc::new(Mutex::new(Vec::new()));
+                let last_request_clone = last_request.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let (mut stream, _) = match listener.accept().await {
+                            Ok(pair) => pair,
+                            Err(_) => break,
+                        };
+                        let last_request = last_request_clone.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0_u8; 8192];
+                            if let Ok(n) = stream.read(&mut buf).await {
+                                *last_request.lock().unwrap() = buf[..n].to_vec();
+                            }
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                            let _ = stream.write_all(body).await;
+                        });
+                    }
+                });
+                Self { addr, last_request }
+            }
+
+            fn url(&self) -> url::Url {
+                url::Url::parse(&format!("http://{}/", self.addr)).unwrap()
+            }
+
+            fn last_request_text(&self) -> String {
+                String::from_utf8_lossy(&self.last_request.lock().unwrap()).to_string()
+            }
+        }
+
+        /// Section G/N: status, final URL, and headers are all readable
+        /// immediately — before the caller ever reads a body byte — and
+        /// the body is still fully available afterward, on the caller's
+        /// own schedule.
+        #[tokio::test]
+        async fn default_policy_exposes_status_final_url_and_headers_before_body_is_read() {
+            let fixture = HttpFixture::start(
+                "200 OK",
+                "X-Fixture: streaming-frontier\r\n",
+                b"hello streaming world",
+            )
+            .await;
+            let url = fixture.url();
+            let headers = SecretRequestHeaders::new();
+
+            let response = execute_streaming_request(&url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.url().host_str(), url.host_str());
+            assert_eq!(
+                response.headers().get("x-fixture").unwrap(),
+                "streaming-frontier"
+            );
+
+            // The body is consumed only now, explicitly, by the test --
+            // never inside `execute_streaming_request` itself.
+            let bytes = response.bytes().await.unwrap();
+            assert_eq!(&bytes[..], b"hello streaming world");
+        }
+
+        /// Section M: `SecretRequestHeaders` are actually applied to the
+        /// outgoing request, not merely accepted and dropped.
+        #[tokio::test]
+        async fn secret_headers_are_applied_to_the_outgoing_request() {
+            let fixture = HttpFixture::start("200 OK", "", b"ok").await;
+            let url = fixture.url();
+            let mut headers = SecretRequestHeaders::new();
+            headers
+                .try_insert("x-secret-sentinel", "streaming-secret-value")
+                .unwrap();
+
+            let response = execute_streaming_request(&url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+
+            let request_text = fixture.last_request_text().to_ascii_lowercase();
+            assert!(request_text.contains("x-secret-sentinel: streaming-secret-value"));
+        }
+
+        /// Section E: fail-closed `.onion`/`Default` rejection happens
+        /// before any client is built or any network activity occurs --
+        /// reusing `validate_target` verbatim, not a second check.
+        #[tokio::test]
+        async fn onion_target_under_default_policy_is_rejected_before_any_network_activity() {
+            let onion_url = url::Url::parse("http://exampleexampleexampleexamp.onion/").unwrap();
+            let headers = SecretRequestHeaders::new();
+
+            let error = execute_streaming_request(&onion_url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap_err();
+            assert_eq!(error, TransportError::OnionRequiresTor);
+        }
+
+        /// Section E/N: a redirect that would silently change transport
+        /// (clearnet -> onion under `Default`) is rejected mid-request by
+        /// the same `pin_redirect_policy` the audited Tor client already
+        /// uses, and surfaces truthfully as `RequestExecutionFailed` --
+        /// not as a followed redirect, not as a panic, not silently
+        /// ignored.
+        #[tokio::test]
+        async fn default_policy_rejects_a_redirect_to_an_onion_host() {
+            let fixture = HttpFixture::start(
+                "302 Found",
+                "Location: http://exampleexampleexampleexamp.onion/\r\n",
+                b"",
+            )
+            .await;
+            let url = fixture.url();
+            let headers = SecretRequestHeaders::new();
+
+            let error = execute_streaming_request(&url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, TransportError::RequestExecutionFailed(_)));
+        }
+
+        /// Section O: the response body is genuinely streamed chunk by
+        /// chunk via the caller's own `.bytes_stream()` consumption, not
+        /// pre-collected into a `Vec<u8>` by this seam.
+        #[tokio::test]
+        async fn body_is_available_only_via_the_caller_consuming_the_stream() {
+            let payload = b"streaming payload assembled chunk by chunk for the frontier proof";
+            let fixture = HttpFixture::start("200 OK", "", payload).await;
+            let url = fixture.url();
+            let headers = SecretRequestHeaders::new();
+
+            let response = execute_streaming_request(&url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap();
+
+            let mut stream = response.bytes_stream();
+            let mut collected = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                collected.extend_from_slice(&chunk.unwrap());
+            }
+            assert_eq!(collected, payload);
+        }
+
+        /// Section N: a body failure that only manifests *after* status
+        /// and headers were already returned `Ok` (a truncated response)
+        /// surfaces truthfully as a stream error to whatever code
+        /// actually consumes the stream -- `execute_streaming_request`
+        /// does not, and structurally cannot, mask it, since the body was
+        /// never touched before returning.
+        #[tokio::test]
+        async fn mid_stream_body_truncation_surfaces_as_a_stream_error_after_status_was_ok() {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = [0_u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Advertise more bytes than are actually sent, then
+                    // close -- proves mid-stream failures surface
+                    // truthfully even though `execute_streaming_request`
+                    // already returned `Ok`.
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nshort",
+                        )
+                        .await;
+                }
+            });
+
+            let url = url::Url::parse(&format!("http://{addr}/")).unwrap();
+            let headers = SecretRequestHeaders::new();
+            let response = execute_streaming_request(&url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+            let mut stream = response.bytes_stream();
+            let mut saw_error = false;
+            while let Some(chunk) = stream.next().await {
+                if chunk.is_err() {
+                    saw_error = true;
+                    break;
+                }
+            }
+            assert!(saw_error, "a truncated body must surface as a stream error");
+        }
+
+        /// Section L (Default/Tor parity, `transport_tor` compiled in):
+        /// `build_streaming_client` builds successfully for both
+        /// policies, `Tor` delegating entirely to the existing
+        /// `build_tor_client` -- there is exactly one Tor client
+        /// implementation in this crate, not two.
+        #[cfg(feature = "transport_tor")]
+        #[test]
+        fn build_streaming_client_succeeds_for_both_policies_when_transport_tor_is_compiled() {
+            assert!(build_streaming_client(&TransportPolicy::Default).is_ok());
+            let config = TorTransportConfig::new("socks5h://127.0.0.1:9050").unwrap();
+            assert!(build_streaming_client(&TransportPolicy::Tor(config)).is_ok());
+        }
+
+        /// Section L/U (Default/Tor parity, `transport_tor` NOT
+        /// compiled): `Default` streaming execution keeps working --
+        /// this seam never needed Tor for that -- while `Tor` fails
+        /// closed with `TorNotCompiled`, never silently falling back to
+        /// Default.
+        #[cfg(not(feature = "transport_tor"))]
+        #[test]
+        fn build_streaming_client_supports_default_and_fails_closed_for_tor_without_the_feature() {
+            assert!(build_streaming_client(&TransportPolicy::Default).is_ok());
+            let config = TorTransportConfig::new("socks5h://127.0.0.1:9050").unwrap();
+            assert_eq!(
+                build_streaming_client(&TransportPolicy::Tor(config)).unwrap_err(),
+                TransportError::TorNotCompiled
+            );
+        }
+
+        /// Section U: `Tor` under `execute_streaming_request` itself
+        /// (not just `build_streaming_client`) fails closed the same way,
+        /// before any network activity, when `transport_tor` is not
+        /// compiled in.
+        #[cfg(not(feature = "transport_tor"))]
+        #[tokio::test]
+        async fn tor_policy_without_transport_tor_feature_fails_closed_before_any_network_activity()
+        {
+            let config = TorTransportConfig::new("socks5h://127.0.0.1:9050").unwrap();
+            let policy = TransportPolicy::Tor(config);
+            let url = url::Url::parse("https://example.test/").unwrap();
+            let headers = SecretRequestHeaders::new();
+
+            let error = execute_streaming_request(&url, &policy, &headers)
+                .await
+                .unwrap_err();
+            assert_eq!(error, TransportError::TorNotCompiled);
+        }
+
+        /// Section H: request-execution failures against a target that
+        /// refuses the TCP connection outright surface as
+        /// `RequestExecutionFailed`, not a panic and not a silently
+        /// empty/default response.
+        #[tokio::test]
+        async fn connection_refused_surfaces_as_request_execution_failed() {
+            // Bind, read the local address, then drop the listener so the
+            // port is refusing connections -- deterministic, no sleep.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+
+            let url = url::Url::parse(&format!("http://{addr}/")).unwrap();
+            let headers = SecretRequestHeaders::new();
+            let error = execute_streaming_request(&url, &TransportPolicy::Default, &headers)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, TransportError::RequestExecutionFailed(_)));
         }
     }
 }

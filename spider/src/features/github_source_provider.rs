@@ -4,12 +4,19 @@
 //! bounded GitHub repository-search request, normalizes API metadata into
 //! [`ProviderDiscovery::Item`], and stops. It never fetches repository URLs,
 //! invokes a parser, selects a transport, or constructs evidence.
+//!
+//! Network execution is delegated to Scorpion's canonical streaming transport
+//! seam ([`crate::features::transport::execute_streaming_request`]) so the
+//! provider owns only GitHub-specific request construction and response
+//! parsing.
 
+use crate::features::secret_request_headers::SecretRequestHeaders;
 use crate::features::source::SourceItem;
 use crate::features::source_provider::{
     ProviderCapabilities, ProviderDescriptor, ProviderDiscovery, SourceProvider,
 };
-use reqwest::header::{HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use crate::features::transport::TransportPolicy;
+use reqwest::header::{HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 
 const GITHUB_PROVIDER_ID: &str = "github";
 const GITHUB_API_BASE: &str = "https://api.github.com/";
@@ -45,9 +52,10 @@ impl GitHubRepositorySearchRequest {
 /// Official GitHub REST repository-search provider.
 pub struct GitHubRepositoryProvider {
     descriptor: ProviderDescriptor,
-    client: reqwest::Client,
+    transport: TransportPolicy,
     api_base: url::Url,
-    authorization: Option<HeaderValue>,
+    headers: SecretRequestHeaders,
+    authenticated: bool,
 }
 
 impl std::fmt::Debug for GitHubRepositoryProvider {
@@ -56,7 +64,8 @@ impl std::fmt::Debug for GitHubRepositoryProvider {
             .debug_struct("GitHubRepositoryProvider")
             .field("descriptor", &self.descriptor)
             .field("api_base", &self.api_base)
-            .field("authenticated", &self.authorization.is_some())
+            .field("transport", &self.transport)
+            .field("authenticated", &self.authenticated)
             .finish_non_exhaustive()
     }
 }
@@ -70,23 +79,40 @@ impl Default for GitHubRepositoryProvider {
 impl GitHubRepositoryProvider {
     /// Construct an unauthenticated provider using GitHub's official API.
     pub fn new() -> Self {
-        Self::with_client_and_base(
-            reqwest::Client::new(),
-            url::Url::parse(GITHUB_API_BASE).expect("static GitHub API URL is valid"),
-        )
+        Self::with_base(url::Url::parse(GITHUB_API_BASE).expect("static GitHub API URL is valid"))
     }
 
-    fn with_client_and_base(client: reqwest::Client, api_base: url::Url) -> Self {
+    fn with_base(api_base: url::Url) -> Self {
+        let mut headers = SecretRequestHeaders::new();
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static("scorpion-source-provider"),
+        );
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-github-api-version"),
+            HeaderValue::from_static("2022-11-28"),
+        );
         Self {
             descriptor: ProviderDescriptor::new(
                 GITHUB_PROVIDER_ID,
                 "GitHub",
                 ProviderCapabilities::ITEMS,
             ),
-            client,
+            transport: TransportPolicy::default(),
             api_base,
-            authorization: None,
+            headers,
+            authenticated: false,
         }
+    }
+
+    /// Select the transport policy used for network execution.
+    pub fn with_transport(mut self, transport: TransportPolicy) -> Self {
+        self.transport = transport;
+        self
     }
 
     /// Attach an explicitly supplied token in memory. The token is converted
@@ -94,10 +120,10 @@ impl GitHubRepositoryProvider {
     /// descriptor, request vocabulary, outputs, URLs, Debug, Display, or
     /// errors. No environment or persistent credential store is consulted.
     pub fn with_token(mut self, token: &str) -> Result<Self, GitHubProviderError> {
-        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+        let value = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| GitHubProviderError::InvalidToken)?;
-        value.set_sensitive(true);
-        self.authorization = Some(value);
+        self.headers.insert(AUTHORIZATION, value);
+        self.authenticated = true;
         Ok(self)
     }
 
@@ -109,28 +135,16 @@ impl GitHubRepositoryProvider {
     ) -> Result<Vec<ProviderDiscovery>, GitHubProviderError> {
         validate_request(request)?;
 
-        let endpoint = self
+        let mut endpoint = self
             .api_base
             .join("search/repositories")
             .map_err(|_| GitHubProviderError::InvalidApiEndpoint)?;
-        let mut builder = self
-            .client
-            .get(endpoint)
-            .header(USER_AGENT, "scorpion-source-provider")
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("x-github-api-version", "2022-11-28")
-            .query(&[
-                ("q", request.query.as_str()),
-                ("per_page", &request.limit.to_string()),
-            ]);
-        if let Some(authorization) = &self.authorization {
-            builder = builder.header(AUTHORIZATION, authorization.clone());
-        }
+        endpoint
+            .query_pairs_mut()
+            .append_pair("q", &request.query)
+            .append_pair("per_page", &request.limit.to_string());
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| GitHubProviderError::RequestFailed(error.to_string()))?;
+        let response = self.execute_request(endpoint).await?;
         let status = response.status();
         let rate_limit_remaining = response
             .headers()
@@ -178,6 +192,32 @@ impl GitHubRepositoryProvider {
                 })
             })
             .collect())
+    }
+
+    /// Dispatch one GitHub API request through Scorpion's canonical transport
+    /// seam. Under unsupported feature combinations the provider fails closed
+    /// rather than constructing an independent HTTP stack.
+    async fn execute_request(
+        &self,
+        endpoint: url::Url,
+    ) -> Result<reqwest::Response, GitHubProviderError> {
+        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        {
+            crate::features::transport::execute_streaming_request(
+                &endpoint,
+                &self.transport,
+                &self.headers,
+            )
+            .await
+            .map_err(|error| GitHubProviderError::RequestFailed(error.to_string()))
+        }
+        #[cfg(any(feature = "wreq", feature = "cache_request"))]
+        {
+            let _ = endpoint;
+            Err(GitHubProviderError::RequestFailed(
+                "GitHub provider is unavailable under wreq or cache_request".to_string(),
+            ))
+        }
     }
 }
 
@@ -331,10 +371,7 @@ mod tests {
     }
 
     fn provider(fixture: &Fixture) -> GitHubRepositoryProvider {
-        GitHubRepositoryProvider::with_client_and_base(
-            reqwest::Client::new(),
-            fixture.base_url.clone(),
-        )
+        GitHubRepositoryProvider::with_base(fixture.base_url.clone())
     }
 
     #[test]

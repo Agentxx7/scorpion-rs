@@ -52,8 +52,8 @@ Every architecture-relevant implementation is classified as exactly one of:
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
 | Provider-neutral vocabulary | `spider/src/features/source_provider.rs` | `source` | Network, transport | `ProviderRegistry` | None |
-| GitHub discovery | `spider/src/features/github_source_provider.rs` | `source_provider`, `source` | Neutral acquisition seams | `discover()` | None |
-| Hugging Face discovery | `spider/src/features/hugging_face_source_provider.rs` | `source_provider`, `artifact_reference` | Neutral acquisition seams | `discover_artifacts()` | None |
+| GitHub discovery | `spider/src/features/github_source_provider.rs` | `source_provider`, `source`, `transport::execute_streaming_request`, `secret_request_headers` | Independent client construction | `search_repositories()` | None |
+| Hugging Face discovery | `spider/src/features/hugging_face_source_provider.rs` | `source_provider`, `artifact_reference`, `transport::execute_streaming_request`, `secret_request_headers` | Independent client construction | `search_models()` / `discover_artifacts()` | None |
 | Feed parsing | `spider/src/features/feed.rs` | `source` | Network | `parse()` | None |
 | Sitemap parsing | `spider/src/features/sitemap.rs` | `source` | Network | `parse()` | None |
 | News sitemap parsing | `spider/src/features/news_sitemap.rs` | `source` | Network | `parse()` | None |
@@ -156,6 +156,19 @@ ResearchScope
                     └─> fetch_single_page_with_options
 ```
 
+### 4.4 Source Provider Network Execution
+
+```
+GitHubRepositoryProvider / HuggingFaceModelProvider
+  └─> transport::execute_streaming_request
+        └─> build_streaming_client (Default or Tor)
+              └─> build_default_streaming_client / build_tor_client
+```
+
+Provider-specific request construction and response parsing remain in the
+provider adapter; network execution, transport pinning, and target validation
+are owned by canonical transport.
+
 ---
 
 ## 5. Upstream Compatibility Map
@@ -204,7 +217,6 @@ New Scorpion capabilities must not depend on them for new behavior.
 
 | Path | Status | Rule |
 |---|---|---|
-| `GitHubRepositoryProvider` / `HuggingFaceModelProvider` raw `reqwest::Client::new()` | Outside canonical seam, unaudited for SSRF/redirect/provenance | Must not be promoted to canonical without audit |
 | `spider/src/features/automation.rs:422` `LazyLock<reqwest::Client>` | Unclassified | Must not be promoted to canonical without audit |
 | `spider_agent` LLM client proxy handling (silent skip) | Silent-fallback pattern | Should at least warn; not canonical |
 | `spider_agent::automation` engine/browser vs spider core chrome | Ownership undecided | Must not be promoted to canonical without decision |
@@ -230,15 +242,13 @@ canonical transport ownership. `reqwest::Client::new()` and
 - `spider/src/features/automation.rs` (anti-bot solver)
 - `spider/src/features/solvers.rs` (LLM solver)
 
-**Grandfathered exceptions** — the following files contain pre-existing raw
-`reqwest::Client` constructions that are **not** canonical approval. They are
+**Grandfathered exception** — the following file contains a pre-existing raw
+`reqwest::Client` construction that is **not** canonical approval. It is
 classified as UNKNOWN (outside canonical seam, unaudited for SSRF/redirect/
-provenance) and are frozen: new Scorpion capabilities must not extend them.
-Their presence in the allowlist is a mechanical exception, not architectural
+provenance) and is frozen: new Scorpion capabilities must not extend it.
+Its presence in the allowlist is a mechanical exception, not architectural
 approval.
 
-- `spider/src/features/github_source_provider.rs` (grandfathered, UNKNOWN)
-- `spider/src/features/hugging_face_source_provider.rs` (grandfathered, UNKNOWN)
 - `spider/src/page.rs` (test-only usages inside `#[cfg(test)]` blocks)
 
 ### 7.2 NO PARALLEL TOR STACK
@@ -338,7 +348,6 @@ frontier:
 | `spider_agent` duplicate search stack | LEGACY | Converge `spider_agent` onto `spider::features::search_providers` or vice versa |
 | `spider_agent` LLM client silent proxy skip | UNKNOWN | Make proxy failure explicit |
 | Legacy `socks://`→`http://` rewrite remains live in default builds | LEGACY | Harden or quarantine legacy proxy paths |
-| `GitHub`/`HuggingFace` provider raw clients outside canonical seam | UNKNOWN | Route through canonical seam or classify as sanctioned provider frontier |
 | SCORPION.md `ArtifactId` vs implemented `ArtifactReference` naming collision | UNKNOWN | Rename one when `ArtifactId` is realized |
 
 ---

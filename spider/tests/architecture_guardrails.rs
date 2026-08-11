@@ -123,13 +123,6 @@ fn no_new_reqwest_client_new_outside_canonical_paths() {
             "features/search_providers/tavily.rs",
             "features/automation.rs",
             "features/solvers.rs",
-            // Grandfathered exception: pre-existing raw client in a provider
-            // adapter. Classification is UNKNOWN (outside canonical seam,
-            // unaudited for SSRF/redirect/provenance). Frozen: must not be
-            // extended. This allowlist entry is a mechanical exception, not
-            // architectural approval.
-            "features/github_source_provider.rs",
-            "features/hugging_face_source_provider.rs",
         ],
         "reqwest::Client::new() must only be constructed in canonical transport or explicitly allowed upstream/provider paths",
     );
@@ -153,13 +146,6 @@ fn no_new_reqwest_client_builder_outside_canonical_paths() {
             "features/search_providers/tavily.rs",
             "features/automation.rs",
             "features/solvers.rs",
-            // Grandfathered exception: pre-existing raw client in a provider
-            // adapter. Classification is UNKNOWN (outside canonical seam,
-            // unaudited for SSRF/redirect/provenance). Frozen: must not be
-            // extended. This allowlist entry is a mechanical exception, not
-            // architectural approval.
-            "features/github_source_provider.rs",
-            "features/hugging_face_source_provider.rs",
         ],
         "reqwest::Client::builder() must only be used in canonical transport or explicitly allowed upstream/provider paths",
     );
@@ -180,13 +166,6 @@ fn no_new_reqwest_clientbuilder_new_outside_canonical_paths() {
             "features/search_providers/tavily.rs",
             "features/automation.rs",
             "features/solvers.rs",
-            // Grandfathered exception: pre-existing raw client in a provider
-            // adapter. Classification is UNKNOWN (outside canonical seam,
-            // unaudited for SSRF/redirect/provenance). Frozen: must not be
-            // extended. This allowlist entry is a mechanical exception, not
-            // architectural approval.
-            "features/github_source_provider.rs",
-            "features/hugging_face_source_provider.rs",
         ],
         "reqwest::ClientBuilder::new() must only be used in canonical transport or explicitly allowed upstream/provider paths",
     );

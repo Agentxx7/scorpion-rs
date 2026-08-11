@@ -5,14 +5,21 @@
 //! bounded, non-recursive repository-tree metadata request and stops. It never
 //! downloads model files, cards, revisions, weights, or tokenizers; it also
 //! never invokes inference, a parser, a browser, or generic acquisition.
+//!
+//! Network execution is delegated to Scorpion's canonical streaming transport
+//! seam ([`crate::features::transport::execute_streaming_request`]) so the
+//! provider owns only Hugging-Face-specific request construction and response
+//! parsing.
 
 use crate::features::artifact_reference::{
     ArtifactIdentity, ArtifactIdentityKind, ArtifactReference,
 };
+use crate::features::secret_request_headers::SecretRequestHeaders;
 use crate::features::source::SourceItem;
 use crate::features::source_provider::{
     ProviderCapabilities, ProviderDescriptor, ProviderDiscovery, ProviderId, SourceProvider,
 };
+use crate::features::transport::TransportPolicy;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 
 const PROVIDER_ID: &str = "hugging_face";
@@ -84,10 +91,11 @@ impl HuggingFaceArtifactDiscoveryRequest {
 /// Official Hugging Face Hub model-repository source provider.
 pub struct HuggingFaceModelProvider {
     descriptor: ProviderDescriptor,
-    client: reqwest::Client,
+    transport: TransportPolicy,
     api_base: url::Url,
     public_base: url::Url,
-    authorization: Option<HeaderValue>,
+    headers: SecretRequestHeaders,
+    authenticated: bool,
 }
 
 impl std::fmt::Debug for HuggingFaceModelProvider {
@@ -97,7 +105,8 @@ impl std::fmt::Debug for HuggingFaceModelProvider {
             .field("descriptor", &self.descriptor)
             .field("api_base", &self.api_base)
             .field("public_base", &self.public_base)
-            .field("authenticated", &self.authorization.is_some())
+            .field("transport", &self.transport)
+            .field("authenticated", &self.authenticated)
             .finish_non_exhaustive()
     }
 }
@@ -111,35 +120,39 @@ impl Default for HuggingFaceModelProvider {
 impl HuggingFaceModelProvider {
     /// Construct an unauthenticated provider against the public Hub.
     pub fn new() -> Self {
-        Self::with_client_and_base(
-            reqwest::Client::new(),
-            url::Url::parse(HUB_BASE).expect("static Hugging Face Hub URL is valid"),
-        )
+        Self::with_base(url::Url::parse(HUB_BASE).expect("static Hugging Face Hub URL is valid"))
     }
 
-    fn with_client_and_base(client: reqwest::Client, api_base: url::Url) -> Self {
+    fn with_base(api_base: url::Url) -> Self {
         Self {
             descriptor: ProviderDescriptor::new(
                 PROVIDER_ID,
                 "Hugging Face",
                 ProviderCapabilities::ITEMS_AND_ARTIFACTS,
             ),
-            client,
+            transport: TransportPolicy::default(),
             api_base,
             public_base: url::Url::parse(HUB_BASE)
                 .expect("static Hugging Face public URL is valid"),
-            authorization: None,
+            headers: SecretRequestHeaders::new(),
+            authenticated: false,
         }
+    }
+
+    /// Select the transport policy used for network execution.
+    pub fn with_transport(mut self, transport: TransportPolicy) -> Self {
+        self.transport = transport;
+        self
     }
 
     /// Attach a caller-supplied token in memory. It is immediately converted
     /// to a sensitive header and never stored in provider metadata, request
     /// vocabulary, URLs, outputs, Debug, Display, errors, or persistent state.
     pub fn with_token(mut self, token: &str) -> Result<Self, HuggingFaceProviderError> {
-        let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+        let value = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| HuggingFaceProviderError::InvalidToken)?;
-        value.set_sensitive(true);
-        self.authorization = Some(value);
+        self.headers.insert(AUTHORIZATION, value);
+        self.authenticated = true;
         Ok(self)
     }
 
@@ -151,22 +164,16 @@ impl HuggingFaceModelProvider {
     ) -> Result<Vec<ProviderDiscovery>, HuggingFaceProviderError> {
         validate_request(request)?;
 
-        let endpoint = self
+        let mut endpoint = self
             .api_base
             .join("api/models")
             .map_err(|_| HuggingFaceProviderError::InvalidApiEndpoint)?;
-        let mut builder = self.client.get(endpoint).query(&[
-            ("search", request.query.as_str()),
-            ("limit", &request.limit.to_string()),
-        ]);
-        if let Some(authorization) = &self.authorization {
-            builder = builder.header(AUTHORIZATION, authorization.clone());
-        }
+        endpoint
+            .query_pairs_mut()
+            .append_pair("search", &request.query)
+            .append_pair("limit", &request.limit.to_string());
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| HuggingFaceProviderError::RequestFailed(error.to_string()))?;
+        let response = self.execute_request(endpoint).await?;
         let status = response.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(HuggingFaceProviderError::RateLimited {
@@ -220,14 +227,7 @@ impl HuggingFaceModelProvider {
             .append_pair("recursive", "false")
             .append_pair("expand", "false");
 
-        let mut builder = self.client.get(endpoint);
-        if let Some(authorization) = &self.authorization {
-            builder = builder.header(AUTHORIZATION, authorization.clone());
-        }
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| HuggingFaceProviderError::RequestFailed(error.to_string()))?;
+        let response = self.execute_request(endpoint).await?;
         let status = response.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(HuggingFaceProviderError::RateLimited {
@@ -275,6 +275,32 @@ impl HuggingFaceModelProvider {
                 )
             })
             .collect()
+    }
+
+    /// Dispatch one Hugging Face API request through Scorpion's canonical
+    /// transport seam. Under unsupported feature combinations the provider
+    /// fails closed rather than constructing an independent HTTP stack.
+    async fn execute_request(
+        &self,
+        endpoint: url::Url,
+    ) -> Result<reqwest::Response, HuggingFaceProviderError> {
+        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        {
+            crate::features::transport::execute_streaming_request(
+                &endpoint,
+                &self.transport,
+                &self.headers,
+            )
+            .await
+            .map_err(|error| HuggingFaceProviderError::RequestFailed(error.to_string()))
+        }
+        #[cfg(any(feature = "wreq", feature = "cache_request"))]
+        {
+            let _ = endpoint;
+            Err(HuggingFaceProviderError::RequestFailed(
+                "Hugging Face provider is unavailable under wreq or cache_request".to_string(),
+            ))
+        }
     }
 }
 
@@ -598,10 +624,7 @@ mod tests {
     }
 
     fn provider(fixture: &Fixture) -> HuggingFaceModelProvider {
-        HuggingFaceModelProvider::with_client_and_base(
-            reqwest::Client::new(),
-            fixture.base_url.clone(),
-        )
+        HuggingFaceModelProvider::with_base(fixture.base_url.clone())
     }
 
     #[test]

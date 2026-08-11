@@ -54,6 +54,19 @@ pub mod acquisition_binding;
 /// Pure provider-neutral binding from resolved artifact metadata to future
 /// download execution intent. Performs no acquisition or filesystem work.
 pub mod artifact_download_binding;
+/// Canonical execution of an already-resolved `ArtifactDownloadBinding`:
+/// streams the remote artifact through the canonical transport streaming
+/// request seam straight to a caller-owned destination on disk, hashing
+/// while streaming, without ever materializing the full body in memory.
+/// Requires `evidence` (for the `sha2` dependency) and, like the
+/// streaming transport seam it consumes, is unavailable under
+/// `wreq`/`cache_request`.
+#[cfg(all(
+    feature = "evidence",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub mod artifact_download_execution;
 /// Provider-neutral metadata for versioned repository artifacts. Always
 /// available and performs no acquisition, download, parsing, or verification.
 pub mod artifact_reference;

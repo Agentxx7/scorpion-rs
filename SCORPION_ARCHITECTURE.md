@@ -8,6 +8,15 @@ This document is the machine-readable source of truth for Scorpion's canonical
 architecture. It records what is canonical, what is compatibility-only, what is
 forbidden, and how future frontiers must be scoped.
 
+Companion documents:
+
+- `SCORPION_SDD.md` — the Software Design Specification: layer model,
+  dependency direction, ownership, state model, security ownership, error
+  ownership.
+- `SCORPION_PROCESS.md` — the frontier lifecycle, SDD/TDD process, and
+  two-branch process for architecture-critical changes, with templates in
+  `docs/frontier/templates/`.
+
 ---
 
 ## 1. Core Principle
@@ -65,12 +74,12 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
-| One-shot fetch/evidence | `spider/src/utils/evidence.rs` | `Website` (UPSTREAM_COMPAT), `transport` | Independent client construction | `fetch_single_page_with_options()` | `fetch_single_page()` (LEGACY predecessor) |
-| Crawl/scrape orchestration seam | `spider/src/website.rs` — **methods only**: `Website::with_transport()`, `crawl_raw()`, `scrape()` | `transport`, `page` | New transport stacks | `Website::with_transport()` + `crawl_raw()`/`scrape()` | `configure_base_client` (UPSTREAM_COMPAT) |
+| One-shot fetch/evidence | `spider/src/utils/evidence.rs` | `Website` (UPSTREAM_COMPAT boundary primitive), `transport` | Independent client construction | `fetch_single_page_with_options()` | `fetch_single_page()` (Default-transport implementation behind the canonical seam — not a caller-selectable alternate) |
+| Crawl/scrape orchestration seam | `spider/src/website.rs` — **methods only**: `Website::with_transport()`, `crawl_raw()`, `scrape()` | `transport`, `page` | New transport stacks | `Website::with_transport()` + `crawl_raw()`/`scrape()` | `configure_base_client` (UPSTREAM_COMPAT — transitive implementation of this seam, never directly callable from canonical code) |
 | Streaming artifact download | `spider/src/features/artifact_download_execution.rs` | `transport::execute_streaming_request`, `uring_fs` | `Website`, `Page`, independent clients | `execute()` | None |
 | Acquisition binding | `spider/src/features/acquisition_binding.rs` | `discovery_target`, `evidence` | Network, transport | `bind()`/`execute()` | None |
 
-**Clarification on `website.rs`:** The `Website` type and its crawl/scrape methods are the canonical public seam for multi-page acquisition. The internal client construction (`configure_base_client`, proxy rotation, legacy redirect policies) is UPSTREAM_COMPAT — retained for upstream parity, not to be extended by new Scorpion capabilities. A canonical seam may internally depend on upstream-compatible machinery; the seam and the machinery are classified separately.
+**Clarification on `website.rs`:** The `Website` type and its crawl/scrape methods are the canonical public seam for multi-page acquisition. The internal client construction (`configure_base_client`, proxy rotation, legacy redirect policies) is UPSTREAM_COMPAT — retained for upstream parity, not to be extended by new Scorpion capabilities. A canonical boundary primitive may internally execute upstream-compatible machinery; the boundary primitive and the machinery are classified separately. Upstream machinery is therefore an **implementation dependency behind an approved boundary** — it is transitively executed underneath the seam, but canonical code never directly selects it, never calls it as an alternate path, and never depends on it as fallback. See `SCORPION_SDD.md` §3 for the three-category dependency model.
 
 ### 3.4 Transport
 
@@ -176,6 +185,12 @@ are owned by canonical transport.
 These paths are retained because upstream Spider functionality requires them.
 New Scorpion capabilities must not depend on them for new behavior.
 
+They may execute **transitively underneath an approved canonical boundary
+primitive** (e.g. `crawl_raw()` internally uses `configure_base_client`) —
+that is an implementation dependency of the boundary primitive, not an
+alternate execution graph. Canonical code must not call them directly,
+select them as alternates, or fall back to them. See `SCORPION_SDD.md` §3.
+
 | Path | Why Retained | Constraint |
 |---|---|---|
 | `Website::configure_base_client` (reqwest/wreq variants) | Legacy crawl stack | Must not be extended for new transport work |
@@ -196,7 +211,6 @@ New Scorpion capabilities must not depend on them for new behavior.
 |---|---|---|
 | `spider_agent/src/search/*` | Duplicate of `spider::features::search_providers` | Do not extend; converge or freeze |
 | `RemoteFetcher` (`fetcher.rs`) | Coarser hook than `HttpFetchEngine` | Keep both; document `HttpFetchEngine` as preferred for transport swaps |
-| `build_evidence_with_transport` | Compatibility shim over `build_evidence`; superseded by canonical seam | Do not extend |
 | `page::build` / `Page` `decentralized` variants | Weaker behavior | Flag as legacy |
 | `Agent::new_page_with_url` | Deprecated | Schedule removal at next major |
 | `spider_worker` | Decentralized crawling proxy server | Defaults preserve legacy behavior; hardening is env-opt-in. Not a canonical owner. |
@@ -212,6 +226,7 @@ New Scorpion capabilities must not depend on them for new behavior.
 | Non-`socks5h` schemes | Rejected by `TorTransportConfig::new` | Do not bypass |
 | Artifact destination overwrite | Rejected by `artifact_download_execution` | No overwrite policy yet |
 | `spider_mcp` `search_serper`/`search_brave` dead features | Rejected | Remove flags or implement tools |
+| `build_evidence_with_transport` | REJECTED = REMOVED (architecture-convergence frontier) | Reintroduction detected by `rejected_build_evidence_with_transport_is_gone` |
 
 ### 6.3 UNKNOWN
 
@@ -383,5 +398,17 @@ The following are intentionally not refactored in this frontier:
 - Correct feature gates on `artifact_download_execution`
 - Correct feature gates on `fetch_via_tor`
 - Correct feature gates on `build_streaming_client`
+- REJECTED means removed: `build_evidence_with_transport` reintroduction is detected
+- Canonical modules must not *directly* call legacy/upstream execution paths
+  (`configure_base_client`, `fetch_page_html*`, legacy redirect policies,
+  `socks://`→`http://` rewrite); transitive execution underneath an approved
+  boundary primitive is permitted and is not what this guard forbids
+- Providers must execute through `execute_streaming_request` and must not
+  construct `Website`, `Page`, or `reqwest::Client`
+- Single execution graph: `discover`, `plan`, `build_evidence`, and
+  `EvidenceBundle` are each defined in exactly one canonical module
+- Thin interfaces: `spider_cli`/`spider_mcp` define no shadow canonical models
+- Negative scanner proofs: synthetic violations in every guarded class are
+  proven detected (see `scanner_detects_every_violation_class`)
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

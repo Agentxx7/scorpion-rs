@@ -784,7 +784,7 @@ async fn tor_crawl_follows_redirect_through_socks() {
 
 /// T19/T20: every network-acquired `Page` from a Tor crawl carries
 /// truthful transport provenance, and evidence built from it reports
-/// `"tor"` — proving `Page::transport()`/`build_evidence_with_transport`
+/// `"tor"` — proving `Page::transport()`/`build_evidence`
 /// are correctly wired for the multi-page path, not just the one-shot
 /// seam.
 #[tokio::test]

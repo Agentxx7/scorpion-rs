@@ -16,9 +16,7 @@
 //! all (blackhole).
 
 use spider::features::transport::{TorTransportConfig, TransportPolicy};
-use spider::utils::evidence::{
-    build_evidence_with_transport, fetch_single_page_with_options, AcquisitionOptions,
-};
+use spider::utils::evidence::{build_evidence, fetch_single_page_with_options, AcquisitionOptions};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -561,8 +559,8 @@ async fn onion_under_default_transport_makes_no_network_attempt() {
 /// "proxy". No proxy credentials ever appear (there are none to redact in
 /// V1, but the endpoint string itself must not leak either). Provenance
 /// comes from `TransportAcquisition`, which only `fetch_single_page_with_options`
-/// can produce — there is no way to call `build_evidence_with_transport`
-/// with a policy unrelated to how the page was actually fetched.
+/// can produce — there is no way to call `build_evidence` on a page
+/// carrying a provenance stamp unrelated to how it was actually fetched.
 #[tokio::test]
 async fn evidence_records_truthful_transport_provenance() {
     let http = HttpFixture::start().await;
@@ -577,7 +575,7 @@ async fn evidence_records_truthful_transport_provenance() {
     )
     .await
     .unwrap();
-    let default_evidence = build_evidence_with_transport(&default_acquisition, None, false, false);
+    let default_evidence = build_evidence(default_acquisition.page(), None, false, false);
     assert_eq!(default_evidence.transport.as_deref(), Some("default"));
     assert_eq!(default_evidence.dns, None);
     assert_eq!(default_evidence.status_code, Some(200));
@@ -596,7 +594,7 @@ async fn evidence_records_truthful_transport_provenance() {
     )
     .await
     .unwrap();
-    let tor_evidence = build_evidence_with_transport(&tor_acquisition, None, false, false);
+    let tor_evidence = build_evidence(tor_acquisition.page(), None, false, false);
     assert_eq!(tor_evidence.transport.as_deref(), Some("tor"));
     assert_eq!(tor_evidence.dns.as_deref(), Some("proxy"));
     assert_eq!(tor_evidence.status_code, Some(200));

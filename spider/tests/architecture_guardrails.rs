@@ -700,3 +700,335 @@ fn artifact_download_execution_uses_only_streaming_seam() {
         "artifact download execution must not use the evidence fetch seam"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Helpers for dependency/absence guards
+// ---------------------------------------------------------------------------
+
+/// Read one spider/src file by relative path.
+fn read_src_file(relative_path: &str) -> String {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fs::read_to_string(manifest_dir.join("src").join(relative_path))
+        .unwrap_or_else(|_| panic!("failed to read src/{relative_path}"))
+}
+
+/// All files (relative paths) whose contents contain `pattern`.
+fn find_files_containing(files: &[SourceFile], pattern: &str) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| file.contents.contains(pattern))
+        .map(|file| file.relative_path.clone())
+        .collect()
+}
+
+/// Assert that a pattern exists in no spider/src file at all.
+fn assert_pattern_absent_everywhere(pattern: &str, description: &str) {
+    let files = scan_spider_src();
+    let found = find_files_containing(&files, pattern);
+    assert!(
+        found.is_empty(),
+        "rejected/removed pattern reintroduced: {description}\n  pattern: {pattern:?}\n  found in: {found:?}"
+    );
+}
+
+/// Assert that a canonical source file contains none of the forbidden
+/// upstream/legacy call patterns.
+fn assert_file_lacks_legacy_calls(relative_path: &str, forbidden: &[&str]) {
+    let contents = read_src_file(relative_path);
+    for pattern in forbidden {
+        assert!(
+            !contents.contains(pattern),
+            "canonical -> legacy direct dependency: {relative_path} must not directly call {pattern:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// REJECTED MEANS GONE
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rejected_build_evidence_with_transport_is_gone() {
+    // `build_evidence_with_transport` was a superseded compatibility shim over
+    // the canonical `build_evidence` (which reads `Page::transport()`
+    // directly). It was removed in the architecture-convergence frontier;
+    // REJECTED means removed — this test detects any reintroduction.
+    assert_pattern_absent_everywhere(
+        "fn build_evidence_with_transport",
+        "build_evidence_with_transport was removed; it must not be reintroduced as shim, helper, or fallback",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NO CANONICAL -> LEGACY DIRECT DEPENDENCY
+// ---------------------------------------------------------------------------
+//
+// Dependency model (SCORPION_SDD.md §3) — three distinct categories:
+//
+// 1. CANONICAL DIRECT DEPENDENCY — allowed only on canonical seams.
+// 2. TRANSITIVE UPSTREAM IMPLEMENTATION — permitted only behind an
+//    explicitly approved boundary primitive (e.g. `fetch_single_page_with_options`
+//    may route Default acquisition through `Website`/`crawl_raw`, whose
+//    upstream internals execute underneath the seam). These tests do NOT
+//    forbid that: upstream machinery may run transitively as the boundary
+//    primitive's own implementation.
+// 3. CANONICAL -> LEGACY/UPSTREAM DIRECT ALTERNATE EXECUTION — forbidden
+//    and enforced here: no canonical module may *directly call* upstream
+//    machinery, select it as an alternate path, or fall back to it.
+
+/// Upstream/legacy execution call patterns that canonical Scorpion modules
+/// must never invoke directly. Call-shape patterns (with parentheses) are
+/// used so doc comments referencing these names do not false-positive.
+const LEGACY_EXECUTION_CALLS: &[&str] = &[
+    "configure_base_client(",
+    "fetch_page_html(",
+    "fetch_page_html_raw(",
+    "fetch_page_html_with_fallback(",
+    "setup_redirect_policy(",
+    "setup_strict_policy(",
+    "replacen(\"socks://\", \"http://\"",
+];
+
+#[test]
+fn canonical_modules_do_not_call_legacy_execution_paths() {
+    for canonical in [
+        "features/transport.rs",
+        "utils/evidence.rs",
+        "features/artifact_download_execution.rs",
+        "features/github_source_provider.rs",
+        "features/hugging_face_source_provider.rs",
+        "features/acquisition_binding.rs",
+        "features/research_scope.rs",
+        "features/discovery_target.rs",
+    ] {
+        assert_file_lacks_legacy_calls(canonical, LEGACY_EXECUTION_CALLS);
+    }
+}
+
+#[test]
+fn canonical_transport_does_not_rewrite_socks_scheme() {
+    let contents = read_src_file("features/transport.rs");
+    assert!(
+        !contents.contains("replacen(\"socks://\", \"http://\""),
+        "canonical transport must never silently rewrite socks:// to http://"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PROVIDER CANONICAL TRANSPORT USE (single execution graph)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn providers_use_canonical_transport_seam() {
+    for provider in [
+        "features/github_source_provider.rs",
+        "features/hugging_face_source_provider.rs",
+    ] {
+        let contents = read_src_file(provider);
+        assert!(
+            contents.contains("execute_streaming_request"),
+            "{provider} must execute through the canonical transport seam"
+        );
+        for forbidden in ["Website::new", "Website {", "Page::new", "reqwest::Client"] {
+            assert!(
+                !contents.contains(forbidden),
+                "{provider} must not bypass canonical transport via {forbidden:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SINGLE EXECUTION GRAPH: canonical capability seams are unique
+// ---------------------------------------------------------------------------
+
+#[test]
+fn research_discover_seam_is_unique() {
+    assert_pattern_only_in_files(
+        "pub async fn discover(",
+        &["features/research_scope.rs"],
+        "research discover() must be the single canonical research seam",
+    );
+}
+
+#[test]
+fn discovery_plan_seam_is_unique() {
+    assert_pattern_only_in_files(
+        "pub fn plan(",
+        &["features/discovery_target.rs"],
+        "discovery plan() must be the single canonical discovery seam",
+    );
+}
+
+#[test]
+fn evidence_build_seam_is_unique() {
+    assert_pattern_only_in_files(
+        "pub fn build_evidence(",
+        &["utils/evidence.rs"],
+        "build_evidence() must be the single canonical evidence seam",
+    );
+}
+
+#[test]
+fn evidence_bundle_model_is_unique() {
+    assert_pattern_only_in_files(
+        "pub struct EvidenceBundle",
+        &["utils/evidence.rs"],
+        "EvidenceBundle must only be defined in the canonical evidence module",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// THIN INTERFACES: no shadow canonical models in interface crates
+// ---------------------------------------------------------------------------
+
+#[test]
+fn interfaces_define_no_shadow_domain_models() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let shadow_patterns = [
+        "pub struct EvidenceBundle",
+        "pub struct ArtifactReference",
+        "pub struct ArtifactDownloadBinding",
+        "pub enum TransportPolicy",
+        "pub struct AcquiredArtifact",
+    ];
+    for interface_src in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(interface_src);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for pattern in shadow_patterns {
+                assert!(
+                    !file.contents.contains(pattern),
+                    "thin interface violation: {interface_src}/{} defines shadow model {pattern:?}",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NEGATIVE GUARDRAIL PROOFS (synthetic — never touch production source)
+// ---------------------------------------------------------------------------
+
+/// Each entry: (violation class, pattern scanned, allowlist, synthetic
+/// violating file). Proves the scanner detects every violation class the
+/// real guardrails above protect against.
+#[test]
+fn scanner_detects_every_violation_class() {
+    let cases: &[(&str, &str, &[&str], &str)] = &[
+        (
+            "unauthorized HTTP client construction",
+            "reqwest::Client::new()",
+            &["features/transport.rs"],
+            "features/new_provider.rs",
+        ),
+        (
+            "unauthorized Tor builder",
+            "fn build_tor_client",
+            &["features/transport.rs"],
+            "features/evil_tor.rs",
+        ),
+        (
+            "duplicate onion classifier",
+            "fn is_onion_url",
+            &["features/transport.rs"],
+            "features/evil_onion.rs",
+        ),
+        (
+            "duplicate target validator",
+            "fn validate_target",
+            &["features/transport.rs"],
+            "features/evil_validate.rs",
+        ),
+        (
+            "duplicate canonical model",
+            "pub struct ArtifactReference",
+            &["features/artifact_reference.rs"],
+            "features/evil_model.rs",
+        ),
+        (
+            "interface-owned canonical execution (shadow model)",
+            "pub struct EvidenceBundle",
+            &["utils/evidence.rs"],
+            "interface/evil_evidence.rs",
+        ),
+        (
+            "canonical -> legacy dependency",
+            "configure_base_client(",
+            &[],
+            "features/evil_legacy.rs",
+        ),
+        (
+            "silent fallback to upstream alternate",
+            "fetch_page_html_with_fallback(",
+            &[],
+            "features/evil_fallback.rs",
+        ),
+        (
+            "reintroduced REJECTED implementation",
+            "fn build_evidence_with_transport",
+            &[],
+            "features/evil_rejected.rs",
+        ),
+        (
+            "unauthorized alternate execution seam",
+            "fn execute_streaming_request",
+            &["features/transport.rs"],
+            "features/evil_seam.rs",
+        ),
+    ];
+
+    for (class, pattern, allowed, violating_path) in cases {
+        let mut synthetic = Vec::new();
+        // An allowed file legitimately containing the pattern (only when the
+        // guardrail has an allowlist; an empty allowlist means "nowhere").
+        if let Some(allowed_path) = allowed.first() {
+            synthetic.push(SourceFile {
+                relative_path: allowed_path.to_string(),
+                contents: format!("{pattern} {{ /* canonical */ }}"),
+            });
+        }
+        // A violating file containing the same pattern.
+        synthetic.push(SourceFile {
+            relative_path: violating_path.to_string(),
+            contents: format!("{pattern} {{ /* violation */ }}"),
+        });
+        let violations = find_pattern_violations(&synthetic, pattern, allowed);
+        assert_eq!(
+            violations,
+            vec![violating_path.to_string()],
+            "scanner must detect violation class: {class}"
+        );
+    }
+}
+
+/// Provider bypass detection is two-sided: a provider must both avoid
+/// forbidden constructions AND positively call the canonical seam. Prove the
+/// positive-requirement half fails when the seam call is absent.
+#[test]
+fn scanner_detects_provider_bypass_of_canonical_transport() {
+    let bypassing = SourceFile {
+        relative_path: "features/evil_provider.rs".to_string(),
+        contents: "let client = reqwest::Client::new(); client.get(url).send()".to_string(),
+    };
+    assert!(
+        !bypassing.contents.contains("execute_streaming_request"),
+        "synthetic bypassing provider must lack the canonical seam call"
+    );
+    // The real guardrail (`providers_use_canonical_transport_seam`) asserts
+    // presence of the seam call; this proves the discriminating condition
+    // actually distinguishes a bypassing file.
+    let conforming = SourceFile {
+        relative_path: "features/good_provider.rs".to_string(),
+        contents: "crate::features::transport::execute_streaming_request(&endpoint, &self.transport, &self.headers)".to_string(),
+    };
+    assert!(
+        conforming.contents.contains("execute_streaming_request"),
+        "synthetic conforming provider must contain the canonical seam call"
+    );
+}

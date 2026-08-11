@@ -105,17 +105,17 @@ pub struct EvidenceBundle {
     /// requires `serde` (which pulls in `serde_json`).
     pub metadata: Option<serde_json::Value>,
     /// Which transport actually performed this acquisition — `"default"`
-    /// or `"tor"`. Populated only by [`build_evidence_with_transport`];
-    /// `None` for evidence built via the original [`build_evidence`],
-    /// which never claims a transport it didn't observe. Never claims the
-    /// configured SOCKS endpoint is genuinely Tor — only that the Tor
-    /// transport policy was the one selected for this fetch.
+    /// or `"tor"`. Populated by [`build_evidence`] from the `Page`-carried
+    /// provenance stamp; `None` for a page no audited acquisition path
+    /// stamped, which never claims a transport it didn't observe. Never
+    /// claims the configured SOCKS endpoint is genuinely Tor — only that
+    /// the Tor transport policy was the one selected for this fetch.
     pub transport: Option<String>,
     /// How target-hostname DNS resolution was performed: `"proxy"` when
     /// resolution happened proxy-side (Tor/SOCKS5h — the local process
     /// never resolved the target host), `None` when unspecified/ordinary
-    /// local resolution applies (`default` transport, or evidence built
-    /// via the original [`build_evidence`]).
+    /// local resolution applies (`default` transport, or a page carrying
+    /// no provenance stamp).
     pub dns: Option<String>,
 }
 
@@ -200,25 +200,6 @@ pub fn build_evidence(
     }
 }
 
-/// Build retrieval evidence for one fetched page via a [`TransportAcquisition`]
-/// binding. Kept for API stability for existing one-shot callers — since
-/// [`build_evidence`] itself now reads `Page.transport()` directly
-/// (Section H/I: `Page`-carried provenance is the single canonical
-/// source of truth), this is a thin pass-through rather than an
-/// independent provenance path. `acquisition.transport()` (the
-/// *requested* policy) is deliberately never consulted here — only
-/// `acquisition.page().transport()` (what actually happened) feeds
-/// evidence, so this can never diverge from [`build_evidence`]'s answer
-/// for the same `Page`.
-pub fn build_evidence_with_transport(
-    acquisition: &TransportAcquisition,
-    content: Option<String>,
-    wants_screenshot: bool,
-    used_browser: bool,
-) -> EvidenceBundle {
-    build_evidence(&acquisition.page, content, wants_screenshot, used_browser)
-}
-
 /// Fetch exactly one page through Spider's ordinary non-browser HTTP path:
 /// one target URL, no Chrome/browser fallback, no discovered-link
 /// traversal. The canonical one-shot acquisition primitive shared by every
@@ -255,9 +236,9 @@ pub struct AcquisitionOptions {
 /// [`fetch_single_page_with_options`]'s return value — there is no public
 /// constructor — so a caller can never mint a `TransportAcquisition`
 /// claiming `Tor` for a `Page` that was really fetched over `Default`
-/// transport (or vice versa). This is what makes
-/// [`build_evidence_with_transport`]'s provenance trustworthy: it reads
-/// `.transport()` off this type instead of accepting an unrelated,
+/// transport (or vice versa). This is what makes evidence provenance
+/// trustworthy: [`build_evidence`] reads `.transport()` off the page
+/// carried by this type instead of accepting an unrelated,
 /// independently-suppliable policy argument from the caller.
 #[derive(Debug)]
 pub struct TransportAcquisition {

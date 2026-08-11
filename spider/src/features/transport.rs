@@ -1097,7 +1097,7 @@ mod tests {
     /// Supersedes the old `TransportPolicy::label` test — provenance
     /// labels now live on `AcquisitionTransport` (the `Page`-carried,
     /// actually-observed transport), not the requested policy. See
-    /// `spider::utils::evidence::build_evidence_with_transport`.
+    /// `spider::utils::evidence::build_evidence`.
     #[test]
     fn acquisition_transport_labels_are_the_locked_provenance_values() {
         assert_eq!(AcquisitionTransport::Default.label(), "default");

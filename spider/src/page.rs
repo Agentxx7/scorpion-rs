@@ -4513,6 +4513,160 @@ where
 }
 
 impl Page {
+    /// Canonical request-only acquisition. Raw-client constructors below are
+    /// retained solely as the explicit upstream compatibility boundary.
+    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    pub async fn new_page_with_executor(
+        url: &str,
+        executor: &spider_transport::ResolvedExecutor,
+    ) -> Self {
+        build(
+            url,
+            crate::utils::fetch_page_html_with_executor(url, executor).await,
+        )
+    }
+
+    /// Page acquisition selected by the pre-resolved crawl mode. Canonical
+    /// execution cannot borrow `compatibility_client`.
+    pub async fn new_page_for_mode(
+        url: &str,
+        _executor: Option<&spider_transport::ResolvedExecutor>,
+        compatibility_client: &Client,
+        cache_options: Option<CacheOptions>,
+        cache_policy: &Option<BasicCachePolicy>,
+        cache_namespace: Option<&str>,
+    ) -> Self {
+        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        if let Some(executor) = _executor {
+            return Self::new_page_with_executor(url, executor).await;
+        }
+        Self::new_page_with_cache(
+            url,
+            compatibility_client,
+            cache_options,
+            cache_policy,
+            cache_namespace,
+        )
+        .await
+    }
+
+    /// Canonical streaming-crawl entry point. Network execution is delegated
+    /// to `ResolvedExecutor`; Spider retains link extraction policy.
+    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_page_streaming_with_executor<
+        A: PartialEq
+            + Eq
+            + Sync
+            + Send
+            + Clone
+            + Default
+            + std::hash::Hash
+            + From<String>
+            + for<'a> From<&'a str>,
+    >(
+        url: &str,
+        executor: &spider_transport::ResolvedExecutor,
+        only_html: bool,
+        selectors: &mut RelativeSelectors,
+        external_domains_caseless: &Arc<HashSet<CaseInsensitiveString>>,
+        r_settings: &PageLinkBuildSettings,
+        map: &mut hashbrown::HashSet<A>,
+        _ssg_map: Option<&mut hashbrown::HashSet<A>>,
+        prior_domain: &Option<Box<Url>>,
+        domain_parsed: &mut Option<Box<Url>>,
+        links_pages: &mut Option<hashbrown::HashSet<A>>,
+    ) -> Self {
+        let mut page = Self::new_page_with_executor(url, executor).await;
+        if !external_domains_caseless.is_empty() {
+            page.set_external(external_domains_caseless.clone());
+        }
+        if only_html && page.binary_file {
+            return page;
+        }
+        if domain_parsed.is_none() {
+            *domain_parsed = Url::parse(url).ok().map(Box::new);
+        }
+        let extracted = if r_settings.full_resources {
+            page.links_full(selectors, prior_domain).await
+        } else {
+            page.links(selectors, prior_domain).await
+        };
+        map.extend(extracted.iter().map(|link| A::from(link.inner().as_str())));
+        if let Some(page_links) = links_pages {
+            page_links.extend(extracted.iter().map(|link| A::from(link.inner().as_str())));
+        }
+        page
+    }
+
+    /// Resolve canonical versus explicitly noncanonical Page execution without
+    /// exposing client selection to Website. Canonical calls always take the
+    /// executor branch; the raw client is consulted only for an installed
+    /// noncanonical fetch engine or an alternate backend build.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_page_streaming_for_mode<
+        A: PartialEq
+            + Eq
+            + Sync
+            + Send
+            + Clone
+            + Default
+            + std::hash::Hash
+            + From<String>
+            + for<'a> From<&'a str>,
+    >(
+        url: &str,
+        _executor: Option<&spider_transport::ResolvedExecutor>,
+        compatibility_client: &Client,
+        only_html: bool,
+        selectors: &mut RelativeSelectors,
+        external_domains_caseless: &Arc<HashSet<CaseInsensitiveString>>,
+        r_settings: &PageLinkBuildSettings,
+        map: &mut hashbrown::HashSet<A>,
+        ssg_map: Option<&mut hashbrown::HashSet<A>>,
+        prior_domain: &Option<Box<Url>>,
+        domain_parsed: &mut Option<Box<Url>>,
+        links_pages: &mut Option<hashbrown::HashSet<A>>,
+        http_first_byte_args: (Option<std::time::Duration>, Option<std::time::Duration>),
+        engine: Option<crate::fetch_engine::EngineFetchCtx<'_>>,
+    ) -> Self {
+        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        if engine.is_none() {
+            if let Some(executor) = _executor {
+                return Self::new_page_streaming_with_executor(
+                    url,
+                    executor,
+                    only_html,
+                    selectors,
+                    external_domains_caseless,
+                    r_settings,
+                    map,
+                    ssg_map,
+                    prior_domain,
+                    domain_parsed,
+                    links_pages,
+                )
+                .await;
+            }
+        }
+        Self::new_page_streaming_engine(
+            url,
+            compatibility_client,
+            only_html,
+            selectors,
+            external_domains_caseless,
+            r_settings,
+            map,
+            ssg_map,
+            prior_domain,
+            domain_parsed,
+            links_pages,
+            http_first_byte_args,
+            engine,
+        )
+        .await
+    }
+
     /// Whether the page needs a retry based on `should_retry`, a retryable status code,
     /// a truncated response (upstream stream ended prematurely), or a proxy-retryable
     /// 401 (when `proxy_configured` is set, proxy rotation may resolve the auth failure).

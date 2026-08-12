@@ -280,8 +280,7 @@ pub fn apply_directive(website: &mut crate::website::Website, directive: &RetryD
     // Rebuild HTTP client and headers after config changes.
     if directive.rebuild_client {
         website.configure_headers();
-        let client = website.configure_http_client();
-        website.set_http_client(client);
+        website.rebuild_execution_resources();
     }
 }
 

@@ -104,6 +104,7 @@ pub fn error_code(error: &TransportError) -> &'static str {
         TransportError::RedirectTransportViolation(_) => "redirect_transport_violation",
         TransportError::IncompatibleConfiguration(_) => "incompatible_configuration",
         TransportError::RequestExecutionFailed(_) => "request_execution_failed",
+        TransportError::InvalidProxy(_) => "invalid_proxy",
     }
 }
 

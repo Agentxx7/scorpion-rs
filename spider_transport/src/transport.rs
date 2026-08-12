@@ -29,6 +29,8 @@
 //! `TransportPolicy::label`) is crate-private implementation detail.
 
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// Selects which network path an acquisition uses. `Default` is not named
 /// `Direct` — the existing HTTP client stack may legitimately inherit
@@ -204,6 +206,8 @@ pub enum TransportError {
     /// whichever reason actually applied. Always established *before* any
     /// response body byte is read — see [`execute_streaming_request`].
     RequestExecutionFailed(String),
+    /// A configured crawler proxy could not be parsed or realized.
+    InvalidProxy(String),
 }
 
 impl fmt::Display for TransportError {
@@ -240,11 +244,203 @@ impl fmt::Display for TransportError {
             TransportError::RequestExecutionFailed(message) => {
                 write!(f, "transport request execution failed: {message}")
             }
+            TransportError::InvalidProxy(message) => {
+                write!(f, "invalid crawler proxy configuration: {message}")
+            }
         }
     }
 }
 
 impl std::error::Error for TransportError {}
+
+/// Execution authority fixed before crawl execution begins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Canonical,
+    NoncanonicalHttpFetchEngine,
+    NoncanonicalRemoteFetcher,
+    UpstreamCompatibility,
+}
+
+/// Inputs resolved once into a persistent canonical executor.
+#[derive(Clone)]
+pub struct CrawlerTransportConfiguration {
+    pub policy: TransportPolicy,
+    pub user_agent: String,
+    pub default_headers: reqwest::header::HeaderMap,
+    pub proxies: Vec<String>,
+    pub request_timeout: std::time::Duration,
+    pub connect_timeout: std::time::Duration,
+    pub read_timeout: std::time::Duration,
+    pub accept_invalid_certs: bool,
+    pub local_address: Option<std::net::IpAddr>,
+    /// Optional outbound network interface name.
+    pub network_interface: Option<String>,
+    /// Optional caller-supplied DNS resolver retained by every pooled client.
+    pub dns_resolver: Option<Arc<dyn reqwest::dns::Resolve>>,
+    pub cookie_jar: Option<Arc<reqwest::cookie::Jar>>,
+}
+
+impl Default for CrawlerTransportConfiguration {
+    fn default() -> Self {
+        Self {
+            policy: TransportPolicy::Default,
+            user_agent: "spider_transport".into(),
+            default_headers: reqwest::header::HeaderMap::new(),
+            proxies: Vec::new(),
+            request_timeout: TOR_TOTAL_TIMEOUT,
+            connect_timeout: TOR_CONNECT_TIMEOUT,
+            read_timeout: TOR_READ_TIMEOUT,
+            accept_invalid_certs: false,
+            local_address: None,
+            network_interface: None,
+            dns_resolver: None,
+            cookie_jar: None,
+        }
+    }
+}
+
+/// Request-only canonical Page/executor input. It cannot lend a client.
+#[derive(Debug)]
+pub struct CrawlerRequest {
+    pub url: url::Url,
+    pub method: reqwest::Method,
+    pub headers: reqwest::header::HeaderMap,
+    pub secret_headers: crate::SecretRequestHeaders,
+    pub body: Option<Vec<u8>>,
+    pub content_type: Option<String>,
+}
+
+impl CrawlerRequest {
+    pub fn get(url: url::Url) -> Self {
+        Self {
+            url,
+            method: reqwest::Method::GET,
+            headers: reqwest::header::HeaderMap::new(),
+            secret_headers: crate::SecretRequestHeaders::new(),
+            body: None,
+            content_type: None,
+        }
+    }
+}
+
+/// Persistent leaf-owned executor. Its reusable clients never leave the type.
+pub struct ResolvedExecutor {
+    policy: TransportPolicy,
+    clients: Arc<[reqwest::Client]>,
+    next_client: AtomicUsize,
+}
+
+impl fmt::Debug for ResolvedExecutor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedExecutor")
+            .field("policy", &self.policy)
+            .field("client_count", &self.clients.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ResolvedExecutor {
+    pub fn resolve(config: CrawlerTransportConfiguration) -> Result<Self, TransportError> {
+        if matches!(config.policy, TransportPolicy::Tor(_)) && !config.proxies.is_empty() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "crawler proxy rotation cannot be combined with Tor".into(),
+            ));
+        }
+        let endpoints: Vec<Option<&str>> = if config.proxies.is_empty() {
+            vec![None]
+        } else {
+            config.proxies.iter().map(|p| Some(p.as_str())).collect()
+        };
+        let mut clients = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            let mut builder = reqwest::Client::builder()
+                .connect_timeout(config.connect_timeout)
+                .read_timeout(config.read_timeout)
+                .timeout(config.request_timeout)
+                .user_agent(&config.user_agent)
+                .default_headers(config.default_headers.clone())
+                .danger_accept_invalid_certs(config.accept_invalid_certs)
+                .redirect(pin_redirect_policy(
+                    ssrf_screened_base_policy(TOR_REDIRECT_LIMIT),
+                    config.policy.clone(),
+                ));
+            if let Some(address) = config.local_address {
+                builder = builder.local_address(address);
+            }
+            if let Some(interface) = &config.network_interface {
+                builder = builder.interface(interface);
+            }
+            if let Some(resolver) = &config.dns_resolver {
+                builder = builder.dns_resolver(resolver.clone());
+            }
+            if let Some(jar) = &config.cookie_jar {
+                builder = builder.cookie_provider(jar.clone());
+            }
+            if let Some(endpoint) = endpoint {
+                let proxy = reqwest::Proxy::all(endpoint)
+                    .map_err(|_| TransportError::InvalidProxy("proxy URL rejected".into()))?;
+                builder = builder.proxy(proxy);
+            } else if let TransportPolicy::Tor(tor) = &config.policy {
+                #[cfg(feature = "tor")]
+                {
+                    let proxy = reqwest::Proxy::all(tor.endpoint()).map_err(|_| {
+                        TransportError::ProxyBuildFailed("Tor proxy rejected".into())
+                    })?;
+                    builder = builder.no_proxy().proxy(proxy);
+                }
+                #[cfg(not(feature = "tor"))]
+                {
+                    let _ = tor;
+                    return Err(TransportError::TorNotCompiled);
+                }
+            }
+            clients.push(
+                builder
+                    .build()
+                    .map_err(|error| TransportError::RequestExecutionFailed(error.to_string()))?,
+            );
+        }
+        Ok(Self {
+            policy: config.policy,
+            clients: clients.into(),
+            next_client: AtomicUsize::new(0),
+        })
+    }
+
+    pub async fn execute(
+        &self,
+        request: CrawlerRequest,
+    ) -> Result<crate::CrawlerResponse, crate::CrawlerFailure> {
+        validate_target(&request.url, &self.policy).map_err(|error| {
+            crate::CrawlerFailure::with_source(
+                crate::CrawlerFailureKind::Request,
+                crate::BackendProvenance::Reqwest,
+                error,
+            )
+        })?;
+        let index = self.next_client.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        let mut headers = request.headers;
+        request.secret_headers.apply_to(&mut headers);
+        let mut builder = self.clients[index]
+            .request(request.method, request.url)
+            .headers(headers);
+        if let Some(content_type) = request.content_type {
+            builder = builder.header(reqwest::header::CONTENT_TYPE, content_type);
+        }
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+        }
+        let response = ACQUISITION_TRANSPORT_SCOPE
+            .scope(acquisition_transport_for(&self.policy), builder.send())
+            .await
+            .map_err(crate::crawler_outcome::from_reqwest_error)?;
+        Ok(crate::crawler_outcome::from_reqwest_response(
+            response,
+            acquisition_transport_for(&self.policy),
+        ))
+    }
+}
 
 /// Stable, wire/user-facing transport intent — deliberately **not** the
 /// same shape as [`TransportPolicy`]. `TransportPolicy` is Spider's
@@ -1611,6 +1807,126 @@ mod tests {
             .await
             .unwrap_err();
             assert!(matches!(error, TransportError::RequestExecutionFailed(_)));
+        }
+    }
+
+    mod resolved_executor {
+        use super::super::*;
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[test]
+        fn invalid_proxy_fails_resolution_without_direct_fallback() {
+            let result = ResolvedExecutor::resolve(CrawlerTransportConfiguration {
+                proxies: vec!["not a proxy URL".into()],
+                ..Default::default()
+            });
+            assert!(matches!(result, Err(TransportError::InvalidProxy(_))));
+        }
+
+        #[tokio::test]
+        async fn persistent_session_reuses_connection_and_cookie_jar() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut observed_cookie = false;
+                for attempt in 0..2 {
+                    let mut request = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        socket.read_exact(&mut byte).await.unwrap();
+                        request.push(byte[0]);
+                    }
+                    if attempt == 1 {
+                        observed_cookie = String::from_utf8_lossy(&request)
+                            .to_ascii_lowercase()
+                            .contains("cookie: seam=continuity");
+                    }
+                    let cookie = if attempt == 0 {
+                        "Set-Cookie: seam=continuity; Path=/\r\n"
+                    } else {
+                        ""
+                    };
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\n{cookie}Content-Length: 1\r\nConnection: keep-alive\r\n\r\nx"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                }
+                observed_cookie
+            });
+            let jar = Arc::new(reqwest::cookie::Jar::default());
+            let executor = ResolvedExecutor::resolve(CrawlerTransportConfiguration {
+                cookie_jar: Some(jar),
+                ..Default::default()
+            })
+            .unwrap();
+            let url = url::Url::parse(&format!("http://{address}/")).unwrap();
+            for _ in 0..2 {
+                let mut response = executor
+                    .execute(CrawlerRequest::get(url.clone()))
+                    .await
+                    .unwrap();
+                while response.body.next().await.is_some() {}
+            }
+            assert!(
+                server.await.unwrap(),
+                "second request must reuse session cookies"
+            );
+        }
+
+        #[tokio::test]
+        async fn configured_proxies_rotate_inside_executor() {
+            async fn proxy(marker: &'static [u8]) -> (String, tokio::task::JoinHandle<()>) {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let task = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = [0_u8; 2048];
+                    let _ = socket.read(&mut request).await.unwrap();
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                marker.len(),
+                                String::from_utf8_lossy(marker)
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                });
+                (format!("http://{address}"), task)
+            }
+
+            let (first, first_task) = proxy(b"one").await;
+            let (second, second_task) = proxy(b"two").await;
+            let executor = ResolvedExecutor::resolve(CrawlerTransportConfiguration {
+                proxies: vec![first, second],
+                ..Default::default()
+            })
+            .unwrap();
+            let target = url::Url::parse("http://example.invalid/resource").unwrap();
+            let mut bodies = Vec::new();
+            for _ in 0..2 {
+                let mut response = executor
+                    .execute(CrawlerRequest::get(target.clone()))
+                    .await
+                    .unwrap();
+                let mut body = Vec::new();
+                while let Some(chunk) = response.body.next().await {
+                    body.extend_from_slice(&chunk.unwrap());
+                }
+                bodies.push(body);
+            }
+            assert_eq!(bodies, [b"one".to_vec(), b"two".to_vec()]);
+            first_task.await.unwrap();
+            second_task.await.unwrap();
         }
     }
 }

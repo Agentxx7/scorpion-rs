@@ -7454,6 +7454,208 @@ pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageRespo
     fetch_page_html_raw_base(target_url, client, false, None, None, None).await
 }
 
+/// Canonical crawler acquisition through the leaf-owned executor. This
+/// consumes the backend-neutral stream and never borrows a raw client.
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+pub async fn fetch_page_html_with_executor(
+    target_url: &str,
+    executor: &spider_transport::ResolvedExecutor,
+) -> PageResponse {
+    let url = match Url::parse(target_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return PageResponse {
+                status_code: StatusCode::BAD_REQUEST,
+                ..Default::default()
+            };
+        }
+    };
+    let response = match executor
+        .execute(spider_transport::CrawlerRequest::get(url))
+        .await
+    {
+        Ok(response) => response,
+        Err(failure) => {
+            let status_code = match failure.kind() {
+                spider_transport::CrawlerFailureKind::Timeout => {
+                    *crate::page::CONNECTION_TIMEOUT_ERROR
+                }
+                spider_transport::CrawlerFailureKind::Dns
+                | spider_transport::CrawlerFailureKind::TlsHandshake
+                | spider_transport::CrawlerFailureKind::ConnectionUnreachable => {
+                    *crate::page::ADDRESS_UNREACHABLE_ERROR
+                }
+                spider_transport::CrawlerFailureKind::ConnectionRefused => {
+                    *crate::page::CONNECTION_REFUSED_ERROR
+                }
+                spider_transport::CrawlerFailureKind::ConnectionAborted => {
+                    *crate::page::CONNECTION_ABORTED_ERROR
+                }
+                spider_transport::CrawlerFailureKind::ConnectionReset => {
+                    *crate::page::CONNECTION_RESET_ERROR
+                }
+                _ => *crate::page::UNREACHABLE_REQUEST_ERROR,
+            };
+            return PageResponse {
+                status_code,
+                observed_status_code: failure.observed_status(),
+                failure: Some(failure),
+                ..Default::default()
+            };
+        }
+    };
+    page_response_from_crawler_response(target_url, response).await
+}
+
+#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+async fn page_response_from_crawler_response(
+    target_url: &str,
+    mut response: spider_transport::CrawlerResponse,
+) -> PageResponse {
+    let status = response.status;
+    let headers = response.headers;
+    let final_url =
+        (response.final_url.as_str() != target_url).then(|| response.final_url.to_string());
+    let mut content = Vec::new();
+    let mut failure = None;
+    let limit = *MAX_SIZE_BYTES;
+    let mut content_truncated = false;
+    while let Some(chunk) = response.body.next().await {
+        match chunk {
+            Ok(chunk) => {
+                let remaining = if limit == 0 {
+                    chunk.len()
+                } else {
+                    limit.saturating_sub(content.len()).min(chunk.len())
+                };
+                content.extend_from_slice(&chunk[..remaining]);
+                if remaining != chunk.len() {
+                    content_truncated = true;
+                    break;
+                }
+            }
+            Err(error) => {
+                failure = Some(error);
+                content_truncated = true;
+                break;
+            }
+        }
+    }
+    let is_valid_utf8 = Some(simdutf8::basic::from_utf8(&content).is_ok());
+    PageResponse {
+        content: Some(content),
+        origin: AcquisitionOrigin::Network,
+        retrieved_at: unix_epoch_millis_now(),
+        headers: Some(headers),
+        status_code: status,
+        observed_status_code: Some(status),
+        final_url,
+        failure,
+        content_truncated,
+        is_valid_utf8,
+        ..Default::default()
+    }
+}
+
+/// Fetch a bounded byte representation through a pre-resolved mode. Canonical
+/// callers use the neutral executor stream; raw-client execution is retained
+/// here only for explicitly noncanonical/compatibility modes.
+#[cfg(all(
+    feature = "sitemap",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+pub(crate) async fn fetch_bytes_for_mode(
+    target_url: &str,
+    executor: Option<&spider_transport::ResolvedExecutor>,
+    compatibility_client: &Client,
+    limit: usize,
+) -> Result<(StatusCode, bytes::Bytes), spider_transport::CrawlerFailure> {
+    if let Some(executor) = executor {
+        let url = Url::parse(target_url).map_err(|error| {
+            spider_transport::CrawlerFailure::with_source(
+                spider_transport::CrawlerFailureKind::Request,
+                spider_transport::BackendProvenance::Reqwest,
+                error,
+            )
+        })?;
+        let mut response = executor
+            .execute(spider_transport::CrawlerRequest::get(url))
+            .await?;
+        let status = response.status;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.body.next().await {
+            let chunk = chunk?;
+            if limit > 0 && bytes.len().saturating_add(chunk.len()) > limit {
+                return Err(spider_transport::CrawlerFailure::new(
+                    spider_transport::CrawlerFailureKind::BodyStream,
+                    spider_transport::BackendProvenance::Reqwest,
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok((status, bytes.into()));
+    }
+    let response = compatibility_client
+        .get(target_url)
+        .send()
+        .await
+        .map_err(spider_transport::crawler_outcome::from_reqwest_error)?;
+    let status = response.status();
+    if limit > 0
+        && response
+            .content_length()
+            .is_some_and(|length| length >= limit as u64)
+    {
+        return Err(spider_transport::CrawlerFailure::new(
+            spider_transport::CrawlerFailureKind::BodyStream,
+            spider_transport::BackendProvenance::UpstreamCompatibility,
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(spider_transport::crawler_outcome::from_reqwest_error)?;
+    Ok((status, bytes))
+}
+
+#[cfg(all(feature = "sitemap", any(feature = "wreq", feature = "cache_request")))]
+pub(crate) async fn fetch_bytes_for_mode(
+    target_url: &str,
+    _executor: Option<&spider_transport::ResolvedExecutor>,
+    compatibility_client: &Client,
+    limit: usize,
+) -> Result<(StatusCode, bytes::Bytes), spider_transport::CrawlerFailure> {
+    let response = compatibility_client
+        .get(target_url)
+        .send()
+        .await
+        .map_err(|_| {
+            spider_transport::CrawlerFailure::new(
+                spider_transport::CrawlerFailureKind::Request,
+                spider_transport::BackendProvenance::UpstreamCompatibility,
+            )
+        })?;
+    let status = response.status();
+    if limit > 0
+        && response
+            .content_length()
+            .is_some_and(|length| length >= limit as u64)
+    {
+        return Err(spider_transport::CrawlerFailure::new(
+            spider_transport::CrawlerFailureKind::BodyStream,
+            spider_transport::BackendProvenance::UpstreamCompatibility,
+        ));
+    }
+    let bytes = response.bytes().await.map_err(|_| {
+        spider_transport::CrawlerFailure::new(
+            spider_transport::CrawlerFailureKind::BodyStream,
+            spider_transport::BackendProvenance::UpstreamCompatibility,
+        )
+    })?;
+    Ok((status, bytes))
+}
+
 /// Same as [`fetch_page_html_raw`] but arms the HTTP first-byte
 /// watchdog: each `req.send()` is wrapped in
 /// `tokio::time::timeout(base + rand(0..jitter))`. On timeout the
@@ -7545,6 +7747,82 @@ pub async fn fetch_page_html_raw_conditional(
 
     set_page_response_duration(&mut page_response, duration);
     page_response
+}
+
+#[cfg(all(
+    feature = "etag_cache",
+    not(feature = "wreq"),
+    not(feature = "cache_request")
+))]
+/// Execute an ETag/Last-Modified request through the pre-resolved crawl mode.
+pub async fn fetch_page_html_conditional_for_mode(
+    target_url: &str,
+    executor: Option<&spider_transport::ResolvedExecutor>,
+    compatibility_client: &Client,
+    etag_cache: &crate::utils::etag_cache::ETagCache,
+) -> PageResponse {
+    let Some(executor) = executor else {
+        return fetch_page_html_raw_conditional(target_url, compatibility_client, etag_cache).await;
+    };
+    use reqwest::header::{HeaderName, HeaderValue};
+    let url = match Url::parse(target_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return PageResponse {
+                status_code: StatusCode::BAD_REQUEST,
+                ..Default::default()
+            }
+        }
+    };
+    let mut request = spider_transport::CrawlerRequest::get(url);
+    for (name, value) in etag_cache.conditional_headers(target_url) {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value.as_str()),
+        ) {
+            request.headers.insert(name, value);
+        }
+    }
+    match executor.execute(request).await {
+        Ok(response) if response.status == StatusCode::NOT_MODIFIED => PageResponse {
+            status_code: StatusCode::NOT_MODIFIED,
+            observed_status_code: Some(StatusCode::NOT_MODIFIED),
+            final_url: Some(target_url.to_string()),
+            ..Default::default()
+        },
+        Ok(response) => {
+            let etag = response
+                .headers
+                .get("etag")
+                .and_then(|value| value.to_str().ok());
+            let modified = response
+                .headers
+                .get("last-modified")
+                .and_then(|value| value.to_str().ok());
+            etag_cache.store(target_url, etag, modified);
+            page_response_from_crawler_response(target_url, response).await
+        }
+        Err(failure) => PageResponse {
+            status_code: *crate::page::UNREACHABLE_REQUEST_ERROR,
+            observed_status_code: failure.observed_status(),
+            failure: Some(failure),
+            ..Default::default()
+        },
+    }
+}
+
+#[cfg(all(
+    feature = "etag_cache",
+    any(feature = "wreq", feature = "cache_request")
+))]
+/// Explicitly noncanonical conditional-request fallback for alternate backends.
+pub async fn fetch_page_html_conditional_for_mode(
+    target_url: &str,
+    _executor: Option<&spider_transport::ResolvedExecutor>,
+    compatibility_client: &Client,
+    etag_cache: &crate::utils::etag_cache::ETagCache,
+) -> PageResponse {
+    fetch_page_html_raw_conditional(target_url, compatibility_client, etag_cache).await
 }
 
 /// Perform a network request to a resource and return a cached response immediately when available.

@@ -1336,3 +1336,49 @@ fn scanner_detects_backend_error_leakage_into_canonical_page_contract() {
         "pub failure: Option<spider_transport::CrawlerFailure>"
     ));
 }
+
+#[test]
+fn canonical_crawler_transport_execution_is_executor_owned() {
+    let root = workspace_root();
+    let website = fs::read_to_string(root.join("spider/src/website.rs")).unwrap();
+    let page = fs::read_to_string(root.join("spider/src/page.rs")).unwrap();
+    let transport = fs::read_to_string(root.join("spider_transport/src/transport.rs")).unwrap();
+    assert!(website.contains("resolved_executor: Option<Arc<ResolvedExecutor>>"));
+    assert!(website.contains("prepare_execution"));
+    assert!(!website.contains("Page::new_page_streaming("));
+    assert!(!website.contains("Page::new_page_with_cache("));
+    assert!(!website.contains("fetch_page_html_raw_conditional("));
+    assert!(!website.contains("struct ClientRotator"));
+    assert!(website.contains("struct NoncanonicalClientRotator"));
+    assert!(page.contains("new_page_streaming_for_mode"));
+    assert!(transport.contains("next_client.fetch_add"));
+    assert!(!transport.contains("pub fn client("));
+    assert!(!transport.contains("CrawlerExecutionError"));
+}
+
+#[test]
+fn scanner_rejects_synthetic_raw_client_reintroductions() {
+    fn rejects(source: &str) -> bool {
+        [
+            "Page::new_page(",
+            "Page::new_page_streaming(",
+            "Page::new_page_with_cache(",
+            "fetch_page_html_raw_conditional(",
+            "set_http_client(",
+            "get_client(",
+            "struct ClientRotator",
+        ]
+        .iter()
+        .any(|forbidden| source.contains(forbidden))
+    }
+    for fixture in [
+        "Page::new_page(url, &client).await;",
+        "Page::new_page_streaming(url, client, false).await;",
+        "website.set_http_client(client);",
+        "let client = website.get_client();",
+        "struct ClientRotator { clients: Vec<Client> }",
+    ] {
+        assert!(rejects(fixture), "negative fixture escaped: {fixture}");
+    }
+    assert!(!rejects("executor.execute(CrawlerRequest::get(url)).await"));
+}

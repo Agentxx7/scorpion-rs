@@ -379,6 +379,57 @@ impl RobotFileParser {
         }
     }
 
+    /// Read through the canonical request-only executor.
+    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    pub async fn read_with_executor(
+        &mut self,
+        executor: &spider_transport::ResolvedExecutor,
+        url: &str,
+    ) {
+        use crate::tokio_stream::StreamExt;
+        use reqwest::StatusCode;
+        self.modified();
+        let target = match url::Url::parse(&string_concat!(url, "robots.txt")) {
+            Ok(target) => target,
+            Err(_) => return,
+        };
+        let mut response = match executor
+            .execute(spider_transport::CrawlerRequest::get(target))
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => return,
+        };
+        match response.status {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                self.disallow_all = true;
+            }
+            status
+                if status >= StatusCode::BAD_REQUEST
+                    && status < StatusCode::INTERNAL_SERVER_ERROR =>
+            {
+                self.allow_all = true;
+            }
+            StatusCode::OK => {
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response.body.next().await {
+                    match chunk {
+                        Ok(chunk) => bytes.extend_from_slice(&chunk),
+                        Err(_) => {
+                            self.allow_all = true;
+                            return;
+                        }
+                    }
+                }
+                match String::from_utf8(bytes) {
+                    Ok(text) => self.parse_str(&text),
+                    Err(_) => self.allow_all = true,
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Reads the HTTP response and feeds it to the parser.
     pub async fn from_response(&mut self, response: crate::client::Response) {
         match response.text().await {

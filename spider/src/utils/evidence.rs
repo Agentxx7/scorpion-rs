@@ -342,11 +342,18 @@ pub async fn fetch_single_page_with_options(
     not(feature = "cache_request")
 ))]
 async fn fetch_via_tor(url: &str, policy: &TransportPolicy) -> Result<Page, String> {
-    let client = transport::build_tor_client(policy).map_err(|error| error.to_string())?;
+    let executor = spider_transport::ResolvedExecutor::resolve(
+        spider_transport::CrawlerTransportConfiguration {
+            policy: policy.clone(),
+            user_agent: crate::configuration::get_ua(false).to_string(),
+            ..Default::default()
+        },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(transport::ACQUISITION_TRANSPORT_SCOPE
         .scope(
             transport::AcquisitionTransport::Tor,
-            Page::new_page(url, &client),
+            Page::new_page_with_executor(url, &executor),
         )
         .await)
 }

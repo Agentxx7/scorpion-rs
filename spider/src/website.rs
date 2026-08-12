@@ -23,6 +23,7 @@ use crate::utils::{
     get_path_from_url, get_semaphore, networking_capable, prepare_url, setup_website_selectors,
     spawn_set, AllowedDomainTypes,
 };
+use spider_transport::{ExecutionMode, ResolvedExecutor};
 
 /// Run a future with an optional hard wall-clock timeout.
 /// When `timeout` is `None`, the future runs without any timer overhead.
@@ -1322,12 +1323,12 @@ impl OnShouldCrawlCallback {
 /// Round-robin client rotator for proxy rotation.
 /// Each client is built with a single proxy, and `next()` cycles through them.
 #[derive(Clone)]
-pub struct ClientRotator {
+pub struct NoncanonicalClientRotator {
     clients: Vec<Client>,
     index: Arc<AtomicUsize>,
 }
 
-impl ClientRotator {
+impl NoncanonicalClientRotator {
     /// Create a new rotator from a list of clients.
     pub fn new(clients: Vec<Client>) -> Self {
         Self {
@@ -1414,6 +1415,10 @@ pub struct Website {
     /// [`crate::fetch_engine::HttpFetchEngine::should_fetch`]. Default `None`
     /// keeps every fetch site on spider's reqwest path.
     pub fetch_engine: Option<crate::fetch_engine::SharedHttpFetchEngine>,
+    /// Execution authority resolved once before crawl execution.
+    execution_mode: Option<ExecutionMode>,
+    /// Persistent canonical transport executor. Raw clients never leave it.
+    resolved_executor: Option<Arc<ResolvedExecutor>>,
     /// Optional per-request proxy routing strategy.
     ///
     /// When set together with [`crate::configuration::Configuration::proxies_by_kind`],
@@ -1482,7 +1487,7 @@ pub struct Website {
     /// The request client. Stored for re-use between runs.
     client: Option<Client>,
     /// Round-robin client rotator for proxy rotation. Built when 2+ proxies are configured.
-    client_rotator: Option<Arc<ClientRotator>>,
+    noncanonical_client_rotator: Option<Arc<NoncanonicalClientRotator>>,
     /// Explicit reason the most recent `tor_crawl_preflight` rejected a
     /// `TransportPolicy::Tor` crawl (an unaudited combination — see that
     /// method), if any. `None` both before any Tor crawl attempt and
@@ -1638,6 +1643,129 @@ impl Drop for ProxyDnsAbortGuard {
 }
 
 impl Website {
+    /// Resolve the crawl's execution authority before any target request.
+    fn resolve_execution_mode(&mut self) -> ExecutionMode {
+        let mode = if self.remote_fetcher.is_some() {
+            ExecutionMode::NoncanonicalRemoteFetcher
+        } else if self.fetch_engine.is_some() {
+            ExecutionMode::NoncanonicalHttpFetchEngine
+        } else {
+            ExecutionMode::Canonical
+        };
+        self.execution_mode = Some(mode);
+        mode
+    }
+
+    fn prepare_execution(&mut self) -> bool {
+        let mode = self.resolve_execution_mode();
+        if mode != ExecutionMode::Canonical {
+            return true;
+        }
+        match self.resolve_canonical_executor() {
+            Ok(_) => true,
+            Err(error) => {
+                self.last_transport_error = Some(error);
+                self.status = CrawlStatus::Invalid;
+                false
+            }
+        }
+    }
+
+    pub(crate) fn rebuild_execution_resources(&mut self) {
+        self.resolved_executor = None;
+        if self.execution_mode == Some(ExecutionMode::Canonical) {
+            if let Err(error) = self.resolve_canonical_executor() {
+                self.last_transport_error = Some(error);
+                self.status = CrawlStatus::Invalid;
+            }
+        } else {
+            self.client = Some(self.configure_http_client());
+        }
+    }
+
+    #[cfg(all(
+        not(feature = "decentralized"),
+        not(feature = "wreq"),
+        not(feature = "cache_request")
+    ))]
+    fn resolve_canonical_executor(
+        &mut self,
+    ) -> Result<Arc<ResolvedExecutor>, spider_transport::TransportError> {
+        if let Some(executor) = &self.resolved_executor {
+            return Ok(executor.clone());
+        }
+        let timeout_mult = if self.configuration.proxies.is_some() {
+            2
+        } else {
+            1
+        };
+        let proxies = self
+            .configuration
+            .proxies
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|proxy| proxy.ignore != crate::configuration::ProxyIgnore::Http)
+            .map(|proxy| proxy.addr.clone())
+            .collect();
+        let user_agent = self
+            .configuration
+            .user_agent
+            .as_deref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| get_ua(self.configuration.only_chrome_agent()).to_string());
+        let default_headers = self
+            .configuration
+            .headers
+            .as_deref()
+            .map(|headers| headers.inner().clone())
+            .unwrap_or_default();
+        #[cfg(feature = "dns_cache")]
+        let dns_resolver =
+            Some(crate::utils::dns_cache::shared_dns_cache() as Arc<dyn reqwest::dns::Resolve>);
+        #[cfg(not(feature = "dns_cache"))]
+        let dns_resolver = None;
+        #[cfg(feature = "cookies")]
+        let cookie_jar = Some(self.cookie_jar.clone());
+        #[cfg(not(feature = "cookies"))]
+        let cookie_jar = None;
+        let executor = Arc::new(ResolvedExecutor::resolve(
+            spider_transport::CrawlerTransportConfiguration {
+                policy: self.configuration.transport_policy.clone(),
+                user_agent,
+                default_headers,
+                proxies,
+                request_timeout: self
+                    .configuration
+                    .request_timeout
+                    .unwrap_or(Duration::from_secs(30 * timeout_mult)),
+                connect_timeout: self
+                    .configuration
+                    .default_http_connect_timeout
+                    .unwrap_or(Duration::from_secs(24 * timeout_mult)),
+                read_timeout: self
+                    .configuration
+                    .default_http_read_timeout
+                    .unwrap_or(Duration::from_secs(42 * timeout_mult)),
+                accept_invalid_certs: self.configuration.accept_invalid_certs,
+                local_address: self.configuration.local_address,
+                network_interface: self.configuration.network_interface.clone(),
+                dns_resolver,
+                cookie_jar,
+            },
+        )?);
+        self.resolved_executor = Some(executor.clone());
+        Ok(executor)
+    }
+
+    #[cfg(any(feature = "decentralized", feature = "wreq", feature = "cache_request"))]
+    fn resolve_canonical_executor(
+        &mut self,
+    ) -> Result<Arc<ResolvedExecutor>, spider_transport::TransportError> {
+        Err(spider_transport::TransportError::IncompatibleConfiguration(
+            "canonical ResolvedExecutor requires the reqwest crawler backend; wreq, cache_request, and decentralized modes are explicitly noncanonical".into(),
+        ))
+    }
     /// Lazily create (or return the already-initialized) per-website spool
     /// directory.  First call allocates the [`tempfile::TempDir`];
     /// subsequent calls are a single atomic load + `Arc` clone, no locks.
@@ -2600,7 +2728,9 @@ impl Website {
         self.extra_links.clear();
     }
 
-    /// Get the HTTP request client. The client is set after the crawl has started.
+    /// EXPLICIT_UPSTREAM_COMPATIBILITY_BOUNDARY: obtain the legacy client.
+    /// Canonical Website execution never calls this method.
+    #[deprecated(note = "raw-client compatibility only; canonical crawls use ResolvedExecutor")]
     pub fn get_client(&self) -> &Option<Client> {
         &self.client
     }
@@ -2791,7 +2921,9 @@ impl Website {
     /// another.
     pub fn with_transport(&mut self, policy: TransportPolicy) -> &mut Self {
         self.client = None;
-        self.client_rotator = None;
+        self.noncanonical_client_rotator = None;
+        self.resolved_executor = None;
+        self.execution_mode = None;
         self.configuration.transport_policy = policy;
         self
     }
@@ -2856,7 +2988,7 @@ impl Website {
     ///   ([`crate::features::transport::build_tor_client`] — the same
     ///   primitive the one-shot seam uses) and stores it in `self.client`
     ///   so the *existing* `setup_base()`/`setup()` machinery picks it up
-    ///   via its own `self.client.take()` branch — no duplicate client
+    ///   via its isolated compatibility-client branch — no duplicate client
     ///   construction, no change to `crawl_concurrent_raw`'s signature.
     ///   Returns `Ok(true)`.
     /// - Any incompatibility: `Err(reason)`, with zero client construction
@@ -2895,7 +3027,7 @@ impl Website {
                 "legacy proxy lists / proxy rotation cannot be combined with Tor".to_string(),
             ));
         }
-        if self.client_rotator.is_some() {
+        if self.noncanonical_client_rotator.is_some() {
             return Err(TransportError::IncompatibleConfiguration(
                 "client rotation cannot be combined with Tor".to_string(),
             ));
@@ -3074,13 +3206,21 @@ impl Website {
                 };
 
                 if !host_str.is_empty() {
-                    if host_str.ends_with('/') {
-                        robot_file_parser.read(client, host_str).await;
+                    let base = if host_str.ends_with('/') {
+                        host_str.to_string()
                     } else {
-                        robot_file_parser
-                            .read(client, &string_concat!(host_str, "/"))
-                            .await;
+                        string_concat!(host_str, "/")
+                    };
+                    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+                    if self.execution_mode == Some(ExecutionMode::Canonical) {
+                        if let Some(executor) = self.resolved_executor.as_deref() {
+                            robot_file_parser.read_with_executor(executor, &base).await;
+                        }
+                    } else {
+                        robot_file_parser.read(client, &base).await;
                     }
+                    #[cfg(any(feature = "wreq", feature = "cache_request"))]
+                    robot_file_parser.read(client, &base).await;
                 }
                 if let Some(delay) =
                     robot_file_parser.get_crawl_delay(&self.configuration.user_agent)
@@ -3646,7 +3786,9 @@ impl Website {
         client
     }
 
-    /// Set the HTTP client to use directly. This is helpful if you manually call 'website.configure_http_client' before the crawl.
+    /// EXPLICIT_UPSTREAM_COMPATIBILITY_BOUNDARY: install a client for an
+    /// explicitly noncanonical or upstream compatibility consumer.
+    #[deprecated(note = "raw-client compatibility only; canonical crawls use ResolvedExecutor")]
     pub fn set_http_client(&mut self, client: Client) -> &Option<Client> {
         self.client = Some(client);
         &self.client
@@ -3825,7 +3967,7 @@ impl Website {
 
     /// Build rotated clients from the proxy list. Returns None if fewer than 2 proxies.
     #[cfg(not(feature = "decentralized"))]
-    fn build_rotated_clients(&self) -> Option<Arc<ClientRotator>> {
+    fn build_rotated_clients(&self) -> Option<Arc<NoncanonicalClientRotator>> {
         let proxies = self.configuration.proxies.as_ref()?;
         if proxies.len() < 2 {
             return None;
@@ -3837,7 +3979,7 @@ impl Website {
         if clients.len() < 2 {
             return None;
         }
-        Some(Arc::new(ClientRotator::new(clients)))
+        Some(Arc::new(NoncanonicalClientRotator::new(clients)))
     }
 
     /// Configure http client.
@@ -4324,14 +4466,25 @@ impl Website {
 
         crate::utils::connect::init_background_runtime();
 
-        let client = match self.client.take() {
-            Some(client) => client,
-            _ => self.configure_http_client(),
+        let client = if self.execution_mode == Some(ExecutionMode::Canonical) {
+            // Compatibility placeholder for browser/noncanonical helper
+            // signatures. Canonical Page execution never consults it.
+            self.configure_http_client()
+        } else {
+            self.client
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.configure_http_client())
         };
 
         #[cfg(not(feature = "decentralized"))]
         {
-            self.client_rotator = self.build_rotated_clients();
+            self.noncanonical_client_rotator =
+                if self.execution_mode == Some(ExecutionMode::Canonical) {
+                    None
+                } else {
+                    self.build_rotated_clients()
+                };
         }
 
         // Prefetch proxy hostnames + start adaptive background refresh.
@@ -4668,6 +4821,7 @@ impl Website {
         if self.skip_initial {
             return Default::default();
         }
+        let resolved_executor = self.resolved_executor.clone();
 
         if self
             .is_allowed_default(self.get_base_link())
@@ -4734,8 +4888,9 @@ impl Website {
                 }
                 seeded_page
             } else {
-                Page::new_page_streaming_engine(
+                Page::new_page_streaming_for_mode(
                     url,
+                    resolved_executor.as_deref(),
                     client,
                     false,
                     base,
@@ -4829,8 +4984,9 @@ impl Website {
                     let mut domain_parsed_clone = self.domain_parsed.clone();
 
                     if let Err(elapsed) = tokio::time::timeout(BACKOFF_MAX_DURATION, async {
-                        page = Page::new_page_streaming_engine(
+                        page = Page::new_page_streaming_for_mode(
                             url,
+                            resolved_executor.as_deref(),
                             client,
                             false,
                             base,
@@ -4857,8 +5013,9 @@ impl Website {
 
                     self.domain_parsed = domain_parsed_clone;
                 } else {
-                    page = Page::new_page_streaming_engine(
+                    page = Page::new_page_streaming_for_mode(
                         url,
+                        resolved_executor.as_deref(),
                         client,
                         false,
                         base,
@@ -6397,12 +6554,13 @@ impl Website {
         {
             let link = self.url.inner();
 
-            let mut page = Page::new_page_with_cache(
+            let mut page = Page::new_page_for_mode(
                 &if http_worker && link.starts_with("https") {
                     link.replacen("https", "http", 1)
                 } else {
                     link.to_string()
                 },
+                None,
                 &client,
                 self.configuration.get_cache_options(),
                 &self.configuration.cache_policy,
@@ -6471,12 +6629,13 @@ impl Website {
                 continue;
             }
 
-            let mut page = Page::new_page_with_cache(
+            let mut page = Page::new_page_for_mode(
                 &if http_worker && link.as_ref().starts_with("https") {
                     link.inner().replacen("https", "http", 1)
                 } else {
                     link.inner().to_string()
                 },
+                None,
                 client,
                 self.configuration.get_cache_options(),
                 &self.configuration.cache_policy,
@@ -6625,6 +6784,7 @@ impl Website {
         if self.skip_initial {
             return Default::default();
         }
+        let resolved_executor = self.resolved_executor.clone();
         let mut links: HashSet<CaseInsensitiveString> = HashSet::with_capacity(32);
         let domain_name = self.url.inner();
         let expanded = self.get_expanded_links(domain_name.as_str());
@@ -6668,8 +6828,9 @@ impl Website {
 
                 let mut domain_parsed = self.domain_parsed.take();
 
-                let mut page = Page::new_page_streaming_engine(
+                let mut page = Page::new_page_streaming_for_mode(
                     &url,
+                    resolved_executor.as_deref(),
                     client,
                     false,
                     base,
@@ -6755,8 +6916,9 @@ impl Website {
                         let mut domain_parsed_clone = self.domain_parsed.clone();
 
                         if let Err(elapsed) = tokio::time::timeout(BACKOFF_MAX_DURATION, async {
-                            page = Page::new_page_streaming_engine(
+                            page = Page::new_page_streaming_for_mode(
                                 &url,
+                                resolved_executor.as_deref(),
                                 client,
                                 false,
                                 base,
@@ -6781,8 +6943,9 @@ impl Website {
 
                         self.domain_parsed = domain_parsed_clone;
                     } else {
-                        page = Page::new_page_streaming_engine(
+                        page = Page::new_page_streaming_for_mode(
                             &url,
+                            resolved_executor.as_deref(),
                             client,
                             false,
                             base,
@@ -6861,6 +7024,7 @@ impl Website {
         if self.skip_initial {
             return Default::default();
         }
+        let resolved_executor = self.resolved_executor.clone();
 
         let links: HashSet<CaseInsensitiveString> = if self
             .is_allowed_default(self.get_base_link())
@@ -6871,8 +7035,9 @@ impl Website {
             let mut page = if let Some(seeded_page) = self.build_seed_page() {
                 seeded_page
             } else {
-                Page::new_page_with_cache(
+                Page::new_page_for_mode(
                     url,
+                    resolved_executor.as_deref(),
                     client,
                     self.configuration.get_cache_options(),
                     &self.configuration.cache_policy,
@@ -6957,8 +7122,9 @@ impl Website {
                             .await;
                             chrome_attempted = true;
                         } else {
-                            let next_page = Page::new_page_with_cache(
+                            let next_page = Page::new_page_for_mode(
                                 url,
+                                resolved_executor.as_deref(),
                                 client,
                                 self.configuration.get_cache_options(),
                                 &self.configuration.cache_policy,
@@ -6984,8 +7150,9 @@ impl Website {
                     .await;
                     chrome_attempted = true;
                 } else {
-                    page = Page::new_page_with_cache(
+                    page = Page::new_page_for_mode(
                         url,
+                        resolved_executor.as_deref(),
                         client,
                         self.configuration.get_cache_options(),
                         &self.configuration.cache_policy,
@@ -7639,6 +7806,9 @@ impl Website {
                 crate::features::transport::ACQUISITION_TRANSPORT_SCOPE
                     .scope(acquisition_transport, async {
                         self.start();
+                        if !self.prepare_execution() {
+                            return;
+                        }
                         if self.try_cache_shortcircuit().await {
                             self.set_crawl_status();
                             return;
@@ -7700,6 +7870,9 @@ impl Website {
         let __body = async {
             if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
+                if !self.prepare_execution() {
+                    return;
+                }
                 if self.try_cache_shortcircuit().await {
                     self.set_crawl_status();
                     return;
@@ -7775,6 +7948,9 @@ impl Website {
         }
         self.status = CrawlStatus::Active;
         self.start();
+        if !self.prepare_execution() {
+            return;
+        }
         self.setup().await;
         self.configuration.configure_allowlist();
         self.send_configured = true;
@@ -7788,6 +7964,9 @@ impl Website {
         }
         self.status = CrawlStatus::Active;
         self.start();
+        if !self.prepare_execution() {
+            return;
+        }
         self.setup_base();
         self.configuration.configure_allowlist();
         self.send_configured = true;
@@ -7944,6 +8123,9 @@ impl Website {
         let __body = async {
             if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
+                if !self.prepare_execution() {
+                    return;
+                }
                 if self.try_cache_shortcircuit().await {
                     self.set_crawl_status();
                     return;
@@ -7994,6 +8176,9 @@ impl Website {
                 crate::features::transport::ACQUISITION_TRANSPORT_SCOPE
                     .scope(acquisition_transport, async {
                         self.start();
+                        if !self.prepare_execution() {
+                            return;
+                        }
                         if self.try_cache_shortcircuit().await {
                             self.set_crawl_status();
                             return;
@@ -8493,6 +8678,19 @@ impl Website {
     /// Start to crawl website concurrently - used mainly for chrome instances to connect to default raw HTTP.
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn crawl_concurrent_raw(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
+        let execution_mode = self.resolve_execution_mode();
+        let resolved_executor = if execution_mode == ExecutionMode::Canonical {
+            match self.resolve_canonical_executor() {
+                Ok(executor) => Some(executor),
+                Err(error) => {
+                    self.last_transport_error = Some(error);
+                    self.status = CrawlStatus::Invalid;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         // When a `RemoteFetcher` is installed, every per-URL fetch is
         // delegated to it instead of running spider's built-in
         // reqwest/cache/hedge/parallel-backends machinery. Spider
@@ -8527,7 +8725,11 @@ impl Website {
                 seed,
             )
         });
-        let client_rotator = self.client_rotator.clone();
+        let noncanonical_rotator = if execution_mode == ExecutionMode::Canonical {
+            None
+        } else {
+            self.noncanonical_client_rotator.clone()
+        };
         #[cfg(feature = "hedge")]
         let hedge_config = self.configuration.hedge.clone();
         #[cfg(feature = "hedge")]
@@ -8604,6 +8806,7 @@ impl Website {
                 self.on_link_find_callback.clone(),
                 self.configuration.remote_multimodal.clone(),
                 crawl_boundary.clone(),
+                resolved_executor.clone(),
             ));
 
             let mut set: JoinSet<(HashSet<CaseInsensitiveString>, Option<u64>)> = JoinSet::new();
@@ -8749,7 +8952,7 @@ impl Website {
                             if let Ok(permit) = semaphore.clone().acquire_owned().await {
                                 let shared = shared.clone();
                                 let on_should_crawl_callback = on_should_crawl_callback.clone();
-                                let rotator = client_rotator.clone();
+                                let rotator = noncanonical_rotator.clone();
                                 #[cfg(feature = "hedge")]
                                 let hedge_cfg = hedge_config.clone();
                                 #[cfg(feature = "hedge")]
@@ -8829,8 +9032,8 @@ impl Website {
                                     #[cfg(feature = "etag_cache")]
                                     if let Some(ref ec) = etag_cache_ref {
                                         if !ec.conditional_headers(target_url).is_empty() {
-                                            let cond_resp = crate::utils::fetch_page_html_raw_conditional(
-                                                target_url, &shared.0, ec,
+                                            let cond_resp = crate::utils::fetch_page_html_conditional_for_mode(
+                                                target_url, shared.12.as_deref(), &shared.0, ec,
                                             ).await;
                                             if cond_resp.status_code == StatusCode::NOT_MODIFIED {
                                                 drop(permit);
@@ -8947,15 +9150,17 @@ impl Website {
                                     #[cfg(feature = "hedge")]
                                     let (mut page, mut links, mut links_pages) = {
                                         let should_hedge = if let Some(ref hcfg) = hedge_cfg {
-                                            hcfg.enabled && rotator.as_ref().is_some_and(|r| r.len() > 1)
+                                            hcfg.enabled && (shared.12.is_some() || rotator.as_ref().is_some_and(|r| r.len() > 1))
                                         } else {
                                             false
                                         };
 
                                         if should_hedge {
                                             let hcfg = hedge_cfg.as_ref().unwrap();
-                                            let rot = rotator.as_ref().unwrap();
-                                            let (primary_client, hedge_client_opt) = rot.next_pair();
+                                            let (primary_client, hedge_client_opt) = match rotator.as_ref() {
+                                                Some(rotator) => rotator.next_pair(),
+                                                None => (&shared.0, Some(&shared.0)),
+                                            };
 
                                             if let Some(hedge_client) = hedge_client_opt {
                                                 let delay = hedge_trk.adaptive_delay(hcfg.delay);
@@ -8968,8 +9173,8 @@ impl Website {
                                                     let mut r_settings = shared.7;
                                                     r_settings.ssg_build = true;
                                                     let mut domain_parsed = None;
-                                                    let page = Page::new_page_streaming_engine(
-                                                        target_url, primary_client, only_html,
+                                                    let page = Page::new_page_streaming_for_mode(
+                                                        target_url, shared.12.as_deref(), primary_client, only_html,
                                                         &mut selectors, external_domains_caseless,
                                                         &r_settings, &mut links, None, &shared.8,
                                                         &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
@@ -8994,8 +9199,8 @@ impl Website {
                                                             let mut r_settings = shared.7;
                                                             r_settings.ssg_build = true;
                                                             let mut domain_parsed = None;
-                                                            let page = Page::new_page_streaming_engine(
-                                                                target_url, hedge_client, only_html,
+                                                            let page = Page::new_page_streaming_for_mode(
+                                                                target_url, shared.12.as_deref(), hedge_client, only_html,
                                                                 &mut selectors, external_domains_caseless,
                                                                 &r_settings, &mut links, None, &shared.8,
                                                                 &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
@@ -9034,8 +9239,8 @@ impl Website {
                                                 let mut r_settings = shared.7;
                                                 r_settings.ssg_build = true;
                                                 let mut domain_parsed = None;
-                                                let page = Page::new_page_streaming_engine(
-                                                    target_url, primary_client, only_html,
+                                                let page = Page::new_page_streaming_for_mode(
+                                                    target_url, shared.12.as_deref(), primary_client, only_html,
                                                     &mut selectors, external_domains_caseless,
                                                     &r_settings, &mut links, None, &shared.8,
                                                     &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
@@ -9059,8 +9264,8 @@ impl Website {
                                             let mut r_settings = shared.7;
                                             r_settings.ssg_build = true;
                                             let mut domain_parsed = None;
-                                            let page = Page::new_page_streaming_engine(
-                                                target_url, client, only_html,
+                                            let page = Page::new_page_streaming_for_mode(
+                                                target_url, shared.12.as_deref(), client, only_html,
                                                 &mut selectors, external_domains_caseless,
                                                 &r_settings, &mut links, None, &shared.8,
                                                 &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
@@ -9107,8 +9312,8 @@ impl Website {
                                                     let mut r_settings = shared.7;
                                                     r_settings.ssg_build = true;
                                                     let mut domain_parsed = None;
-                                                    let page = Page::new_page_streaming_engine(
-                                                        target_url, client, only_html,
+                                                    let page = Page::new_page_streaming_for_mode(
+                                                        target_url, shared.12.as_deref(), client, only_html,
                                                         &mut selectors, external_domains_caseless,
                                                         &r_settings, &mut links, None, &shared.8,
                                                         &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
@@ -9184,8 +9389,9 @@ impl Website {
                                             let mut r_settings = shared.7;
                                             r_settings.ssg_build = true;
                                             let mut domain_parsed = None;
-                                            let page = Page::new_page_streaming_engine(
+                                            let page = Page::new_page_streaming_for_mode(
                                                 target_url,
+                                                shared.12.as_deref(),
                                                 client, only_html,
                                                 &mut relative_selectors,
                                                 external_domains_caseless,
@@ -9254,8 +9460,9 @@ impl Website {
                                                 let mut domain_parsed = None;
                                                 let mut retry_r_settings = shared.7;
                                                 retry_r_settings.ssg_build = true;
-                                                let next_page = Page::new_page_streaming_engine(
+                                                let next_page = Page::new_page_streaming_for_mode(
                                                     target_url,
+                                                    shared.12.as_deref(),
                                                     retry_client, only_html,
                                                     &mut shared.1.clone(),
                                                     external_domains_caseless,
@@ -9277,8 +9484,9 @@ impl Website {
                                             let mut domain_parsed = None;
                                             let mut retry_r_settings = shared.7;
                                             retry_r_settings.ssg_build = true;
-                                            page = Page::new_page_streaming_engine(
+                                            page = Page::new_page_streaming_for_mode(
                                                 target_url,
+                                                shared.12.as_deref(),
                                                 retry_client,
                                                 only_html,
                                                 &mut shared.1.clone(),
@@ -10429,7 +10637,11 @@ impl Website {
             website.subscription_guard().await;
             website
         } else {
-            let client_rotator = self.client_rotator.clone();
+            let noncanonical_rotator = if website.execution_mode == Some(ExecutionMode::Canonical) {
+                None
+            } else {
+                self.noncanonical_client_rotator.clone()
+            };
             #[cfg(feature = "hedge")]
             let hedge_config = self.configuration.hedge.clone();
             #[cfg(feature = "hedge")]
@@ -10466,6 +10678,7 @@ impl Website {
                 self.domain_parsed.clone(),
                 self.on_link_find_callback.clone(),
                 self.configuration.remote_multimodal.clone(),
+                website.resolved_executor.clone(),
             ));
 
             let mut set: JoinSet<(HashSet<CaseInsensitiveString>, Option<u64>)> = JoinSet::new();
@@ -10530,7 +10743,7 @@ impl Website {
                             if let Ok(permit) = semaphore.clone().acquire_owned().await {
                                 let shared = shared.clone();
                                 let on_should_crawl_callback = on_should_crawl_callback.clone();
-                                let rotator = client_rotator.clone();
+                                let rotator = noncanonical_rotator.clone();
                                 #[allow(unused_variables)]
                                 let retry_strategy_ref = retry_strategy_ref.clone();
                                 #[cfg(feature = "hedge")]
@@ -10550,15 +10763,17 @@ impl Website {
                                     #[cfg(feature = "hedge")]
                                     let (mut page, mut links, mut links_pages) = {
                                         let should_hedge = if let Some(ref hcfg) = hedge_cfg {
-                                            hcfg.enabled && rotator.as_ref().is_some_and(|r| r.len() > 1)
+                                            hcfg.enabled && (shared.11.is_some() || rotator.as_ref().is_some_and(|r| r.len() > 1))
                                         } else {
                                             false
                                         };
 
                                         if should_hedge {
                                             let hcfg = hedge_cfg.as_ref().unwrap();
-                                            let rot = rotator.as_ref().unwrap();
-                                            let (primary_client, hedge_client_opt) = rot.next_pair();
+                                            let (primary_client, hedge_client_opt) = match rotator.as_ref() {
+                                                Some(rotator) => rotator.next_pair(),
+                                                None => (&shared.0, Some(&shared.0)),
+                                            };
 
                                             if let Some(hedge_client) = hedge_client_opt {
                                                 let delay = hedge_trk.adaptive_delay(hcfg.delay);
@@ -10571,11 +10786,11 @@ impl Website {
                                                     let mut r_settings = shared.7;
                                                     r_settings.ssg_build = true;
                                                     let mut domain_parsed = None;
-                                                    let page = Page::new_page_streaming(
-                                                        target_url, primary_client, only_html,
+                                                    let page = Page::new_page_streaming_for_mode(
+                                                        target_url, shared.11.as_deref(), primary_client, only_html,
                                                         &mut selectors, external_domains_caseless,
                                                         &r_settings, &mut links, None, &shared.8,
-                                                        &mut domain_parsed, &mut links_pages, (None, None)).await;
+                                                        &mut domain_parsed, &mut links_pages, (None, None), None).await;
                                                     (page, links, links_pages)
                                                 };
 
@@ -10597,11 +10812,11 @@ impl Website {
                                                             let mut r_settings = shared.7;
                                                             r_settings.ssg_build = true;
                                                             let mut domain_parsed = None;
-                                                            let page = Page::new_page_streaming(
-                                                                target_url, hedge_client, only_html,
+                                                            let page = Page::new_page_streaming_for_mode(
+                                                                target_url, shared.11.as_deref(), hedge_client, only_html,
                                                                 &mut selectors, external_domains_caseless,
                                                                 &r_settings, &mut links, None, &shared.8,
-                                                                &mut domain_parsed, &mut links_pages, (None, None)).await;
+                                                                &mut domain_parsed, &mut links_pages, (None, None), None).await;
                                                             (page, links, links_pages)
                                                         };
 
@@ -10637,11 +10852,11 @@ impl Website {
                                                 let mut r_settings = shared.7;
                                                 r_settings.ssg_build = true;
                                                 let mut domain_parsed = None;
-                                                let page = Page::new_page_streaming(
-                                                    target_url, primary_client, only_html,
+                                                let page = Page::new_page_streaming_for_mode(
+                                                    target_url, shared.11.as_deref(), primary_client, only_html,
                                                     &mut selectors, external_domains_caseless,
                                                     &r_settings, &mut links, None, &shared.8,
-                                                    &mut domain_parsed, &mut links_pages, (None, None)).await;
+                                                    &mut domain_parsed, &mut links_pages, (None, None), None).await;
                                                 hedge_trk.record(fetch_start.elapsed());
                                                 if page.status_code.is_server_error() {
                                                     hedge_trk.record_error();
@@ -10662,11 +10877,11 @@ impl Website {
                                             let mut r_settings = shared.7;
                                             r_settings.ssg_build = true;
                                             let mut domain_parsed = None;
-                                            let page = Page::new_page_streaming(
-                                                target_url, client, only_html,
+                                            let page = Page::new_page_streaming_for_mode(
+                                                target_url, shared.11.as_deref(), client, only_html,
                                                 &mut selectors, external_domains_caseless,
                                                 &r_settings, &mut links, None, &shared.8,
-                                                &mut domain_parsed, &mut links_pages, (None, None)).await;
+                                                &mut domain_parsed, &mut links_pages, (None, None), None).await;
                                             hedge_trk.record(fetch_start.elapsed());
                                             if page.status_code.is_server_error() {
                                                 hedge_trk.record_error();
@@ -10693,8 +10908,9 @@ impl Website {
                                         let mut r_settings = shared.7;
                                         r_settings.ssg_build = true;
                                         let mut domain_parsed = None;
-                                        let page = Page::new_page_streaming(
+                                        let page = Page::new_page_streaming_for_mode(
                                             target_url,
+                                            shared.11.as_deref(),
                                             client, only_html,
                                             &mut relative_selectors,
                                             external_domains_caseless,
@@ -10703,7 +10919,7 @@ impl Website {
                                             None,
                                             &shared.8,
                                             &mut domain_parsed,
-                                            &mut links_pages, (None, None)).await;
+                                            &mut links_pages, (None, None), None).await;
                                         (page, links, links_pages)
                                     };
 
@@ -10762,8 +10978,9 @@ impl Website {
                                                 let mut domain_parsed = None;
                                                 let mut retry_r_settings = shared.7;
                                                 retry_r_settings.ssg_build = true;
-                                                let next_page = Page::new_page_streaming(
+                                                let next_page = Page::new_page_streaming_for_mode(
                                                     target_url,
+                                                    shared.11.as_deref(),
                                                     retry_client, only_html,
                                                     &mut shared.1.clone(),
                                                     external_domains_caseless,
@@ -10772,7 +10989,7 @@ impl Website {
                                                     None,
                                                     &shared.8,
                                                     &mut domain_parsed,
-                                                    &mut links_pages, (None, None)).await;
+                                                    &mut links_pages, (None, None), None).await;
 
                                                 page = next_page;
 
@@ -10785,8 +11002,9 @@ impl Website {
                                             let mut domain_parsed = None;
                                             let mut retry_r_settings = shared.7;
                                             retry_r_settings.ssg_build = true;
-                                            page = Page::new_page_streaming(
+                                            page = Page::new_page_streaming_for_mode(
                                                 target_url,
+                                                shared.11.as_deref(),
                                                 retry_client,
                                                 only_html,
                                                 &mut shared.1.clone(),
@@ -10796,7 +11014,7 @@ impl Website {
                                                 None,
                                                 &shared.8,
                                                 &mut domain_parsed,
-                                                &mut links_pages, (None, None)).await;
+                                                &mut links_pages, (None, None), None).await;
                                         }
 
                                         // Stamp profile key from strategy.
@@ -12674,24 +12892,16 @@ impl Website {
 
                     while !first_request {
                         // try to get the original sitemap if it had an error on the first request make a request to the root html and parse out the sitemap path.
-                        match client.get(sitemap_url.as_str()).send().await {
-                            Ok(response) => {
-                                let limit = *crate::utils::MAX_SIZE_BYTES as u64;
-
-                                if let Some(response_content_length) = response.content_length() {
-                                    if limit > 0 && response_content_length >= limit {
-                                        // we need a error here
-                                        first_request = true;
-                                        log::info!(
-                                            "{} exceeded parse limit: {:?}",
-                                            sitemap_url,
-                                            limit
-                                        );
-                                        break;
-                                    }
-                                }
-
-                                if response.status() == 404 {
+                        match crate::utils::fetch_bytes_for_mode(
+                            sitemap_url.as_str(),
+                            self.resolved_executor.as_deref(),
+                            client,
+                            *crate::utils::MAX_SIZE_BYTES,
+                        )
+                        .await
+                        {
+                            Ok((status, bytes)) => {
+                                if status == 404 {
                                     if !self
                                         .sitemap_parse(
                                             client,
@@ -12704,28 +12914,20 @@ impl Website {
                                         break;
                                     }
                                 } else {
-                                    match response.bytes().await {
-                                        Ok(b) => {
-                                            first_request = true;
-                                            self.sitemap_parse_crawl(
-                                                client,
-                                                handle,
-                                                b,
-                                                &mut interval,
-                                                &mut exceeded_budget,
-                                                &tx,
-                                                &mut sitemaps,
-                                                true,
-                                                &semaphore,
-                                                crawl_boundary.as_ref(),
-                                            )
-                                            .await;
-                                        }
-                                        Err(err) => {
-                                            first_request = true;
-                                            log::info!("http parse error: {:?}", err.to_string())
-                                        }
-                                    };
+                                    first_request = true;
+                                    self.sitemap_parse_crawl(
+                                        client,
+                                        handle,
+                                        bytes,
+                                        &mut interval,
+                                        &mut exceeded_budget,
+                                        &tx,
+                                        &mut sitemaps,
+                                        true,
+                                        &semaphore,
+                                        crawl_boundary.as_ref(),
+                                    )
+                                    .await;
                                 }
                             }
                             Err(err) => {
@@ -13445,19 +13647,15 @@ impl Website {
         if valid {
             if let Some(domain) = &self.domain_parsed {
                 // attempt to parse the sitemap from the html.
-                match client.get(domain.as_str()).send().await {
-                    Ok(response) => {
-                        let limit = *crate::utils::MAX_SIZE_BYTES as u64;
-
-                        if let Some(response_content_length) = response.content_length() {
-                            if limit > 0 && response_content_length >= limit {
-                                log::info!("{} exceeded parse limit: {:?}", domain, limit);
-                                *first_request = true;
-                                *attempted_correct = true;
-                                valid = false;
-                            }
-                        }
-
+                match crate::utils::fetch_bytes_for_mode(
+                    domain.as_str(),
+                    self.resolved_executor.as_deref(),
+                    client,
+                    *crate::utils::MAX_SIZE_BYTES,
+                )
+                .await
+                {
+                    Ok((_status, body)) => {
                         if valid {
                             // stream the bytes to lol_html to parse the sitemap from the path.
                             let cell = tokio::sync::OnceCell::new();
@@ -13481,20 +13679,7 @@ impl Website {
                                 |_c: &[u8]| {},
                             );
 
-                            let mut wrote_error = false;
-                            let mut stream = response.bytes_stream();
-
-                            while let Some(chunk) = stream.next().await {
-                                if let Ok(chunk) = chunk {
-                                    if rewriter.write(&chunk).is_err() {
-                                        wrote_error = true;
-                                        break;
-                                    }
-                                }
-                                if cell.initialized() {
-                                    break;
-                                }
-                            }
+                            let wrote_error = rewriter.write(&body).is_err();
 
                             if !wrote_error {
                                 let _ = rewriter.end();
@@ -13545,6 +13730,7 @@ impl Website {
     ) {
         use sitemap::reader::{SiteMapEntity, SiteMapReader};
         use sitemap::structs::Location;
+        let resolved_executor = self.resolved_executor.clone();
 
         if !b.is_empty() && b.starts_with(b"<?xml") {
             let reader = SiteMapReader::new(&*b);
@@ -13618,6 +13804,7 @@ impl Website {
                                 let cache_policy = cache_policy.clone();
                                 let cache_ns = cache_ns.clone();
                                 let retry_strategy_ref = retry_strategy_ref.clone();
+                                let executor = resolved_executor.clone();
                                 // Owned clone for the moved (`'static`)
                                 // spawned future — the immediately
                                 // pre-acquisition re-check below (Section
@@ -13647,8 +13834,9 @@ impl Website {
                                         }
                                     }
 
-                                    let mut page = Page::new_page_with_cache(
+                                    let mut page = Page::new_page_for_mode(
                                         link.inner(),
+                                        executor.as_deref(),
                                         &client,
                                         cache_options_init.clone(),
                                         &cache_policy,
@@ -13719,8 +13907,9 @@ impl Website {
                                             )
                                         });
                                         tokio::time::sleep(status_delay.max(backoff)).await;
-                                        page = Page::new_page_with_cache(
+                                        page = Page::new_page_for_mode(
                                             link.inner(),
+                                            executor.as_deref(),
                                             &client,
                                             cache_options_init.clone(),
                                             &cache_policy,
@@ -17078,7 +17267,7 @@ mod tests {
 
     #[cfg(not(feature = "decentralized"))]
     #[test]
-    fn test_client_rotator_round_robin() {
+    fn test_noncanonical_rotator_round_robin() {
         // Build 3 simple clients to verify round-robin cycling.
         let clients: Vec<crate::Client> = (0..3)
             .map(|_| {
@@ -17096,7 +17285,7 @@ mod tests {
             })
             .collect();
 
-        let rotator = crate::website::ClientRotator::new(clients);
+        let rotator = crate::website::NoncanonicalClientRotator::new(clients);
         assert_eq!(rotator.len(), 3);
         assert!(!rotator.is_empty());
 
@@ -18238,7 +18427,7 @@ impl crate::traits::Crawler for Website {
 
     #[inline]
     fn client(&self) -> &Option<Client> {
-        self.get_client()
+        &self.client
     }
 
     async fn crawl(&mut self) {

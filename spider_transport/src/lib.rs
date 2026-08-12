@@ -48,3 +48,6 @@ pub use transport::{
 pub use transport::build_tor_client;
 
 pub use transport::{execute_request, execute_streaming_request};
+pub use transport::{
+    CrawlerRequest, CrawlerTransportConfiguration, ExecutionMode, ResolvedExecutor,
+};

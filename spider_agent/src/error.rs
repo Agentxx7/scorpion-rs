@@ -3,6 +3,8 @@
 use crate::config::LimitType;
 use std::fmt;
 
+pub use spider_search::SearchError;
+
 /// Agent error types.
 #[derive(Debug)]
 pub enum AgentError {
@@ -100,38 +102,6 @@ impl From<SearchError> for AgentError {
         Self::Search(e)
     }
 }
-
-/// Search-specific error types.
-#[derive(Debug)]
-pub enum SearchError {
-    /// API request failed.
-    RequestFailed(String),
-    /// Invalid API key or authentication.
-    AuthenticationFailed,
-    /// Rate limit exceeded.
-    RateLimited,
-    /// Invalid query or parameters.
-    InvalidQuery(String),
-    /// Provider-specific error.
-    ProviderError(String),
-    /// No search provider configured.
-    NoProvider,
-}
-
-impl fmt::Display for SearchError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::RequestFailed(msg) => write!(f, "Search request failed: {}", msg),
-            Self::AuthenticationFailed => write!(f, "Search authentication failed"),
-            Self::RateLimited => write!(f, "Search rate limit exceeded"),
-            Self::InvalidQuery(msg) => write!(f, "Invalid search query: {}", msg),
-            Self::ProviderError(msg) => write!(f, "Search provider error: {}", msg),
-            Self::NoProvider => write!(f, "No search provider configured"),
-        }
-    }
-}
-
-impl std::error::Error for SearchError {}
 
 /// Result type for agent operations.
 pub type AgentResult<T> = Result<T, AgentError>;

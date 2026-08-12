@@ -157,6 +157,12 @@ path = "../spider_transport"
 version = "2.53.4"
 default-features = false
 
+[dependencies.spider_search]
+path = "../spider_search"
+version = "2.53.4"
+optional = true
+default-features = false
+
 [dependencies.spider_agent]
 path = "../spider_agent"
 version = "2.53.4"
@@ -395,12 +401,12 @@ webdriver_chrome = ["webdriver"]
 webdriver_firefox = ["webdriver"]
 webdriver_edge = ["webdriver"]
 webdriver_screenshot = ["webdriver"]
-search = ["serde"]
-search_serper = ["search"]
-search_brave = ["search"]
-search_bing = ["search"]
-search_tavily = ["search"]
-search_searxng = ["search"]
+search = ["serde", "dep:spider_search", "spider_search/search"]
+search_serper = ["search", "spider_search/search_serper"]
+search_brave = ["search", "spider_search/search_brave"]
+search_bing = ["search", "spider_search/search_bing"]
+search_tavily = ["search", "spider_search/search_tavily"]
+search_searxng = ["search", "spider_search/search_searxng"]
 source_github = ["serde"]
 source_hugging_face = ["serde"]
 

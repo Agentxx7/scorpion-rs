@@ -30,6 +30,7 @@ base64 = "0.22"
 # Extracted types and HTML processing
 spider_agent_types = { version = "2.53.4", path = "../spider_agent_types" }
 spider_agent_html = { version = "2.53.4", path = "../spider_agent_html" }
+spider_search = { version = "2.53.4", path = "../spider_search", default-features = false }
 
 # HTML processing (still needed for engine internals)
 lol_html = "2"
@@ -88,6 +89,14 @@ env_logger = "0.11"
 fastrand = "2"
 futures = "0.3"
 dotenvy = "0.15"
+spider = { version = "2.53.4", path = "../spider", default-features = false, features = [
+    "search",
+    "search_serper",
+    "search_brave",
+    "search_bing",
+    "search_tavily",
+    "search_searxng",
+] }
 
 [features]
 default = []
@@ -129,11 +138,11 @@ scripting = [
 ]
 
 # Search providers
-search = []
-search_serper = ["search"]
-search_brave = ["search"]
-search_bing = ["search"]
-search_tavily = ["search"]
+search = ["spider_search/search"]
+search_serper = ["search", "spider_search/search_serper"]
+search_brave = ["search", "spider_search/search_brave"]
+search_bing = ["search", "spider_search/search_bing"]
+search_tavily = ["search", "spider_search/search_tavily"]
 
 # Full feature set
 full = ["openai", "chrome", "webdriver", "fs", "skills", "memvid", "scripting", "search_serper", "search_brave", "search_bing", "search_tavily", "skills_s3"]

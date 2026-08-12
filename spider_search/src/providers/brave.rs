@@ -2,8 +2,7 @@
 //!
 //! Brave provides privacy-focused web search with good quality results.
 
-use super::{SearchError, SearchProvider, SearchResult, SearchResults};
-use crate::config::SearchOptions;
+use super::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults};
 use async_trait::async_trait;
 
 /// Default Brave Search API endpoint.
@@ -15,12 +14,10 @@ const DEFAULT_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 ///
 /// # Example
 /// ```ignore
-/// use spider_agent::search::BraveProvider;
-/// use spider_agent::config::SearchOptions;
+/// use spider_search::{BraveProvider, SearchOptions, SearchProvider};
 ///
 /// let provider = BraveProvider::new("your-api-key");
-/// let client = reqwest::Client::new();
-/// let results = provider.search("rust web crawler", &SearchOptions::default(), &client).await?;
+/// let results = provider.search("rust web crawler", &SearchOptions::default()).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct BraveProvider {
@@ -55,7 +52,6 @@ impl SearchProvider for BraveProvider {
         &self,
         query: &str,
         options: &SearchOptions,
-        client: &reqwest::Client,
     ) -> Result<SearchResults, SearchError> {
         // Build query parameters
         let mut params = vec![("q", query.to_string())];
@@ -72,14 +68,12 @@ impl SearchProvider for BraveProvider {
             params.push(("search_lang", language.clone()));
         }
 
-        let response = client
-            .get(self.endpoint())
-            .header("X-Subscription-Token", &self.api_key)
-            .header("Accept", "application/json")
-            .query(&params)
-            .send()
-            .await
-            .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+        let endpoint = super::with_query(self.endpoint(), &params)?;
+        let headers = super::headers(&[
+            ("X-Subscription-Token", &self.api_key),
+            ("Accept", "application/json"),
+        ])?;
+        let response = super::execute(reqwest::Method::GET, &endpoint, &headers, None).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -157,7 +151,6 @@ mod tests {
     fn test_brave_provider_new() {
         let provider = BraveProvider::new("test-key");
         assert_eq!(provider.endpoint(), DEFAULT_API_URL);
-        assert!(provider.is_configured());
     }
 
     #[test]

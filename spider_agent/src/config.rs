@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+pub use spider_search::{SearchOptions, TimeRange};
+
 /// Usage limits for controlling agent resource consumption.
 #[derive(Debug, Clone, Default)]
 pub struct UsageLimits {
@@ -362,86 +364,6 @@ pub enum HtmlCleaningMode {
     Minimal,
     /// No cleaning - raw HTML.
     Raw,
-}
-
-/// Search options for web search.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SearchOptions {
-    /// Maximum number of results to return.
-    pub limit: Option<usize>,
-    /// Country/region code (e.g., "us", "uk").
-    pub country: Option<String>,
-    /// Language code (e.g., "en", "es").
-    pub language: Option<String>,
-    /// Filter to specific domains.
-    pub site_filter: Option<Vec<String>>,
-    /// Exclude specific domains.
-    pub exclude_domains: Option<Vec<String>>,
-    /// Time range filter.
-    pub time_range: Option<TimeRange>,
-}
-
-impl SearchOptions {
-    /// Create new search options with defaults.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set maximum number of results.
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = Some(limit);
-        self
-    }
-
-    /// Set country/region code.
-    pub fn with_country(mut self, country: impl Into<String>) -> Self {
-        self.country = Some(country.into());
-        self
-    }
-
-    /// Set language code.
-    pub fn with_language(mut self, language: impl Into<String>) -> Self {
-        self.language = Some(language.into());
-        self
-    }
-
-    /// Filter results to specific domains.
-    pub fn with_site_filter(mut self, domains: Vec<String>) -> Self {
-        self.site_filter = Some(domains);
-        self
-    }
-
-    /// Exclude specific domains from results.
-    pub fn with_exclude_domains(mut self, domains: Vec<String>) -> Self {
-        self.exclude_domains = Some(domains);
-        self
-    }
-
-    /// Set time range filter.
-    pub fn with_time_range(mut self, range: TimeRange) -> Self {
-        self.time_range = Some(range);
-        self
-    }
-}
-
-/// Time range for filtering search results.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum TimeRange {
-    /// Results from the past day.
-    Day,
-    /// Results from the past week.
-    Week,
-    /// Results from the past month.
-    Month,
-    /// Results from the past year.
-    Year,
-    /// Custom date range.
-    Custom {
-        /// Start date (format depends on provider).
-        start: String,
-        /// End date (format depends on provider).
-        end: String,
-    },
 }
 
 /// Research options for research tasks.

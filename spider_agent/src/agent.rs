@@ -136,7 +136,7 @@ impl Agent {
         self.usage.increment_search_calls();
 
         provider
-            .search(query, &options, &self.client)
+            .search(query, &options)
             .await
             .map_err(AgentError::Search)
     }

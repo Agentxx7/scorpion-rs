@@ -145,14 +145,14 @@ pub async fn run(params: MediaSearchParams) -> Result<String, String> {
     let output = match params.media_type.as_str() {
         "video" => {
             let results = provider
-                .search_videos(&params.query, &options, None)
+                .search_videos(&params.query, &options)
                 .await
                 .map_err(|e| e.to_string())?;
             render_video_results(&params.provider, &params.query, &results)
         }
         "image" => {
             let results = provider
-                .search_images(&params.query, &options, None)
+                .search_images(&params.query, &options)
                 .await
                 .map_err(|e| e.to_string())?;
             render_image_results(&params.provider, &params.query, &results)

@@ -9,6 +9,7 @@ members = [
     "spider_agent_html",
     "spider_mcp",
     "spider_transport",
+    "spider_search",
     # internal
     "examples",
     "benches"]

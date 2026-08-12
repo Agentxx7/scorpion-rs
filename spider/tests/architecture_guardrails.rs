@@ -116,11 +116,6 @@ fn no_new_reqwest_client_new_outside_canonical_paths() {
             "features/transport.rs",
             "website.rs",
             "utils/mod.rs",
-            "features/search_providers/bing.rs",
-            "features/search_providers/brave.rs",
-            "features/search_providers/searxng.rs",
-            "features/search_providers/serper.rs",
-            "features/search_providers/tavily.rs",
             "features/automation.rs",
             "features/solvers.rs",
         ],
@@ -139,11 +134,6 @@ fn no_new_reqwest_client_builder_outside_canonical_paths() {
             // Grandfathered exception: pre-existing test-only usages inside
             // #[cfg(test)] blocks. Classification is UPSTREAM_COMPAT.
             "page.rs",
-            "features/search_providers/bing.rs",
-            "features/search_providers/brave.rs",
-            "features/search_providers/searxng.rs",
-            "features/search_providers/serper.rs",
-            "features/search_providers/tavily.rs",
             "features/automation.rs",
             "features/solvers.rs",
         ],
@@ -159,11 +149,6 @@ fn no_new_reqwest_clientbuilder_new_outside_canonical_paths() {
             "features/transport.rs",
             "website.rs",
             "utils/mod.rs",
-            "features/search_providers/bing.rs",
-            "features/search_providers/brave.rs",
-            "features/search_providers/searxng.rs",
-            "features/search_providers/serper.rs",
-            "features/search_providers/tavily.rs",
             "features/automation.rs",
             "features/solvers.rs",
         ],
@@ -833,6 +818,103 @@ fn providers_use_canonical_transport_seam() {
                 "{provider} must not bypass canonical transport via {forbidden:?}"
             );
         }
+    }
+}
+
+#[test]
+fn canonical_search_owner_uses_transport_without_raw_clients() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let providers = workspace.join("spider_search/src/providers");
+    let mut files = Vec::new();
+    collect_rust_files(&providers, &providers, &mut files);
+    assert!(!files.is_empty(), "canonical search providers must exist");
+
+    for file in files {
+        for forbidden in [
+            "reqwest::Client",
+            "ClientBuilder",
+            "Client::new",
+            "Client::builder",
+            "wreq::Client",
+            ".send()",
+            "client: Option",
+            "client: &",
+        ] {
+            assert!(
+                !file.contents.contains(forbidden),
+                "search provider bypass {forbidden:?} in {}",
+                file.relative_path
+            );
+        }
+    }
+
+    let manifest = fs::read_to_string(workspace.join("spider_search/Cargo.toml")).unwrap();
+    assert!(manifest.contains("spider_transport"));
+    assert!(!manifest.contains("path = \"../spider\""));
+    assert!(!manifest.contains("path = \"../spider_agent\""));
+}
+
+#[test]
+fn spider_search_facades_have_no_implementation() {
+    for file in ["features/search.rs", "features/search_providers/mod.rs"] {
+        let contents = read_src_file(file);
+        for forbidden in [
+            "pub trait SearchProvider",
+            "pub struct SearchOptions",
+            "pub struct SearchResult",
+            "pub enum SearchError",
+            "impl SearchProvider for",
+            "reqwest::Client",
+            ".send()",
+        ] {
+            assert!(
+                !contents.contains(forbidden),
+                "search implementation {forbidden:?} in façade {file}"
+            );
+        }
+    }
+}
+
+#[test]
+fn canonical_search_seam_and_models_are_unique() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let mut graph = Vec::new();
+    for crate_name in [
+        "spider",
+        "spider_agent",
+        "spider_agent_types",
+        "spider_search",
+    ] {
+        let source = workspace.join(crate_name).join("src");
+        let mut files = Vec::new();
+        collect_rust_files(&source, &source, &mut files);
+        graph.extend(files.into_iter().map(|mut file| {
+            file.relative_path = format!("{crate_name}/src/{}", file.relative_path);
+            file
+        }));
+    }
+
+    for pattern in [
+        "pub trait SearchProvider",
+        "pub struct SearchOptions",
+        "pub enum TimeRange",
+        "pub struct SearchResults",
+        "pub enum SearchError",
+    ] {
+        let owners: Vec<_> = graph
+            .iter()
+            .filter(|file| file.contents.contains(pattern))
+            .map(|file| file.relative_path.as_str())
+            .collect();
+        assert_eq!(
+            owners,
+            ["spider_search/src/search.rs"],
+            "unexpected owners for {pattern}"
+        );
     }
 }
 

@@ -85,7 +85,7 @@ pub async fn run(params: NewsSearchParams) -> Result<String, String> {
         })?;
     let provider = SearxngProvider::new(base_url);
     let results = provider
-        .search_news(&params.query, &build_search_options(&params), None)
+        .search_news(&params.query, &build_search_options(&params))
         .await
         .map_err(|error| error.to_string())?;
     serde_json::to_string_pretty(&render_results(&params.provider, &params.query, &results))

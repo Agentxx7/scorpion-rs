@@ -41,4 +41,4 @@ pub use transport::{
 #[cfg(feature = "tor")]
 pub use transport::build_tor_client;
 
-pub use transport::execute_streaming_request;
+pub use transport::{execute_request, execute_streaming_request};

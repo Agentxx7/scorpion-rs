@@ -3,6 +3,7 @@
 //! Tavily provides AI-optimized search designed for LLM applications.
 
 use super::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults};
+use async_trait::async_trait;
 
 /// Default Tavily API endpoint.
 const DEFAULT_API_URL: &str = "https://api.tavily.com/search";
@@ -13,11 +14,10 @@ const DEFAULT_API_URL: &str = "https://api.tavily.com/search";
 ///
 /// # Example
 /// ```ignore
-/// use spider::features::search_providers::TavilyProvider;
-/// use spider::features::search::{SearchOptions, SearchProvider};
+/// use spider_search::{SearchOptions, SearchProvider, TavilyProvider};
 ///
 /// let provider = TavilyProvider::new("your-api-key");
-/// let results = provider.search("rust web crawler", &SearchOptions::default(), None).await?;
+/// let results = provider.search("rust web crawler", &SearchOptions::default()).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct TavilyProvider {
@@ -55,12 +55,12 @@ impl TavilyProvider {
     }
 }
 
+#[async_trait]
 impl SearchProvider for TavilyProvider {
     async fn search(
         &self,
         query: &str,
         options: &SearchOptions,
-        client: Option<&reqwest::Client>,
     ) -> Result<SearchResults, SearchError> {
         // Build request body
         let mut body = serde_json::json!({
@@ -82,27 +82,15 @@ impl SearchProvider for TavilyProvider {
             body["exclude_domains"] = serde_json::json!(exclude);
         }
 
-        // Use provided client or create a new one
-        let response = if let Some(c) = client {
-            c.post(self.endpoint())
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-        } else {
-            let c = reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
-
-            c.post(self.endpoint())
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-        };
-
-        let response = response.map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+        let body = serde_json::to_vec(&body)
+            .map_err(|error| SearchError::ProviderError(error.to_string()))?;
+        let response = super::execute(
+            reqwest::Method::POST,
+            self.endpoint(),
+            &spider_transport::SecretRequestHeaders::new(),
+            Some(body),
+        )
+        .await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -166,6 +154,10 @@ impl SearchProvider for TavilyProvider {
 
     fn provider_name(&self) -> &'static str {
         "tavily"
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.api_key.is_empty() || self.api_url.is_some()
     }
 }
 

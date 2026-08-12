@@ -1,0 +1,29 @@
+[package]
+name = "spider_search"
+version = "2.53.4"
+authors = ["j-mendez <jeff@spider.cloud>"]
+description = "Canonical neutral web-search capability for the Scorpion workspace."
+repository = "https://github.com/spider-rs/spider"
+keywords = ["search", "serper", "brave", "bing", "tavily"]
+categories = ["web-programming", "asynchronous"]
+license = "MIT"
+documentation = "https://docs.rs/spider_search"
+homepage = "https://spider.cloud/crates"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spider_transport = { version = "2.53.4", path = "../spider_transport" }
+url = "2"
+
+[features]
+default = []
+search = []
+search_serper = ["search"]
+search_brave = ["search"]
+search_bing = ["search"]
+search_tavily = ["search"]
+search_searxng = ["search"]

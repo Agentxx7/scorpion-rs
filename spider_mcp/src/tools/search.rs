@@ -107,7 +107,7 @@ pub async fn run(params: SearchParams) -> Result<String, String> {
 
             let provider = SearxngProvider::new(base_url);
             provider
-                .search(&params.query, &options, None)
+                .search(&params.query, &options)
                 .await
                 .map_err(|e| e.to_string())?
         }

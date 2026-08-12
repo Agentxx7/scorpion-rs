@@ -56,7 +56,7 @@ pub async fn run(params: SearchParams) -> Result<String, String> {
     let output = match params.category {
         SearchCategory::Web => {
             let results = provider
-                .search(&params.query, &options, None)
+                .search(&params.query, &options)
                 .await
                 .map_err(|error| error.to_string())?;
             let items = results
@@ -85,7 +85,7 @@ pub async fn run(params: SearchParams) -> Result<String, String> {
         }
         SearchCategory::News => {
             let results = provider
-                .search_news(&params.query, &options, None)
+                .search_news(&params.query, &options)
                 .await
                 .map_err(|error| error.to_string())?;
             serde_json::json!({
@@ -98,7 +98,7 @@ pub async fn run(params: SearchParams) -> Result<String, String> {
         }
         SearchCategory::Image => {
             let results = provider
-                .search_images(&params.query, &options, None)
+                .search_images(&params.query, &options)
                 .await
                 .map_err(|error| error.to_string())?;
             serde_json::json!({
@@ -111,7 +111,7 @@ pub async fn run(params: SearchParams) -> Result<String, String> {
         }
         SearchCategory::Video => {
             let results = provider
-                .search_videos(&params.query, &options, None)
+                .search_videos(&params.query, &options)
                 .await
                 .map_err(|error| error.to_string())?;
             serde_json::json!({

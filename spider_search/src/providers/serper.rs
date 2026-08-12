@@ -3,6 +3,7 @@
 //! Serper provides high-quality Google SERP API access.
 
 use super::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults};
+use async_trait::async_trait;
 
 /// Default Serper API endpoint.
 const DEFAULT_API_URL: &str = "https://google.serper.dev/search";
@@ -13,11 +14,10 @@ const DEFAULT_API_URL: &str = "https://google.serper.dev/search";
 ///
 /// # Example
 /// ```ignore
-/// use spider::features::search_providers::SerperProvider;
-/// use spider::features::search::{SearchOptions, SearchProvider};
+/// use spider_search::{SearchOptions, SearchProvider, SerperProvider};
 ///
 /// let provider = SerperProvider::new("your-api-key");
-/// let results = provider.search("rust web crawler", &SearchOptions::default(), None).await?;
+/// let results = provider.search("rust web crawler", &SearchOptions::default()).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SerperProvider {
@@ -48,12 +48,12 @@ impl SerperProvider {
     }
 }
 
+#[async_trait]
 impl SearchProvider for SerperProvider {
     async fn search(
         &self,
         query: &str,
         options: &SearchOptions,
-        client: Option<&reqwest::Client>,
     ) -> Result<SearchResults, SearchError> {
         // Build request body
         let mut body = serde_json::json!({
@@ -85,37 +85,11 @@ impl SearchProvider for SerperProvider {
         };
         body["q"] = serde_json::json!(query_with_filter);
 
-        // Use provided client or create a new one
-        let response = if let Some(c) = client {
-            c.post(self.endpoint())
-                .header("X-API-KEY", &self.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-        } else {
-            let c = reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
-
-            c.post(self.endpoint())
-                .header("X-API-KEY", &self.api_key)
-                .header("Content-Type", "application/json")
-                .json(&body)
-                .send()
-                .await
-        };
-
-        let response = response.map_err(|e| {
-            if e.is_timeout() {
-                SearchError::RequestFailed("Request timed out".to_string())
-            } else if e.is_connect() {
-                SearchError::RequestFailed("Connection failed".to_string())
-            } else {
-                SearchError::RequestFailed(e.to_string())
-            }
-        })?;
+        let headers = super::headers(&[("X-API-KEY", &self.api_key)])?;
+        let body = serde_json::to_vec(&body)
+            .map_err(|error| SearchError::ProviderError(error.to_string()))?;
+        let response =
+            super::execute(reqwest::Method::POST, self.endpoint(), &headers, Some(body)).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -184,6 +158,10 @@ impl SearchProvider for SerperProvider {
 
     fn provider_name(&self) -> &'static str {
         "serper"
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.api_key.is_empty() || self.api_url.is_some()
     }
 }
 

@@ -1,31 +1,17 @@
-//! Search provider implementations.
-//!
-//! This module contains implementations of the [`super::search::SearchProvider`] trait
-//! for various web search APIs.
+//! Thin compatibility façade over canonical search providers.
 
 #[cfg(feature = "search_bing")]
-mod bing;
+pub use spider_search::BingProvider;
 #[cfg(feature = "search_brave")]
-mod brave;
-#[cfg(feature = "search_searxng")]
-mod searxng;
+pub use spider_search::BraveProvider;
 #[cfg(feature = "search_serper")]
-mod serper;
+pub use spider_search::SerperProvider;
 #[cfg(feature = "search_tavily")]
-mod tavily;
-
-#[cfg(feature = "search_bing")]
-pub use bing::BingProvider;
-#[cfg(feature = "search_brave")]
-pub use brave::BraveProvider;
+pub use spider_search::TavilyProvider;
 #[cfg(feature = "search_searxng")]
-pub use searxng::{
+pub use spider_search::{
     ImageResult as SearxngImageResult, NewsResult as SearxngNewsResult, SearxngProvider,
     VideoResult as SearxngVideoResult,
 };
-#[cfg(feature = "search_serper")]
-pub use serper::SerperProvider;
-#[cfg(feature = "search_tavily")]
-pub use tavily::TavilyProvider;
 
 pub use super::search::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults};

@@ -906,13 +906,45 @@ pub async fn execute_streaming_request(
     headers: &crate::secret_request_headers::SecretRequestHeaders,
     user_agent: &str,
 ) -> Result<reqwest::Response, TransportError> {
+    execute_request(
+        url,
+        reqwest::Method::GET,
+        policy,
+        headers,
+        None,
+        None,
+        user_agent,
+    )
+    .await
+}
+
+/// Execute one canonical HTTP request without exposing or lending the owned
+/// client. Consumers provide request data, never client-construction policy.
+/// Target validation, redirect pinning, SSRF screening, timeouts, transport
+/// provenance, streaming response semantics, and fail-closed Tor behavior are
+/// identical to [`execute_streaming_request`].
+pub async fn execute_request(
+    url: &url::Url,
+    method: reqwest::Method,
+    policy: &TransportPolicy,
+    headers: &crate::secret_request_headers::SecretRequestHeaders,
+    body: Option<Vec<u8>>,
+    content_type: Option<&str>,
+    user_agent: &str,
+) -> Result<reqwest::Response, TransportError> {
     validate_target(url, policy)?;
     let client = build_streaming_client(policy, user_agent)?;
 
     let mut request_headers = reqwest::header::HeaderMap::new();
     headers.apply_to(&mut request_headers);
 
-    let request = client.get(url.clone()).headers(request_headers);
+    let mut request = client.request(method, url.clone()).headers(request_headers);
+    if let Some(content_type) = content_type {
+        request = request.header(reqwest::header::CONTENT_TYPE, content_type);
+    }
+    if let Some(body) = body {
+        request = request.body(body);
+    }
 
     ACQUISITION_TRANSPORT_SCOPE
         .scope(acquisition_transport_for(policy), request.send())
@@ -1351,6 +1383,30 @@ mod tests {
 
             let request_text = fixture.last_request_text().to_ascii_lowercase();
             assert!(request_text.contains("x-secret-sentinel: streaming-secret-value"));
+        }
+
+        #[tokio::test]
+        async fn canonical_request_executor_preserves_method_content_type_and_body() {
+            let fixture = HttpFixture::start("200 OK", "", b"ok").await;
+            let response = execute_request(
+                &fixture.url(),
+                reqwest::Method::POST,
+                &TransportPolicy::Default,
+                &SecretRequestHeaders::new(),
+                Some(br#"{"q":"rust"}"#.to_vec()),
+                Some("application/json"),
+                "spider_transport-test",
+            )
+            .await
+            .unwrap();
+            assert!(response.status().is_success());
+
+            let request_text = fixture.last_request_text();
+            assert!(request_text.starts_with("POST / HTTP/1.1\r\n"));
+            assert!(request_text
+                .to_ascii_lowercase()
+                .contains("content-type: application/json"));
+            assert!(request_text.ends_with(r#"{"q":"rust"}"#));
         }
 
         /// Section E: fail-closed `.onion`/`Default` rejection happens

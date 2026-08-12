@@ -9262,6 +9262,7 @@ dependencies = [
  "spider_firewall",
  "spider_network_blocker",
  "spider_remote_cache 0.4.0",
+ "spider_search",
  "spider_transport",
  "sqlx",
  "statrs",
@@ -9364,8 +9365,10 @@ dependencies = [
  "rustpython-vm",
  "serde",
  "serde_json",
+ "spider",
  "spider_agent_html",
  "spider_agent_types",
+ "spider_search",
  "spider_skills",
  "tempfile",
  "thirtyfour",
@@ -9599,6 +9602,18 @@ dependencies = [
  "serde",
  "smallvec",
  "tendril 0.4.3",
+]
+
+[[package]]
+name = "spider_search"
+version = "2.53.4"
+dependencies = [
+ "async-trait",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "spider_transport",
+ "url",
 ]
 
 [[package]]

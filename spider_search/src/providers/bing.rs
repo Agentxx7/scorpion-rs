@@ -2,8 +2,7 @@
 //!
 //! Microsoft Bing provides web search via Azure Cognitive Services.
 
-use super::{SearchError, SearchProvider, SearchResult, SearchResults};
-use crate::config::SearchOptions;
+use super::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults};
 use async_trait::async_trait;
 
 /// Default Bing Search API endpoint.
@@ -15,12 +14,10 @@ const DEFAULT_API_URL: &str = "https://api.bing.microsoft.com/v7.0/search";
 ///
 /// # Example
 /// ```ignore
-/// use spider_agent::search::BingProvider;
-/// use spider_agent::config::SearchOptions;
+/// use spider_search::{BingProvider, SearchOptions, SearchProvider};
 ///
 /// let provider = BingProvider::new("your-api-key");
-/// let client = reqwest::Client::new();
-/// let results = provider.search("rust web crawler", &SearchOptions::default(), &client).await?;
+/// let results = provider.search("rust web crawler", &SearchOptions::default()).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct BingProvider {
@@ -55,7 +52,6 @@ impl SearchProvider for BingProvider {
         &self,
         query: &str,
         options: &SearchOptions,
-        client: &reqwest::Client,
     ) -> Result<SearchResults, SearchError> {
         // Build query parameters
         let mut params = vec![("q", query.to_string())];
@@ -72,13 +68,9 @@ impl SearchProvider for BingProvider {
             params.push(("setLang", language.clone()));
         }
 
-        let response = client
-            .get(self.endpoint())
-            .header("Ocp-Apim-Subscription-Key", &self.api_key)
-            .query(&params)
-            .send()
-            .await
-            .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+        let endpoint = super::with_query(self.endpoint(), &params)?;
+        let headers = super::headers(&[("Ocp-Apim-Subscription-Key", &self.api_key)])?;
+        let response = super::execute(reqwest::Method::GET, &endpoint, &headers, None).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -165,7 +157,6 @@ mod tests {
     fn test_bing_provider_new() {
         let provider = BingProvider::new("test-key");
         assert_eq!(provider.endpoint(), DEFAULT_API_URL);
-        assert!(provider.is_configured());
     }
 
     #[test]

@@ -9,6 +9,7 @@
 //! required by the standard SearXNG JSON search endpoint.
 
 use super::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults};
+use async_trait::async_trait;
 
 /// SearXNG metasearch provider.
 ///
@@ -18,11 +19,10 @@ use super::{SearchError, SearchOptions, SearchProvider, SearchResult, SearchResu
 ///
 /// # Example
 /// ```ignore
-/// use spider::features::search_providers::SearxngProvider;
-/// use spider::features::search::{SearchOptions, SearchProvider};
+/// use spider_search::{SearchOptions, SearchProvider, SearxngProvider};
 ///
 /// let provider = SearxngProvider::new("http://localhost:8080");
-/// let results = provider.search("rust web crawler", &SearchOptions::default(), None).await?;
+/// let results = provider.search("rust web crawler", &SearchOptions::default()).await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SearxngProvider {
@@ -98,36 +98,15 @@ impl SearxngProvider {
         &self,
         query: &str,
         extra_params: &[(&str, String)],
-        client: Option<&reqwest::Client>,
     ) -> Result<serde_json::Value, SearchError> {
         let endpoint = self.search_endpoint()?.to_string();
 
         let mut params = vec![("q", query.to_string()), ("format", "json".to_string())];
         params.extend(extra_params.iter().cloned());
 
-        // reqwest's `.query()` percent-encodes each pair via the `url`
-        // crate's `form_urlencoded` — the same mechanism every other
-        // provider in this module relies on for safe query construction.
-        let response = if let Some(c) = client {
-            c.get(&endpoint)
-                .header("Accept", "application/json")
-                .query(&params)
-                .send()
-                .await
-        } else {
-            let c = reqwest::ClientBuilder::new()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .map_err(|e| SearchError::RequestFailed(e.to_string()))?;
-
-            c.get(&endpoint)
-                .header("Accept", "application/json")
-                .query(&params)
-                .send()
-                .await
-        };
-
-        let response = response.map_err(|e| SearchError::RequestFailed(e.to_string()))?;
+        let endpoint = super::with_query(&endpoint, &params)?;
+        let headers = super::headers(&[("Accept", "application/json")])?;
+        let response = super::execute(reqwest::Method::GET, &endpoint, &headers, None).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -211,12 +190,12 @@ impl SearxngProvider {
     }
 }
 
+#[async_trait]
 impl SearchProvider for SearxngProvider {
     async fn search(
         &self,
         query: &str,
         options: &SearchOptions,
-        client: Option<&reqwest::Client>,
     ) -> Result<SearchResults, SearchError> {
         // Standard SearXNG JSON search API params. `format=json` requires
         // the instance to have the JSON output format enabled (a normal,
@@ -229,12 +208,16 @@ impl SearchProvider for SearxngProvider {
             extra_params.push(("language", language.clone()));
         }
 
-        let json = self.fetch_json(query, &extra_params, client).await?;
+        let json = self.fetch_json(query, &extra_params).await?;
         Ok(Self::map_results(query, json, options.limit))
     }
 
     fn provider_name(&self) -> &'static str {
         "searxng"
+    }
+
+    fn is_configured(&self) -> bool {
+        !self.base_url.is_empty()
     }
 }
 
@@ -244,8 +227,7 @@ impl SearchProvider for SearxngProvider {
 /// fabricated. `provenance` is intentionally omitted from this struct —
 /// SCORPION.md §3 has not yet locked a representation for it, and adding an
 /// always-`None` placeholder field would invent one prematurely.
-#[derive(Debug, Clone, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VideoResult {
     /// Result title.
     pub title: String,
@@ -272,8 +254,7 @@ pub struct VideoResult {
 /// Scorpion-captured `PAGE_SCREENSHOT`: this is a result Scorpion *found*,
 /// not evidence Scorpion *produced*. `provenance` is intentionally omitted
 /// for the same reason as [`VideoResult`].
-#[derive(Debug, Clone, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ImageResult {
     /// Result title, if provided.
     pub title: Option<String>,
@@ -297,8 +278,7 @@ pub struct ImageResult {
 
 /// A news discovery candidate returned by SearXNG. This is provider output
 /// only: constructing it never fetches the article or thumbnail URL.
-#[derive(Debug, Clone, Default, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NewsResult {
     /// Result headline.
     pub title: String,
@@ -364,14 +344,13 @@ impl SearxngProvider {
         &self,
         query: &str,
         options: &SearchOptions,
-        client: Option<&reqwest::Client>,
     ) -> Result<Vec<NewsResult>, SearchError> {
         let mut extra_params = vec![("categories", "news".to_string())];
         if let Some(ref language) = options.language {
             extra_params.push(("language", language.clone()));
         }
 
-        let json = self.fetch_json(query, &extra_params, client).await?;
+        let json = self.fetch_json(query, &extra_params).await?;
         Ok(Self::map_news_results(json, options.limit))
     }
 
@@ -384,14 +363,13 @@ impl SearxngProvider {
         &self,
         query: &str,
         options: &SearchOptions,
-        client: Option<&reqwest::Client>,
     ) -> Result<Vec<VideoResult>, SearchError> {
         let mut extra_params = vec![("categories", "videos".to_string())];
         if let Some(ref language) = options.language {
             extra_params.push(("language", language.clone()));
         }
 
-        let json = self.fetch_json(query, &extra_params, client).await?;
+        let json = self.fetch_json(query, &extra_params).await?;
         Ok(Self::map_video_results(json, options.limit))
     }
 
@@ -402,14 +380,13 @@ impl SearxngProvider {
         &self,
         query: &str,
         options: &SearchOptions,
-        client: Option<&reqwest::Client>,
     ) -> Result<Vec<ImageResult>, SearchError> {
         let mut extra_params = vec![("categories", "images".to_string())];
         if let Some(ref language) = options.language {
             extra_params.push(("language", language.clone()));
         }
 
-        let json = self.fetch_json(query, &extra_params, client).await?;
+        let json = self.fetch_json(query, &extra_params).await?;
         Ok(Self::map_image_results(json, options.limit))
     }
 
@@ -641,16 +618,12 @@ mod tests {
             ("q", "rust web crawler & \"quotes\"".to_string()),
             ("format", "json".to_string()),
         ];
-        let client = reqwest::Client::new();
-        let request = client
-            .get(&endpoint)
-            .query(&params)
-            .build()
-            .expect("request must build");
-        let built_url = request.url().as_str();
+        let built = crate::providers::with_query(&endpoint, &params).expect("URL must build");
+        let request_url = url::Url::parse(&built).expect("URL must parse");
+        let built_url = request_url.as_str();
         assert!(built_url.starts_with("http://localhost:8080/search?"));
         // Raw '&', '"', and spaces must not appear unescaped in the query string.
-        let query_part = request.url().query().unwrap();
+        let query_part = request_url.query().unwrap();
         assert!(!query_part.contains(' '));
         assert!(!query_part.contains('"'));
         assert!(query_part.contains("q=rust"));
@@ -746,8 +719,14 @@ mod tests {
         assert_eq!(results.len(), 1);
         let r = &results.results[0];
         assert_eq!(r.title, "Bare Result");
-        assert_eq!(r.snippet, None, "no content field must not fabricate a snippet");
-        assert_eq!(r.date, None, "no publishedDate field must not fabricate a date");
+        assert_eq!(
+            r.snippet, None,
+            "no content field must not fabricate a snippet"
+        );
+        assert_eq!(
+            r.date, None,
+            "no publishedDate field must not fabricate a date"
+        );
         assert_eq!(r.score, None, "no score field must not fabricate a score");
     }
 
@@ -832,9 +811,15 @@ mod tests {
             results[0].thumbnail_url.as_deref(),
             Some("https://img.youtube.com/vi/abc123/hq.jpg")
         );
-        assert_eq!(results[0].description.as_deref(), Some("A quick tour of Rust."));
+        assert_eq!(
+            results[0].description.as_deref(),
+            Some("A quick tour of Rust.")
+        );
         assert_eq!(results[0].creator_or_channel.as_deref(), Some("Fireship"));
-        assert_eq!(results[0].published_at.as_deref(), Some("2023-05-01T00:00:00"));
+        assert_eq!(
+            results[0].published_at.as_deref(),
+            Some("2023-05-01T00:00:00")
+        );
         assert_eq!(results[0].duration.as_deref(), Some("0:02:20"));
         assert_eq!(results[0].source.as_deref(), Some("youtube"));
 

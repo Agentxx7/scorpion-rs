@@ -148,6 +148,15 @@ features = ["serde", "headers", "dynamic-versions"]
 path = "../spider_agent_types"
 version = "2.53.4"
 
+# Canonical transport ownership (transport policy, Tor, target validation,
+# redirect/SSRF security, streaming execution, secret request headers).
+# Non-optional: `features::transport` is available in every build. Neutral
+# leaf — the dependency direction is strictly spider -> spider_transport.
+[dependencies.spider_transport]
+path = "../spider_transport"
+version = "2.53.4"
+default-features = false
+
 [dependencies.spider_agent]
 path = "../spider_agent"
 version = "2.53.4"
@@ -272,6 +281,7 @@ sync = ["tokio/sync"]
 flexbuffers = ["dep:flexbuffers"]
 serde = [
     "dep:serde",
+    "spider_transport/serde",
     "dep:serde_json",
     "hashbrown/serde",
     "string-interner/serde",
@@ -297,7 +307,7 @@ evidence = ["dep:sha2", "dep:infer", "serde"]
 # (`spider::utils::evidence::fetch_single_page_with_options`) — Tor
 # transport has no other caller in this crate, so requesting it without
 # that seam compiled in would be dead weight, not a narrower build.
-transport_tor = ["reqwest/socks", "evidence"]
+transport_tor = ["reqwest/socks", "evidence", "spider_transport/tor"]
 cache_request = ["dep:http-global-cache","dep:reqwest-middleware", "dep:http-cache-reqwest", "dep:http", "dep:http-cache"]
 cache = ["cache_request", "http-global-cache/cache", "http-cache-reqwest/manager-cacache"]
 cache_mem = ["cache_request", "http-global-cache/cache_mem"]

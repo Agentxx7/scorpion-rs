@@ -9262,6 +9262,7 @@ dependencies = [
  "spider_firewall",
  "spider_network_blocker",
  "spider_remote_cache 0.4.0",
+ "spider_transport",
  "sqlx",
  "statrs",
  "string-interner",
@@ -9635,6 +9636,18 @@ dependencies = [
  "tendril 0.5.1",
  "thiserror 2.0.19",
  "unicode-width 0.2.2",
+ "url",
+]
+
+[[package]]
+name = "spider_transport"
+version = "2.53.4"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
  "url",
 ]
 

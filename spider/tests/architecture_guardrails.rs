@@ -423,20 +423,18 @@ fn canonical_artifact_execution_seam_exists() {
 
 #[test]
 fn canonical_onion_classifier_exists() {
-    assert_pattern_exists_in_file(
-        "pub fn is_onion_url",
-        "features/transport.rs",
-        "is_onion_url is the canonical onion URL classifier",
-    );
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../spider_transport/src/transport.rs");
+    assert!(fs::read_to_string(path)
+        .unwrap()
+        .contains("pub fn is_onion_url"));
 }
 
 #[test]
 fn canonical_target_validator_exists() {
-    assert_pattern_exists_in_file(
-        "pub fn validate_target",
-        "features/transport.rs",
-        "validate_target is the canonical target validation seam",
-    );
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../spider_transport/src/transport.rs");
+    assert!(fs::read_to_string(path)
+        .unwrap()
+        .contains("pub fn validate_target"));
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +532,7 @@ fn spider_mcp_does_not_construct_reqwest_client() {
 #[test]
 fn neutral_transport_is_provider_independent() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let transport_rs = manifest_dir.join("src/features/transport.rs");
+    let transport_rs = manifest_dir.join("../spider_transport/src/transport.rs");
     let contents = fs::read_to_string(&transport_rs).expect("failed to read transport.rs");
     assert!(
         !contents.contains("github") && !contents.contains("hugging_face"),
@@ -561,7 +559,7 @@ fn neutral_artifact_execution_is_provider_independent() {
 #[test]
 fn build_streaming_client_has_rejecting_sibling() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let transport_rs = manifest_dir.join("src/features/transport.rs");
+    let transport_rs = manifest_dir.join("../spider_transport/src/transport.rs");
     let contents = fs::read_to_string(&transport_rs).expect("failed to read transport.rs");
     assert!(
         contents.contains("TransportError::TorNotCompiled"),

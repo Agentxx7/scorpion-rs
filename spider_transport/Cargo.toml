@@ -1,0 +1,71 @@
+[package]
+name = "spider_transport"
+version = "2.53.4"
+authors = ["j-mendez <jeff@spider.cloud>"]
+description = "Canonical network transport ownership for the Scorpion workspace: transport policy, Tor, target validation, redirect/SSRF security, streaming execution, and secret request headers."
+repository = "https://github.com/spider-rs/spider"
+keywords = ["transport", "tor", "http", "security", "spider"]
+categories = ["web-programming", "asynchronous"]
+license = "MIT"
+documentation = "https://docs.rs/spider_transport"
+homepage = "https://spider.cloud/crates"
+edition = "2021"
+
+[badges]
+maintenance = { status = "actively-developed" }
+
+# NOTE: this crate is a neutral leaf. It must never gain a path dependency on
+# any workspace consumer (spider, spider_agent, spider_search, spider_cli,
+# spider_mcp, spider_worker, spider_utils) — the dependency direction is
+# strictly one-way, enforced by architecture guardrails.
+
+[dependencies]
+url = "2"
+serde = { version = "1", optional = true, features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "time",
+    "rt-multi-thread",
+] }
+reqwest = { version = "0.13", features = [
+    "brotli",
+    "gzip",
+    "deflate",
+    "zstd",
+    "stream",
+    "http2",
+    "query"
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "time",
+    "rt",
+] }
+reqwest = { version = "0.13", features = [
+    "brotli",
+    "gzip",
+    "deflate",
+    "stream",
+    "http2",
+    "query"
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+serde_json = "1"
+
+[features]
+default = []
+
+# Canonical Tor-over-SOCKS5h transport support (fail-closed). Consumers
+# forward their own feature names onto this (spider: `transport_tor`).
+tor = ["reqwest/socks"]
+
+# serde support for transport vocabulary types (Serialize everywhere;
+# TorTransportConfig deserializes through its validating constructor).
+serde = ["dep:serde"]

@@ -3115,63 +3115,10 @@ impl Website {
     /// attacker-controlled page uses (cf. GHSA-8v6v-g4rh-jmcm). Operates
     /// on the already-parsed `Url` so it adds no allocation per hop.
     pub(crate) fn is_ssrf_redirect(url: &Url) -> bool {
-        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-        fn is_internal_v4(v4: Ipv4Addr) -> bool {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                // RFC 1122 reserves all of 0.0.0.0/8 as "this network";
-                // `is_unspecified` only matches 0.0.0.0 itself.
-                || v4.octets()[0] == 0
-        }
-
-        fn is_internal_v6(v6: Ipv6Addr) -> bool {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // fc00::/7 is the IPv6 side of RFC 1918, and where the
-                // cloud metadata service answers (fd00:ec2::254).
-                || v6.is_unique_local()
-                // fe80::/10 is the IPv6 side of 169.254.0.0/16.
-                || v6.is_unicast_link_local()
-                || v6.to_ipv4_mapped().is_some_and(is_internal_v4)
-        }
-
-        let scheme = url.scheme();
-        if scheme != "http" && scheme != "https" {
-            return true;
-        }
-        let host = match url.host_str() {
-            Some(h) => h,
-            None => return true,
-        };
-        if host == "localhost"
-            || host == "0.0.0.0"
-            || host.ends_with(".localhost")
-            || host == "[::1]"
-            || host == "[::0]"
-        {
-            return true;
-        }
-        if host == "169.254.169.254"
-            || host == "metadata.google.internal"
-            || host == "metadata.goog"
-        {
-            return true;
-        }
-        // `url` serializes IPv6 hosts with brackets; strip one pair so
-        // bracketed / IPv4-mapped literals can't bypass the parse.
-        let ip_host = host
-            .strip_prefix('[')
-            .and_then(|h| h.strip_suffix(']'))
-            .unwrap_or(host);
-        match ip_host.parse::<IpAddr>() {
-            Ok(IpAddr::V4(v4)) => is_internal_v4(v4),
-            Ok(IpAddr::V6(v6)) => is_internal_v6(v6),
-            _ => false,
-        }
+        // Canonical owner: the spider_transport leaf crate. This associated
+        // fn is a one-line delegation kept so existing `Website` call sites
+        // and tests are unchanged; no SSRF logic lives here.
+        crate::features::transport::is_ssrf_redirect(url)
     }
 
     /// Redirect policy for `Loose` (and the no-parsed-domain fallback):

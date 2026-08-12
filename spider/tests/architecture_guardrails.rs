@@ -1112,3 +1112,36 @@ fn scanner_detects_provider_bypass_of_canonical_transport() {
         "synthetic conforming provider must contain the canonical seam call"
     );
 }
+
+#[test]
+fn automation_proxy_resolution_cannot_authorize_direct_fallback() {
+    let engine = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../spider_agent/src/automation/engine.rs"),
+    )
+    .expect("failed to read spider_agent automation engine");
+    let browser = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../spider_agent/src/automation/browser.rs"),
+    )
+    .expect("failed to read spider_agent automation browser");
+
+    for forbidden in [
+        "if let Ok(proxy) = reqwest::Proxy::all",
+        "builder.build().ok()",
+    ] {
+        assert!(
+            !engine.contains(forbidden),
+            "automation proxy errors must not be discarded via {forbidden:?}"
+        );
+    }
+    assert!(
+        browser.contains("engine.with_proxies(cfgs.proxies.as_deref())?;"),
+        "automation construction must propagate explicit proxy resolution failure"
+    );
+
+    let synthetic = "if let Ok(proxy) = reqwest::Proxy::all(url) { builder = builder.proxy(proxy); } builder.build().ok()";
+    assert!(
+        synthetic.contains("if let Ok(proxy) = reqwest::Proxy::all")
+            && synthetic.contains("builder.build().ok()"),
+        "guardrail conditions must detect swallowed parse and build failures"
+    );
+}

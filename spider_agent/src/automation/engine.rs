@@ -261,21 +261,21 @@ impl RemoteMultimodalEngine {
     /// Set HTTP proxy URLs for LLM API requests.
     ///
     /// Builds a `reqwest::Client` with the given proxies and a 120s timeout.
-    /// Invalid proxy URLs are silently skipped.
-    pub fn with_proxies(&mut self, proxies: Option<&[String]>) -> &mut Self {
-        self.client = proxies.and_then(|urls| {
-            if urls.is_empty() {
-                return None;
-            }
-            let mut builder = Client::builder().timeout(std::time::Duration::from_secs(120));
-            for url in urls {
-                if let Ok(proxy) = reqwest::Proxy::all(url) {
+    /// Invalid proxy URLs and client construction failures are returned before
+    /// execution so an explicit proxy request can never degrade to direct HTTP.
+    pub fn with_proxies(&mut self, proxies: Option<&[String]>) -> EngineResult<&mut Self> {
+        self.client = match proxies {
+            Some(urls) if !urls.is_empty() => {
+                let mut builder = Client::builder().timeout(std::time::Duration::from_secs(120));
+                for url in urls {
+                    let proxy = reqwest::Proxy::all(url)?;
                     builder = builder.proxy(proxy);
                 }
+                Some(builder.build()?)
             }
-            builder.build().ok()
-        });
-        self
+            _ => None,
+        };
+        Ok(self)
     }
 
     /// Get the HTTP client for LLM requests.
@@ -1845,6 +1845,53 @@ fn parse_url_classifications(response: &str, expected_len: usize) -> Vec<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_proxy_and_empty_proxy_preserve_direct_client_semantics() {
+        for proxies in [None, Some(Vec::<String>::new())] {
+            let mut engine = RemoteMultimodalEngine::new("https://api.example.com", "model", None);
+            engine
+                .with_proxies(proxies.as_deref())
+                .expect("absence of a proxy request is valid");
+            assert!(engine.client.is_none());
+            let _ = engine.http_client();
+        }
+    }
+
+    #[test]
+    fn valid_proxy_resolves_a_dedicated_client() {
+        let mut engine = RemoteMultimodalEngine::new("https://api.example.com", "model", None);
+        let proxies = vec!["http://127.0.0.1:8080".to_string()];
+        engine
+            .with_proxies(Some(&proxies))
+            .expect("valid proxy must resolve");
+        assert!(engine.client.is_some());
+    }
+
+    #[test]
+    fn invalid_proxy_is_a_truthful_http_error_and_cannot_select_direct() {
+        let mut engine = RemoteMultimodalEngine::new("https://api.example.com", "model", None);
+        let proxies = vec!["not a proxy url ://".to_string()];
+        let error = engine
+            .with_proxies(Some(&proxies))
+            .expect_err("invalid explicit proxy must fail closed");
+        assert!(matches!(error, EngineError::Http(_)));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(engine.client.is_none());
+    }
+
+    #[test]
+    fn multiple_valid_proxies_preserve_existing_policy() {
+        let mut engine = RemoteMultimodalEngine::new("https://api.example.com", "model", None);
+        let proxies = vec![
+            "http://127.0.0.1:8080".to_string(),
+            "socks5://127.0.0.1:1080".to_string(),
+        ];
+        engine
+            .with_proxies(Some(&proxies))
+            .expect("all valid proxies must resolve in caller order");
+        assert!(engine.client.is_some());
+    }
 
     #[test]
     fn test_parse_url_classifications_valid() {

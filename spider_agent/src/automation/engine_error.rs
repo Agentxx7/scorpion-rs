@@ -59,7 +59,15 @@ impl fmt::Display for EngineError {
     }
 }
 
-impl StdError for EngineError {}
+impl StdError for EngineError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::Json(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl EngineError {
     /// Whether this error is transient and warrants retrying on a different model.

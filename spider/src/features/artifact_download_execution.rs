@@ -46,7 +46,7 @@
 //!
 //! Requires the `evidence` feature (for the `sha2` dependency used to
 //! verify locally-computable identities) and, like the streaming
-//! transport seam itself, is unavailable under `wreq`/`cache_request` —
+//! transport seam itself, is unavailable under `wreq` —
 //! neither of those client stacks is audited by `transport`'s streaming
 //! seam, so this executor is equally absent there rather than silently
 //! degrading.

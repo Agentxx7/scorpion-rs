@@ -284,7 +284,7 @@ impl HuggingFaceModelProvider {
         &self,
         endpoint: url::Url,
     ) -> Result<reqwest::Response, HuggingFaceProviderError> {
-        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        #[cfg(not(feature = "wreq"))]
         {
             crate::features::transport::execute_streaming_request(
                 &endpoint,
@@ -294,11 +294,11 @@ impl HuggingFaceModelProvider {
             .await
             .map_err(|error| HuggingFaceProviderError::RequestFailed(error.to_string()))
         }
-        #[cfg(any(feature = "wreq", feature = "cache_request"))]
+        #[cfg(feature = "wreq")]
         {
             let _ = endpoint;
             Err(HuggingFaceProviderError::RequestFailed(
-                "Hugging Face provider is unavailable under wreq or cache_request".to_string(),
+                "Hugging Face provider is unavailable under wreq".to_string(),
             ))
         }
     }

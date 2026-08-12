@@ -246,7 +246,7 @@ lazy_static! {
     ]).expect("valid patterns");
 }
 
-#[cfg(feature = "cache_request")]
+#[cfg(all(feature = "cache_request", not(feature = "cache_request")))]
 lazy_static! {
     /// Aho-Corasick automaton for detecting `http-cache-reqwest`-wrapped
     /// transport errors. The middleware stringifies the underlying
@@ -341,7 +341,7 @@ fn is_dns_error(err: &crate::client::Error) -> bool {
 ///
 /// Bounded depth (6 layers) so we don't loop on cyclic chains, never
 /// allocate, and never panic.
-#[cfg(feature = "cache_request")]
+#[cfg(all(feature = "cache_request", not(feature = "cache_request")))]
 fn extract_inner_reqwest_error(err: &crate::client::Error) -> Option<&reqwest::Error> {
     use std::error::Error;
     let mut source: Option<&(dyn Error + 'static)> = err.source();
@@ -375,7 +375,7 @@ fn extract_inner_reqwest_error(err: &crate::client::Error) -> Option<&reqwest::E
 /// Does NOT call `is_dns_error()` — that's already invoked by the main
 /// classifier on the top-level error before we reach this helper, and it
 /// already walks the chain.
-#[cfg(feature = "cache_request")]
+#[cfg(all(feature = "cache_request", not(feature = "cache_request")))]
 fn classify_reqwest_error_borrowed(err: &reqwest::Error) -> Option<StatusCode> {
     use std::error::Error;
 
@@ -1437,12 +1437,6 @@ pub async fn confirm_tunnel_failure_with_local_dns(
     // independent local-DNS confirmation to upgrade to 525 NXDOMAIN.
     // Matching only 526 (the original gate) leaves SOCKS5+cache_request
     // chains that surface as 503 stuck retrying through the strategy.
-    #[cfg(feature = "cache_request")]
-    let qualifies_cache_wrapped = (initial_status == *ADDRESS_UNREACHABLE_ERROR
-        || initial_status == *UNREACHABLE_REQUEST_ERROR)
-        && err.is_middleware()
-        && CACHE_WRAPPED_TRANSPORT_AC.is_match(&err.to_string());
-    #[cfg(not(feature = "cache_request"))]
     let qualifies_cache_wrapped = false;
 
     if !qualifies_503_tunnel && !qualifies_cache_wrapped {
@@ -1827,21 +1821,6 @@ pub(crate) fn get_error_http_status_code(err: &crate::client::Error) -> StatusCo
     // The chain-walk runs FIRST so we get accurate classification on the
     // fixed variant. The string-match safety net only fires when the walk
     // fails (legacy variant or unexpected chain shape).
-    #[cfg(feature = "cache_request")]
-    if err.is_middleware() {
-        if let Some(inner) = extract_inner_reqwest_error(err) {
-            if let Some(status) = classify_reqwest_error_borrowed(inner) {
-                return status;
-            }
-        }
-        // Fall back to the string-match safety net for legacy variants
-        // and any unexpected chain shape where the walk + typed
-        // inspection both came up empty.
-        if CACHE_WRAPPED_TRANSPORT_AC.is_match(&err.to_string()) {
-            return *ADDRESS_UNREACHABLE_ERROR;
-        }
-    }
-
     if err.is_connect() {
         if let Some(io_err) = err.source().and_then(|e| e.downcast_ref::<io::Error>()) {
             match io_err.kind() {
@@ -3472,12 +3451,10 @@ pub(crate) fn request_error_to_failure(err: RequestError) -> spider_transport::C
         CrawlerFailureKind::Other
     };
 
-    #[cfg(all(not(feature = "cache_request"), not(feature = "wreq")))]
+    #[cfg(not(feature = "wreq"))]
     let backend = BackendProvenance::Reqwest;
-    #[cfg(all(not(feature = "cache_request"), feature = "wreq"))]
+    #[cfg(feature = "wreq")]
     let backend = BackendProvenance::Wreq;
-    #[cfg(feature = "cache_request")]
-    let backend = BackendProvenance::CacheMiddleware;
 
     let mut failure = CrawlerFailure::with_source(kind, backend, err);
     if let Some(status) = observed {
@@ -3790,6 +3767,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
     // Cache the byte length at build time so `size()`, budget checks, and
     // accounting stay correct for both in-memory and later-spooled pages
     // without ever needing to peek at the content again.
+    #[cfg(feature = "balance")]
     let content_byte_len = res.content.as_ref().map_or(0, |c| c.len());
 
     // Track in-memory HTML bytes for the balance budget check.
@@ -4515,7 +4493,7 @@ where
 impl Page {
     /// Canonical request-only acquisition. Raw-client constructors below are
     /// retained solely as the explicit upstream compatibility boundary.
-    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "wreq"))]
     pub async fn new_page_with_executor(
         url: &str,
         executor: &spider_transport::ResolvedExecutor,
@@ -4536,8 +4514,20 @@ impl Page {
         cache_policy: &Option<BasicCachePolicy>,
         cache_namespace: Option<&str>,
     ) -> Self {
-        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        #[cfg(not(feature = "wreq"))]
         if let Some(executor) = _executor {
+            #[cfg(feature = "cache_request")]
+            return build(
+                url,
+                crate::cache_request::fetch_page_html_with_cache_executor(
+                    url,
+                    executor,
+                    cache_options,
+                    cache_namespace,
+                )
+                .await,
+            );
+            #[cfg(not(feature = "cache_request"))]
             return Self::new_page_with_executor(url, executor).await;
         }
         Self::new_page_with_cache(
@@ -4552,7 +4542,7 @@ impl Page {
 
     /// Canonical streaming-crawl entry point. Network execution is delegated
     /// to `ResolvedExecutor`; Spider retains link extraction policy.
-    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "wreq"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn new_page_streaming_with_executor<
         A: PartialEq
@@ -4576,7 +4566,23 @@ impl Page {
         prior_domain: &Option<Box<Url>>,
         domain_parsed: &mut Option<Box<Url>>,
         links_pages: &mut Option<hashbrown::HashSet<A>>,
+        cache_options: Option<CacheOptions>,
+        cache_namespace: Option<&str>,
     ) -> Self {
+        #[cfg(not(feature = "cache_request"))]
+        let _ = (&cache_options, cache_namespace);
+        #[cfg(feature = "cache_request")]
+        let mut page = build(
+            url,
+            crate::cache_request::fetch_page_html_with_cache_executor(
+                url,
+                executor,
+                cache_options,
+                cache_namespace,
+            )
+            .await,
+        );
+        #[cfg(not(feature = "cache_request"))]
         let mut page = Self::new_page_with_executor(url, executor).await;
         if !external_domains_caseless.is_empty() {
             page.set_external(external_domains_caseless.clone());
@@ -4627,10 +4633,12 @@ impl Page {
         prior_domain: &Option<Box<Url>>,
         domain_parsed: &mut Option<Box<Url>>,
         links_pages: &mut Option<hashbrown::HashSet<A>>,
+        cache_options: Option<CacheOptions>,
+        cache_namespace: Option<&str>,
         http_first_byte_args: (Option<std::time::Duration>, Option<std::time::Duration>),
         engine: Option<crate::fetch_engine::EngineFetchCtx<'_>>,
     ) -> Self {
-        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        #[cfg(not(feature = "wreq"))]
         if engine.is_none() {
             if let Some(executor) = _executor {
                 return Self::new_page_streaming_with_executor(
@@ -4645,6 +4653,8 @@ impl Page {
                     prior_domain,
                     domain_parsed,
                     links_pages,
+                    cache_options,
+                    cache_namespace,
                 )
                 .await;
             }
@@ -12066,9 +12076,6 @@ async fn test_build_respects_pre_classified_525_does_not_force_retry() {
     // Simulate post-confirmation state: status upgraded to 525, error
     // preserved for diagnostics. This is what `build_error_page_response`
     // produces after the async two-signal confirmation runs.
-    #[cfg(feature = "cache_request")]
-    let wrapped_err = reqwest_middleware::Error::Reqwest(err);
-    #[cfg(not(feature = "cache_request"))]
     let wrapped_err = err;
     let res = PageResponse {
         status_code: *DNS_RESOLVE_ERROR,
@@ -12131,9 +12138,6 @@ async fn test_build_transient_503_still_retries() {
     let target = "https://localhost/";
     let err = client.get(target).send().await.expect_err("must err");
 
-    #[cfg(feature = "cache_request")]
-    let wrapped_err = reqwest_middleware::Error::Reqwest(err);
-    #[cfg(not(feature = "cache_request"))]
     let wrapped_err = err;
     let res = PageResponse {
         status_code: *UNREACHABLE_REQUEST_ERROR, // 503, transient
@@ -12670,7 +12674,11 @@ async fn test_confirm_tunnel_failure_no_op_for_non_tunnel_errors() {
 /// a Cargo.toml change just for tests). This mirrors the exact Display
 /// output that `http-cache-reqwest` produces when its inner request fails:
 /// `"Cache error: error sending request for url (...)"`.
-#[cfg(all(not(feature = "decentralized"), feature = "cache_request"))]
+#[cfg(all(
+    not(feature = "decentralized"),
+    feature = "cache_request",
+    not(feature = "cache_request")
+))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_confirm_tunnel_failure_cache_wrapped_nxdomain_upgrades_to_525() {
     let target = "https://this-host-must-not-exist.invalid/";
@@ -12719,7 +12727,11 @@ async fn test_confirm_tunnel_failure_cache_wrapped_nxdomain_upgrades_to_525() {
 /// hosts that resolve locally — only NXDOMAIN evidence flips us to 525.
 /// `Resolved` and `TimedOut` keep 526 so `is_retryable_status` stays
 /// false and the loop still halts.
-#[cfg(all(not(feature = "decentralized"), feature = "cache_request"))]
+#[cfg(all(
+    not(feature = "decentralized"),
+    feature = "cache_request",
+    not(feature = "cache_request")
+))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_confirm_tunnel_failure_cache_wrapped_resolved_keeps_526() {
     let target = "https://localhost/";
@@ -12759,7 +12771,11 @@ async fn test_confirm_tunnel_failure_cache_wrapped_resolved_keeps_526() {
 /// misclassified as "transport". This test guards that the AC pattern
 /// continues to require the exact "Cache error: error sending request"
 /// prefix.
-#[cfg(all(not(feature = "decentralized"), feature = "cache_request"))]
+#[cfg(all(
+    not(feature = "decentralized"),
+    feature = "cache_request",
+    not(feature = "cache_request")
+))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_confirm_tunnel_failure_cache_wrapped_unrelated_keeps_initial() {
     // Unrelated middleware error — not a transport wrap.

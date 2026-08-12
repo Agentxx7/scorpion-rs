@@ -300,12 +300,8 @@ pub extern crate auto_encoder;
 pub extern crate flexbuffers;
 #[cfg(feature = "gemini")]
 pub extern crate gemini_rust;
-#[cfg(feature = "cache_request")]
-pub extern crate http_cache_reqwest;
 #[cfg(feature = "cache_openai")]
 pub extern crate moka;
-#[cfg(feature = "cache_request")]
-pub extern crate reqwest_middleware;
 #[cfg(feature = "serde")]
 pub extern crate serde;
 #[cfg(feature = "ua_generator")]
@@ -386,8 +382,13 @@ pub mod agent {
     pub use spider_agent::TavilyProvider;
 }
 
+#[cfg(all(feature = "cache_request", not(feature = "wreq")))]
+mod cache_request;
 /// Client interface.
 pub mod client;
+
+#[cfg(all(feature = "cache_request", feature = "wreq"))]
+compile_error!("cache_request + wreq is explicitly rejected: cache_request requires canonical ResolvedExecutor execution; wreq convergence is a separate frontier");
 /// Configuration structure for `Website`.
 pub mod configuration;
 /// Optional features to use.

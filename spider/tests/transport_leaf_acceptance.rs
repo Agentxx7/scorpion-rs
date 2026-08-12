@@ -337,7 +337,7 @@ fn canonical_consumers_still_use_the_canonical_transport_seam() {
 // (5)-(12) behavior — offline local fixtures, through the façade seam
 // ---------------------------------------------------------------------------
 
-#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+#[cfg(not(feature = "wreq"))]
 mod behavior {
     use spider::features::secret_request_headers::SecretRequestHeaders;
     use spider::features::transport::{

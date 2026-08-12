@@ -380,7 +380,7 @@ impl RobotFileParser {
     }
 
     /// Read through the canonical request-only executor.
-    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "wreq"))]
     pub async fn read_with_executor(
         &mut self,
         executor: &spider_transport::ResolvedExecutor,

@@ -9225,7 +9225,6 @@ dependencies = [
  "http 1.5.0",
  "http-cache",
  "http-cache-semantics",
- "http-global-cache",
  "httpdate",
  "infer",
  "io-uring",
@@ -9246,7 +9245,6 @@ dependencies = [
  "rand 0.9.5",
  "regex",
  "reqwest 0.13.4",
- "reqwest-middleware",
  "serde",
  "serde_json",
  "serde_regex",
@@ -9255,7 +9253,6 @@ dependencies = [
  "sitemap",
  "smallvec",
  "sonic-rs",
- "spider-http-cache-reqwest",
  "spider_agent",
  "spider_agent_types",
  "spider_fingerprint",
@@ -9294,25 +9291,6 @@ checksum = "4a5d684210c0a71831b805fc27f4efb5c55b503fe4e32d246323cd7de10f08c6"
 dependencies = [
  "log",
  "spider-markup5ever",
-]
-
-[[package]]
-name = "spider-http-cache-reqwest"
-version = "1.0.0-alpha.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb4768aed3241ba15eb1b2bd54f89195e2b0f30c4c33aff0a43df67092d96146"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "http 1.5.0",
- "http-body 1.1.0",
- "http-body-util",
- "http-cache",
- "http-cache-semantics",
- "reqwest 0.13.4",
- "reqwest-middleware",
- "url",
 ]
 
 [[package]]

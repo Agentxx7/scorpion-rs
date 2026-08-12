@@ -59,13 +59,8 @@ pub mod artifact_download_binding;
 /// request seam straight to a caller-owned destination on disk, hashing
 /// while streaming, without ever materializing the full body in memory.
 /// Requires `evidence` (for the `sha2` dependency) and, like the
-/// streaming transport seam it consumes, is unavailable under
-/// `wreq`/`cache_request`.
-#[cfg(all(
-    feature = "evidence",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+/// streaming transport seam it consumes, is unavailable under `wreq`.
+#[cfg(all(feature = "evidence", not(feature = "wreq")))]
 pub mod artifact_download_execution;
 /// Provider-neutral metadata for versioned repository artifacts. Always
 /// available and performs no acquisition, download, parsing, or verification.

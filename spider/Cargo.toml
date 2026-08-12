@@ -49,8 +49,6 @@ infer = { version = "0.22", default-features = false, features = ["alloc"], opti
 async-trait = { version = "0.1" }
 strum = { version = "0.28", features = ["derive"] }
 async_job = { version = "0.1", optional = true }
-reqwest-middleware = { version = "0.5", optional = true, default-features = false }
-http-cache-reqwest = { package = "spider-http-cache-reqwest", version = "1.0.0-alpha.7", optional = true, default-features = false }
 const_format = { version = "0.2", optional = true }
 async-openai = { version = "0.35", optional = true, features = ["chat-completion"] }
 tiktoken-rs = { version = "0.11", optional = true }
@@ -68,8 +66,7 @@ moka = { version = "0.12", features = ["future"], optional = true }
 fastrand = { version = "2", optional = true }
 hickory-resolver = { version = "0.26", optional = true, default-features = false, features = ["tokio", "system-config"] }
 http-cache-semantics = { version = "3", optional = true }
-http-cache = { version = "1.0.0-alpha.5", optional = true, default-features = false, features = ["url-standard"] }
-http-global-cache = { version = "0.2.0", optional = true, default-features = false, features = ["cache_request"] }
+http-cache = { version = "1.0.0-alpha.5", optional = true, default-features = false, features = ["url-standard", "manager-moka"] }
 http = { version = "1", optional = true }
 phf = "0.13"
 auto_encoder = { version = "0.2" }
@@ -314,9 +311,9 @@ evidence = ["dep:sha2", "dep:infer", "serde"]
 # transport has no other caller in this crate, so requesting it without
 # that seam compiled in would be dead weight, not a narrower build.
 transport_tor = ["reqwest/socks", "evidence", "spider_transport/tor"]
-cache_request = ["dep:http-global-cache","dep:reqwest-middleware", "dep:http-cache-reqwest", "dep:http", "dep:http-cache"]
-cache = ["cache_request", "http-global-cache/cache", "http-cache-reqwest/manager-cacache"]
-cache_mem = ["cache_request", "http-global-cache/cache_mem"]
+cache_request = ["dep:http", "dep:http-cache", "dep:http-cache-semantics"]
+cache = ["cache_request", "http-cache/manager-cacache"]
+cache_mem = ["cache_request"]
 cache_openai = ["dep:moka"]
 cache_chrome_hybrid = [
     "cache",

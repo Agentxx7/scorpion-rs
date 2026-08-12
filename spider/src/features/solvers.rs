@@ -132,7 +132,7 @@ lazy_static! {
         .expect("valid tile‑class pattern");
 }
 
-#[cfg(any(not(feature = "wreq"), feature = "cache_request"))]
+#[cfg(not(feature = "wreq"))]
 lazy_static! {
     /// Gemini client – plain reqwest client (no middleware).
     static ref GEMINI_CLIENT: reqwest::Client = {
@@ -142,7 +142,7 @@ lazy_static! {
             .expect("failed to build Gemini client")
     };
 }
-#[cfg(all(feature = "wreq", not(feature = "cache_request")))]
+#[cfg(feature = "wreq")]
 lazy_static! {
     /// Gemini client – plain wreq client (no middleware).
     static ref GEMINI_CLIENT: wreq::Client = {

@@ -134,21 +134,17 @@ use http_cache_semantics::{RequestLike, ResponseLike};
 
 use log::{info, log_enabled, Level};
 
-#[cfg(any(not(feature = "wreq"), feature = "cache_request"))]
+#[cfg(not(feature = "wreq"))]
 use reqwest::{Response, StatusCode};
-#[cfg(all(feature = "wreq", not(feature = "cache_request")))]
+#[cfg(feature = "wreq")]
 use wreq::{Response, StatusCode};
 
-#[cfg(all(not(feature = "cache_request"), not(feature = "wreq")))]
+#[cfg(not(feature = "wreq"))]
 pub(crate) type RequestError = reqwest::Error;
 
 /// The request error (for `wreq`).
-#[cfg(all(not(feature = "cache_request"), feature = "wreq"))]
+#[cfg(feature = "wreq")]
 pub(crate) type RequestError = wreq::Error;
-
-/// The request error (for `reqwest_middleware` with caching).
-#[cfg(feature = "cache_request")]
-pub(crate) type RequestError = reqwest_middleware::Error;
 
 /// The wait for duration timeouts.
 #[cfg(feature = "chrome")]
@@ -2227,7 +2223,7 @@ pub async fn put_hybrid_cache(
     method: &str,
     http_request_headers: std::collections::HashMap<String, String>,
 ) {
-    use crate::http_cache_reqwest::CacheManager;
+    use http_cache::CacheManager;
     use http_cache_semantics::CachePolicy;
 
     // Never cache empty or near-empty HTML responses.
@@ -2325,7 +2321,7 @@ pub async fn put_hybrid_cache(
         let _ = crate::website::CACACHE_MANAGER
             .put(
                 cache_key.into(),
-                http_cache_reqwest::HttpResponse {
+                http_cache::HttpResponse {
                     url: http_response.url,
                     body: http_response.body,
                     headers: http_cache::HttpHeaders::Modern(
@@ -7456,7 +7452,7 @@ pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageRespo
 
 /// Canonical crawler acquisition through the leaf-owned executor. This
 /// consumes the backend-neutral stream and never borrows a raw client.
-#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+#[cfg(not(feature = "wreq"))]
 pub async fn fetch_page_html_with_executor(
     target_url: &str,
     executor: &spider_transport::ResolvedExecutor,
@@ -7507,8 +7503,8 @@ pub async fn fetch_page_html_with_executor(
     page_response_from_crawler_response(target_url, response).await
 }
 
-#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
-async fn page_response_from_crawler_response(
+#[cfg(not(feature = "wreq"))]
+pub(crate) async fn page_response_from_crawler_response(
     target_url: &str,
     mut response: spider_transport::CrawlerResponse,
 ) -> PageResponse {
@@ -7560,11 +7556,7 @@ async fn page_response_from_crawler_response(
 /// Fetch a bounded byte representation through a pre-resolved mode. Canonical
 /// callers use the neutral executor stream; raw-client execution is retained
 /// here only for explicitly noncanonical/compatibility modes.
-#[cfg(all(
-    feature = "sitemap",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+#[cfg(all(feature = "sitemap", not(feature = "wreq")))]
 pub(crate) async fn fetch_bytes_for_mode(
     target_url: &str,
     executor: Option<&spider_transport::ResolvedExecutor>,
@@ -7619,7 +7611,7 @@ pub(crate) async fn fetch_bytes_for_mode(
     Ok((status, bytes))
 }
 
-#[cfg(all(feature = "sitemap", any(feature = "wreq", feature = "cache_request")))]
+#[cfg(all(feature = "sitemap", feature = "wreq"))]
 pub(crate) async fn fetch_bytes_for_mode(
     target_url: &str,
     _executor: Option<&spider_transport::ResolvedExecutor>,
@@ -7749,11 +7741,7 @@ pub async fn fetch_page_html_raw_conditional(
     page_response
 }
 
-#[cfg(all(
-    feature = "etag_cache",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+#[cfg(all(feature = "etag_cache", not(feature = "wreq")))]
 /// Execute an ETag/Last-Modified request through the pre-resolved crawl mode.
 pub async fn fetch_page_html_conditional_for_mode(
     target_url: &str,
@@ -7811,10 +7799,7 @@ pub async fn fetch_page_html_conditional_for_mode(
     }
 }
 
-#[cfg(all(
-    feature = "etag_cache",
-    any(feature = "wreq", feature = "cache_request")
-))]
+#[cfg(all(feature = "etag_cache", feature = "wreq"))]
 /// Explicitly noncanonical conditional-request fallback for alternate backends.
 pub async fn fetch_page_html_conditional_for_mode(
     target_url: &str,
@@ -8681,7 +8666,7 @@ pub async fn get_cached_url_base(
     cache_policy: &Option<BasicCachePolicy>, // optional override/behavior
     namespace: Option<&str>,
 ) -> Option<String> {
-    use crate::http_cache_reqwest::CacheManager;
+    use http_cache::CacheManager;
 
     let auth_opt = match cache_options {
         Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => None,
@@ -12145,12 +12130,9 @@ error was encountered while trying to use an ErrorDocument to handle the request
 
         put_hybrid_cache(&cache_key, http_response, "GET", request_headers).await;
 
-        let client = reqwest_middleware::ClientBuilder::new(
-            reqwest::ClientBuilder::new()
-                .build()
-                .expect("build reqwest client"),
-        )
-        .build();
+        let client = reqwest::ClientBuilder::new()
+            .build()
+            .expect("build reqwest client");
 
         let cache_options = Some(CacheOptions::Yes);
         let cache_policy = None;
@@ -12209,12 +12191,9 @@ error was encountered while trying to use an ErrorDocument to handle the request
 
         let target_url = format!("http://{}/perf-cache-test", addr);
 
-        let client = reqwest_middleware::ClientBuilder::new(
-            reqwest::ClientBuilder::new()
-                .build()
-                .expect("build reqwest client"),
-        )
-        .build();
+        let client = reqwest::ClientBuilder::new()
+            .build()
+            .expect("build reqwest client");
 
         let network_start = tokio::time::Instant::now();
         let network_page = fetch_page_html_raw(&target_url, &client).await;

@@ -61,11 +61,8 @@ use tokio::{
 use tokio_stream::StreamExt;
 use url::Url;
 
-#[cfg(feature = "cache_request")]
-use http_cache_reqwest::{Cache, CacheMode, HttpCache, HttpCacheOptions};
-
-#[cfg(feature = "cache_request")]
-pub use http_global_cache::CACACHE_MANAGER;
+#[cfg(all(feature = "cache_request", not(feature = "wreq")))]
+pub use crate::cache_request::CACACHE_MANAGER;
 
 /// The max backoff duration in seconds.
 const BACKOFF_MAX_DURATION: tokio::time::Duration = tokio::time::Duration::from_secs(60);
@@ -938,7 +935,7 @@ pub fn is_safe_javascript_challenge(page: &Page) -> bool {
         target_os = "visionos",
         target_os = "watchos",
     ),
-    any(not(feature = "wreq"), feature = "cache_request")
+    not(feature = "wreq")
 ))]
 /// Bind connections only on the specified network interface.
 pub fn set_interface(client: ClientBuilder, network_interface: &str) -> ClientBuilder {
@@ -946,7 +943,7 @@ pub fn set_interface(client: ClientBuilder, network_interface: &str) -> ClientBu
 }
 
 #[cfg(not(any(
-    all(feature = "wreq", not(feature = "cache_request")),
+    feature = "wreq",
     target_os = "android",
     target_os = "fuchsia",
     target_os = "illumos",
@@ -969,7 +966,6 @@ pub fn set_interface(client: ClientBuilder, _interface: &str) -> ClientBuilder {
 /// `Into<Cow<'static, str>>` — a non-static `&str` does not satisfy it.
 #[cfg(all(
     feature = "wreq",
-    not(feature = "cache_request"),
     any(
         target_os = "android",
         target_os = "fuchsia",
@@ -988,7 +984,6 @@ pub fn set_interface_wreq(client: ClientBuilder, network_interface: &str) -> Cli
 /// No-op shim for platforms where wreq's `interface` is unavailable.
 #[cfg(all(
     feature = "wreq",
-    not(feature = "cache_request"),
     not(any(
         target_os = "android",
         target_os = "fuchsia",
@@ -1683,11 +1678,7 @@ impl Website {
         }
     }
 
-    #[cfg(all(
-        not(feature = "decentralized"),
-        not(feature = "wreq"),
-        not(feature = "cache_request")
-    ))]
+    #[cfg(all(not(feature = "decentralized"), not(feature = "wreq")))]
     fn resolve_canonical_executor(
         &mut self,
     ) -> Result<Arc<ResolvedExecutor>, spider_transport::TransportError> {
@@ -1758,12 +1749,12 @@ impl Website {
         Ok(executor)
     }
 
-    #[cfg(any(feature = "decentralized", feature = "wreq", feature = "cache_request"))]
+    #[cfg(any(feature = "decentralized", feature = "wreq"))]
     fn resolve_canonical_executor(
         &mut self,
     ) -> Result<Arc<ResolvedExecutor>, spider_transport::TransportError> {
         Err(spider_transport::TransportError::IncompatibleConfiguration(
-            "canonical ResolvedExecutor requires the reqwest crawler backend; wreq, cache_request, and decentralized modes are explicitly noncanonical".into(),
+            "canonical ResolvedExecutor requires the reqwest crawler backend; wreq and decentralized modes are explicitly noncanonical".into(),
         ))
     }
     /// Lazily create (or return the already-initialized) per-website spool
@@ -2993,11 +2984,7 @@ impl Website {
     ///   Returns `Ok(true)`.
     /// - Any incompatibility: `Err(reason)`, with zero client construction
     ///   and zero network activity. Never falls back to `Default`.
-    #[cfg(all(
-        feature = "transport_tor",
-        not(feature = "wreq"),
-        not(feature = "cache_request")
-    ))]
+    #[cfg(all(feature = "transport_tor", not(feature = "wreq")))]
     fn tor_crawl_preflight(&mut self) -> Result<bool, crate::features::transport::TransportError> {
         use crate::features::transport::TransportError;
 
@@ -3097,11 +3084,7 @@ impl Website {
     /// for Tor — see [`crate::features::transport::build_tor_client`]):
     /// `TransportPolicy::Tor` always fails closed for multi-page crawling
     /// in this configuration, before any network activity.
-    #[cfg(not(all(
-        feature = "transport_tor",
-        not(feature = "wreq"),
-        not(feature = "cache_request")
-    )))]
+    #[cfg(not(all(feature = "transport_tor", not(feature = "wreq"))))]
     fn tor_crawl_preflight(&mut self) -> Result<bool, crate::features::transport::TransportError> {
         match &self.configuration.transport_policy {
             TransportPolicy::Default => Ok(false),
@@ -3211,7 +3194,7 @@ impl Website {
                     } else {
                         string_concat!(host_str, "/")
                     };
-                    #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+                    #[cfg(not(feature = "wreq"))]
                     if self.execution_mode == Some(ExecutionMode::Canonical) {
                         if let Some(executor) = self.resolved_executor.as_deref() {
                             robot_file_parser.read_with_executor(executor, &base).await;
@@ -3219,7 +3202,7 @@ impl Website {
                     } else {
                         robot_file_parser.read(client, &base).await;
                     }
-                    #[cfg(any(feature = "wreq", feature = "cache_request"))]
+                    #[cfg(feature = "wreq")]
                     robot_file_parser.read(client, &base).await;
                 }
                 if let Some(delay) =
@@ -3409,10 +3392,7 @@ impl Website {
         }
     }
 
-    #[cfg(all(
-        any(not(feature = "wreq"), feature = "cache_request"),
-        not(feature = "decentralized")
-    ))]
+    #[cfg(all(not(feature = "wreq"), not(feature = "decentralized")))]
     /// Base client configuration.
     pub fn configure_base_client(&self) -> ClientBuilder {
         let policy = self.setup_redirect_policy();
@@ -3568,7 +3548,7 @@ impl Website {
     }
 
     /// Build the HTTP client.
-    #[cfg(all(not(feature = "decentralized"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "decentralized"))]
     pub fn configure_http_client_builder(&self) -> ClientBuilder {
         let client = self.configure_base_client();
 
@@ -3648,7 +3628,11 @@ impl Website {
     }
 
     /// Build the HTTP client with caching enabled.
-    #[cfg(all(not(feature = "decentralized"), feature = "cache_request"))]
+    #[cfg(all(
+        not(feature = "decentralized"),
+        feature = "cache_request",
+        not(feature = "cache_request")
+    ))]
     pub fn configure_http_client_builder(&self) -> reqwest_middleware::ClientBuilder {
         use crate::utils::create_cache_key;
         let client = self.configure_base_client();
@@ -3795,7 +3779,7 @@ impl Website {
     }
 
     /// Build a client configured with a single proxy for use in rotation.
-    #[cfg(all(not(feature = "decentralized"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "decentralized"))]
     fn build_single_proxy_client(
         &self,
         proxy: &crate::configuration::RequestProxy,
@@ -3862,7 +3846,11 @@ impl Website {
     }
 
     /// Build a client configured with a single proxy for use in rotation (cache_request variant).
-    #[cfg(all(not(feature = "decentralized"), feature = "cache_request"))]
+    #[cfg(all(
+        not(feature = "decentralized"),
+        feature = "cache_request",
+        not(feature = "cache_request")
+    ))]
     fn build_single_proxy_client(
         &self,
         proxy: &crate::configuration::RequestProxy,
@@ -3983,7 +3971,7 @@ impl Website {
     }
 
     /// Configure http client.
-    #[cfg(all(not(feature = "decentralized"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "decentralized"))]
     pub fn configure_http_client(&self) -> Client {
         let client = self.configure_http_client_builder();
         // should unwrap using native-tls-alpn
@@ -4005,7 +3993,7 @@ impl Website {
     /// callers should leave
     /// [`crate::configuration::Configuration::proxies_by_kind`] unset
     /// or accept that secondary routing falls back to primary.
-    #[cfg(all(not(feature = "decentralized"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "decentralized"))]
     fn build_http_client_with_proxies(
         &self,
         proxies: &[crate::configuration::RequestProxy],
@@ -4066,7 +4054,7 @@ impl Website {
     ///   ([`ProxyKind::Default`], [`ProxyKind::Custom`]), or
     /// * the build configuration disables the secondary path
     ///   (`cache_request` / `decentralized`).
-    #[cfg(all(not(feature = "decentralized"), not(feature = "cache_request")))]
+    #[cfg(not(feature = "decentralized"))]
     pub fn secondary_http_client_for(
         &self,
         kind: &crate::configuration::ProxyKind,
@@ -4091,7 +4079,7 @@ impl Website {
     /// callers fall back to the primary client. See
     /// [`Self::secondary_http_client_for`] documentation for the
     /// supported configuration.
-    #[cfg(any(feature = "decentralized", feature = "cache_request"))]
+    #[cfg(feature = "decentralized")]
     pub fn secondary_http_client_for(
         &self,
         _kind: &crate::configuration::ProxyKind,
@@ -4100,14 +4088,18 @@ impl Website {
     }
 
     /// Configure http client.
-    #[cfg(all(not(feature = "decentralized"), feature = "cache_request"))]
+    #[cfg(all(
+        not(feature = "decentralized"),
+        feature = "cache_request",
+        not(feature = "cache_request")
+    ))]
     pub fn configure_http_client(&self) -> Client {
         let client = self.configure_http_client_builder();
         client.build()
     }
 
     /// Configure http client for decentralization.
-    #[cfg(all(feature = "decentralized", not(feature = "cache_request")))]
+    #[cfg(feature = "decentralized")]
     pub fn configure_http_client(&self) -> Client {
         use reqwest::header::{HeaderMap, HeaderValue};
 
@@ -4194,7 +4186,11 @@ impl Website {
     }
 
     /// Configure http client for decentralization.
-    #[cfg(all(feature = "decentralized", feature = "cache_request"))]
+    #[cfg(all(
+        feature = "decentralized",
+        feature = "cache_request",
+        not(feature = "cache_request")
+    ))]
     pub fn configure_http_client(&mut self) -> Client {
         use crate::utils::create_cache_key;
         use reqwest::header::{HeaderMap, HeaderValue};
@@ -4901,6 +4897,8 @@ impl Website {
                     &domain_parsed, // original domain
                     &mut self.domain_parsed,
                     &mut links_pages,
+                    self.configuration.get_cache_options(),
+                    self.configuration.cache_namespace_str(),
                     self.configuration.auto_http_first_byte_args(),
                     engine_ctx,
                 )
@@ -4997,6 +4995,8 @@ impl Website {
                             &domain_parsed,
                             &mut domain_parsed_clone,
                             &mut links_pages,
+                            self.configuration.get_cache_options(),
+                            self.configuration.cache_namespace_str(),
                             (None, None),
                             engine_ctx,
                         )
@@ -5026,6 +5026,8 @@ impl Website {
                         &domain_parsed,
                         &mut self.domain_parsed,
                         &mut links_pages,
+                        self.configuration.get_cache_options(),
+                        self.configuration.cache_namespace_str(),
                         self.configuration.auto_http_first_byte_args(),
                         engine_ctx,
                     )
@@ -8807,6 +8809,11 @@ impl Website {
                 self.configuration.remote_multimodal.clone(),
                 crawl_boundary.clone(),
                 resolved_executor.clone(),
+                self.configuration.get_cache_options(),
+                self.configuration
+                    .cache_namespace
+                    .as_deref()
+                    .map(|value| value.as_str().to_owned()),
             ));
 
             let mut set: JoinSet<(HashSet<CaseInsensitiveString>, Option<u64>)> = JoinSet::new();
@@ -9177,7 +9184,8 @@ impl Website {
                                                         target_url, shared.12.as_deref(), primary_client, only_html,
                                                         &mut selectors, external_domains_caseless,
                                                         &r_settings, &mut links, None, &shared.8,
-                                                        &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
+                                                        &mut domain_parsed, &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                        (None, None), engine_ctx).await;
                                                     (page, links, links_pages)
                                                 };
 
@@ -9203,7 +9211,8 @@ impl Website {
                                                                 target_url, shared.12.as_deref(), hedge_client, only_html,
                                                                 &mut selectors, external_domains_caseless,
                                                                 &r_settings, &mut links, None, &shared.8,
-                                                                &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
+                                                                &mut domain_parsed, &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                                (None, None), engine_ctx).await;
                                                             (page, links, links_pages)
                                                         };
 
@@ -9243,7 +9252,8 @@ impl Website {
                                                     target_url, shared.12.as_deref(), primary_client, only_html,
                                                     &mut selectors, external_domains_caseless,
                                                     &r_settings, &mut links, None, &shared.8,
-                                                    &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
+                                                    &mut domain_parsed, &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                    (None, None), engine_ctx).await;
                                                 hedge_trk.record(fetch_start.elapsed());
                                                 if page.status_code.is_server_error() {
                                                     hedge_trk.record_error();
@@ -9268,7 +9278,8 @@ impl Website {
                                                 target_url, shared.12.as_deref(), client, only_html,
                                                 &mut selectors, external_domains_caseless,
                                                 &r_settings, &mut links, None, &shared.8,
-                                                &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
+                                                &mut domain_parsed, &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                (None, None), engine_ctx).await;
                                             hedge_trk.record(fetch_start.elapsed());
                                             if page.status_code.is_server_error() {
                                                 hedge_trk.record_error();
@@ -9316,7 +9327,8 @@ impl Website {
                                                         target_url, shared.12.as_deref(), client, only_html,
                                                         &mut selectors, external_domains_caseless,
                                                         &r_settings, &mut links, None, &shared.8,
-                                                        &mut domain_parsed, &mut links_pages, (None, None), engine_ctx).await;
+                                                        &mut domain_parsed, &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                        (None, None), engine_ctx).await;
                                                     (page, links, links_pages)
                                                 };
                                                 tokio::pin!(primary_fut);
@@ -9400,7 +9412,8 @@ impl Website {
                                                 None,
                                                 &shared.8,
                                                 &mut domain_parsed,
-                                                &mut links_pages, (None, None), engine_ctx).await;
+                                                &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                (None, None), engine_ctx).await;
                                             (page, links, links_pages)
                                         }
                                     };
@@ -9471,7 +9484,8 @@ impl Website {
                                                     None,
                                                     &shared.8,
                                                     &mut domain_parsed,
-                                                    &mut links_pages, (None, None), engine_ctx).await;
+                                                    &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                    (None, None), engine_ctx).await;
 
                                                 page = next_page;
 
@@ -9496,7 +9510,8 @@ impl Website {
                                                 None,
                                                 &shared.8,
                                                 &mut domain_parsed,
-                                                &mut links_pages, (None, None), engine_ctx).await;
+                                                &mut links_pages, shared.13.clone(), shared.14.as_deref(),
+                                                (None, None), engine_ctx).await;
                                         }
 
                                         // Stamp profile key from strategy.
@@ -10679,6 +10694,11 @@ impl Website {
                 self.on_link_find_callback.clone(),
                 self.configuration.remote_multimodal.clone(),
                 website.resolved_executor.clone(),
+                self.configuration.get_cache_options(),
+                self.configuration
+                    .cache_namespace
+                    .as_deref()
+                    .map(|value| value.as_str().to_owned()),
             ));
 
             let mut set: JoinSet<(HashSet<CaseInsensitiveString>, Option<u64>)> = JoinSet::new();
@@ -10790,7 +10810,8 @@ impl Website {
                                                         target_url, shared.11.as_deref(), primary_client, only_html,
                                                         &mut selectors, external_domains_caseless,
                                                         &r_settings, &mut links, None, &shared.8,
-                                                        &mut domain_parsed, &mut links_pages, (None, None), None).await;
+                                                        &mut domain_parsed, &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                                        (None, None), None).await;
                                                     (page, links, links_pages)
                                                 };
 
@@ -10816,7 +10837,8 @@ impl Website {
                                                                 target_url, shared.11.as_deref(), hedge_client, only_html,
                                                                 &mut selectors, external_domains_caseless,
                                                                 &r_settings, &mut links, None, &shared.8,
-                                                                &mut domain_parsed, &mut links_pages, (None, None), None).await;
+                                                                &mut domain_parsed, &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                                                (None, None), None).await;
                                                             (page, links, links_pages)
                                                         };
 
@@ -10856,7 +10878,8 @@ impl Website {
                                                     target_url, shared.11.as_deref(), primary_client, only_html,
                                                     &mut selectors, external_domains_caseless,
                                                     &r_settings, &mut links, None, &shared.8,
-                                                    &mut domain_parsed, &mut links_pages, (None, None), None).await;
+                                                    &mut domain_parsed, &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                                    (None, None), None).await;
                                                 hedge_trk.record(fetch_start.elapsed());
                                                 if page.status_code.is_server_error() {
                                                     hedge_trk.record_error();
@@ -10881,7 +10904,8 @@ impl Website {
                                                 target_url, shared.11.as_deref(), client, only_html,
                                                 &mut selectors, external_domains_caseless,
                                                 &r_settings, &mut links, None, &shared.8,
-                                                &mut domain_parsed, &mut links_pages, (None, None), None).await;
+                                                &mut domain_parsed, &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                                (None, None), None).await;
                                             hedge_trk.record(fetch_start.elapsed());
                                             if page.status_code.is_server_error() {
                                                 hedge_trk.record_error();
@@ -10919,7 +10943,8 @@ impl Website {
                                             None,
                                             &shared.8,
                                             &mut domain_parsed,
-                                            &mut links_pages, (None, None), None).await;
+                                            &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                            (None, None), None).await;
                                         (page, links, links_pages)
                                     };
 
@@ -10989,7 +11014,8 @@ impl Website {
                                                     None,
                                                     &shared.8,
                                                     &mut domain_parsed,
-                                                    &mut links_pages, (None, None), None).await;
+                                                    &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                                    (None, None), None).await;
 
                                                 page = next_page;
 
@@ -11014,7 +11040,8 @@ impl Website {
                                                 None,
                                                 &shared.8,
                                                 &mut domain_parsed,
-                                                &mut links_pages, (None, None), None).await;
+                                                &mut links_pages, shared.12.clone(), shared.13.as_deref(),
+                                                (None, None), None).await;
                                         }
 
                                         // Stamp profile key from strategy.
@@ -16562,24 +16589,33 @@ async fn test_no_cache_does_not_wrap_transport_errors() {
 #[tokio::test]
 #[cfg(all(feature = "cache_request", not(feature = "decentralized")))]
 async fn test_cache() {
-    let domain = "https://choosealicense.com/";
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            observed.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).await;
+                let response = b"HTTP/1.1 200 OK\r\nCache-Control: public, max-age=3600\r\nContent-Type: text/html\r\nContent-Length: 32\r\nConnection: close\r\n\r\n<html><body>cached</body></html>";
+                let _ = stream.write_all(response).await;
+            });
+        }
+    });
+
+    let domain = format!("http://{address}/cache-website-proof");
     let mut website: Website = Website::new(&domain);
     website.configuration.cache = true;
+    website.configuration.cache_namespace = Some(Box::new(domain.clone()));
 
-    let fresh_start = tokio::time::Instant::now();
     website.crawl().await;
-    let fresh_duration = fresh_start.elapsed();
-
-    let cached_start = tokio::time::Instant::now();
     website.crawl().await;
-    let cached_duration = cached_start.elapsed();
-
-    // cache should be faster at least 5x.
-    assert!(
-        fresh_duration.as_millis() > cached_duration.as_millis() * 5,
-        "{:?}",
-        cached_duration
-    );
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -17270,19 +17306,7 @@ mod tests {
     fn test_noncanonical_rotator_round_robin() {
         // Build 3 simple clients to verify round-robin cycling.
         let clients: Vec<crate::Client> = (0..3)
-            .map(|_| {
-                #[cfg(not(feature = "cache_request"))]
-                {
-                    unsafe { crate::ClientBuilder::new().build().unwrap_unchecked() }
-                }
-                #[cfg(feature = "cache_request")]
-                {
-                    reqwest_middleware::ClientBuilder::new(unsafe {
-                        reqwest::ClientBuilder::new().build().unwrap_unchecked()
-                    })
-                    .build()
-                }
-            })
+            .map(|_| unsafe { crate::ClientBuilder::new().build().unwrap_unchecked() })
             .collect();
 
         let rotator = crate::website::NoncanonicalClientRotator::new(clients);

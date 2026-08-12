@@ -72,8 +72,5 @@ fn retry_policy_remains_spider_owned() {
 #[test]
 fn backend_provenance_keeps_compatibility_identity_visible() {
     assert_ne!(BackendProvenance::Reqwest, BackendProvenance::Wreq);
-    assert_ne!(
-        BackendProvenance::Reqwest,
-        BackendProvenance::CacheMiddleware
-    );
+    assert_ne!(BackendProvenance::Reqwest, BackendProvenance::CacheLayer);
 }

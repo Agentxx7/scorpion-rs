@@ -336,11 +336,7 @@ pub async fn fetch_single_page_with_options(
 /// of `Tor`, so [`crate::page::build`] stamps `Page::transport` truthfully
 /// and [`crate::page::host_resolves_locally_cached`] refuses any local
 /// lookup for the target host.
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+#[cfg(all(feature = "transport_tor", not(feature = "wreq")))]
 async fn fetch_via_tor(url: &str, policy: &TransportPolicy) -> Result<Page, String> {
     let executor = spider_transport::ResolvedExecutor::resolve(
         spider_transport::CrawlerTransportConfiguration {
@@ -358,17 +354,14 @@ async fn fetch_via_tor(url: &str, policy: &TransportPolicy) -> Result<Page, Stri
         .await)
 }
 
-/// `transport_tor` is compiled, but so is `wreq` and/or `cache_request` —
-/// neither alternate client stack is Tor-audited (see [`fetch_via_tor`]
+/// `transport_tor` is compiled with `wreq`, whose alternate client stack is
+/// not Tor-audited (see [`fetch_via_tor`]
 /// above), so the combination is rejected explicitly rather than silently
 /// using an unaudited client.
-#[cfg(all(
-    feature = "transport_tor",
-    any(feature = "wreq", feature = "cache_request")
-))]
+#[cfg(all(feature = "transport_tor", feature = "wreq"))]
 async fn fetch_via_tor(_url: &str, _policy: &TransportPolicy) -> Result<Page, String> {
-    let message = "Tor transport requires a build without the wreq or cache_request features — \
-         neither alternate client stack is audited for Tor-safe (fail-closed) behavior"
+    let message = "Tor transport requires a build without the wreq feature — \
+         that alternate client stack is not audited for Tor-safe (fail-closed) behavior"
         .to_string();
     Err(crate::features::transport::TransportError::IncompatibleConfiguration(message).to_string())
 }

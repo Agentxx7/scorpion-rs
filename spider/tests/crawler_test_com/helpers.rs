@@ -20,13 +20,6 @@ pub fn run_live_tests() -> bool {
 }
 
 /// Build the appropriate client type from a raw reqwest client.
-#[cfg(feature = "cache_request")]
-fn wrap_client(client: spider::reqwest::Client) -> spider::Client {
-    reqwest_middleware::ClientBuilder::new(client).build()
-}
-
-/// Build the appropriate client type from a raw reqwest client.
-#[cfg(not(feature = "cache_request"))]
 fn wrap_client(client: spider::reqwest::Client) -> spider::Client {
     client
 }

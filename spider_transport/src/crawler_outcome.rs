@@ -15,7 +15,10 @@ use crate::transport::AcquisitionTransport;
 pub enum BackendProvenance {
     Reqwest,
     Wreq,
-    CacheMiddleware,
+    /// Response or failure produced by the canonical cache layer. This does
+    /// not identify a network backend and never implies middleware-owned
+    /// transport execution.
+    CacheLayer,
     NoncanonicalFetchEngine,
     NoncanonicalRemoteFetcher,
     UpstreamCompatibility,

@@ -201,7 +201,7 @@ impl GitHubRepositoryProvider {
         &self,
         endpoint: url::Url,
     ) -> Result<reqwest::Response, GitHubProviderError> {
-        #[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+        #[cfg(not(feature = "wreq"))]
         {
             crate::features::transport::execute_streaming_request(
                 &endpoint,
@@ -211,11 +211,11 @@ impl GitHubRepositoryProvider {
             .await
             .map_err(|error| GitHubProviderError::RequestFailed(error.to_string()))
         }
-        #[cfg(any(feature = "wreq", feature = "cache_request"))]
+        #[cfg(feature = "wreq")]
         {
             let _ = endpoint;
             Err(GitHubProviderError::RequestFailed(
-                "GitHub provider is unavailable under wreq or cache_request".to_string(),
+                "GitHub provider is unavailable under wreq".to_string(),
             ))
         }
     }

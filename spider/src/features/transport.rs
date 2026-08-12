@@ -24,13 +24,9 @@ pub(crate) use spider_transport::{
 /// Build the one canonical Tor-audited `reqwest::Client`. Thin wrapper over
 /// [`spider_transport::build_tor_client`] supplying Spider's default
 /// user-agent. Only exists with `transport_tor` compiled in and without the
-/// `wreq`/`cache_request` alternate stacks (fail-closed siblings live in
+/// the `wreq` alternate stack (fail-closed siblings live in
 /// `Website::tor_crawl_preflight` / `evidence::fetch_via_tor`).
-#[cfg(all(
-    feature = "transport_tor",
-    not(feature = "wreq"),
-    not(feature = "cache_request")
-))]
+#[cfg(all(feature = "transport_tor", not(feature = "wreq")))]
 pub(crate) fn build_tor_client(
     policy: &TransportPolicy,
 ) -> Result<reqwest::Client, TransportError> {
@@ -41,7 +37,7 @@ pub(crate) fn build_tor_client(
 /// wrapper over [`spider_transport::execute_streaming_request`] supplying
 /// Spider's default user-agent; the signature and semantics are exactly the
 /// pre-extraction public seam.
-#[cfg(all(not(feature = "wreq"), not(feature = "cache_request")))]
+#[cfg(not(feature = "wreq"))]
 pub async fn execute_streaming_request(
     url: &url::Url,
     policy: &TransportPolicy,

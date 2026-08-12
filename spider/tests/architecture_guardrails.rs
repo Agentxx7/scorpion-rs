@@ -444,11 +444,13 @@ fn artifact_download_execution_gated_on_evidence() {
 }
 
 #[test]
-fn artifact_download_execution_gated_not_cache_request() {
-    assert_feature_module_gated(
-        "artifact_download_execution",
-        "not(feature = \"cache_request\")",
-    );
+fn artifact_download_execution_is_not_gated_by_cache_request() {
+    let features = fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let module = features
+        .find("pub mod artifact_download_execution;")
+        .unwrap();
+    let gate = &features[module.saturating_sub(240)..module];
+    assert!(!gate.contains("not(feature = \"cache_request\")"));
 }
 
 #[test]
@@ -1381,4 +1383,63 @@ fn scanner_rejects_synthetic_raw_client_reintroductions() {
         assert!(rejects(fixture), "negative fixture escaped: {fixture}");
     }
     assert!(!rejects("executor.execute(CrawlerRequest::get(url)).await"));
+}
+
+fn cache_transport_ownership_violation(source: &str) -> bool {
+    [
+        "reqwest::ClientBuilder",
+        "reqwest_middleware::ClientBuilder",
+        "ClientWithMiddleware",
+        "RequestBuilder.send",
+        ".redirect(",
+        "Proxy::all",
+        "danger_accept_invalid_certs",
+        "secret_headers.serialize",
+        "origin = ResponseOrigin::Network",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn cache_request_is_policy_above_the_canonical_executor() {
+    let root = workspace_root();
+    let cache = fs::read_to_string(root.join("spider/src/cache_request.rs")).unwrap();
+    let manifest = fs::read_to_string(root.join("spider/Cargo.toml")).unwrap();
+    assert!(cache.contains("executor.execute(request)"));
+    assert!(cache.contains("ResponseOrigin::ReconstructedCache"));
+    assert!(cache.contains("BackendProvenance::CacheLayer"));
+    assert!(!cache.contains("BackendProvenance::CacheMiddleware"));
+    assert!(cache.contains("request.secret_headers.is_empty()"));
+    assert!(!cache_transport_ownership_violation(&cache));
+    for removed in [
+        "reqwest-middleware =",
+        "spider-http-cache-reqwest",
+        "http-global-cache",
+    ] {
+        assert!(
+            !manifest.contains(removed),
+            "old cache transport dependency: {removed}"
+        );
+    }
+}
+
+#[test]
+fn cache_transport_negative_fixtures_are_rejected() {
+    for fixture in [
+        "reqwest::ClientBuilder::new().redirect(policy)",
+        "let client: ClientWithMiddleware = build();",
+        "RequestBuilder.send().await",
+        "Proxy::all(cache_proxy)",
+        "secret_headers.serialize(metadata)",
+        "cache_hit.origin = ResponseOrigin::Network",
+    ] {
+        assert!(
+            cache_transport_ownership_violation(fixture),
+            "cache transport fixture escaped: {fixture}"
+        );
+    }
+    assert!(!cache_transport_ownership_violation(
+        "executor.execute(request).await"
+    ));
 }

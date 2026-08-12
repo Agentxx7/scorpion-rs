@@ -21,6 +21,9 @@ maintenance = { status = "actively-developed" }
 
 [dependencies]
 url = "2"
+bytes = "1"
+futures-util = "0.3"
+http = "1"
 serde = { version = "1", optional = true, features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

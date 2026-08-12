@@ -9658,6 +9658,9 @@ dependencies = [
 name = "spider_transport"
 version = "2.53.4"
 dependencies = [
+ "bytes",
+ "futures-util",
+ "http 1.5.0",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

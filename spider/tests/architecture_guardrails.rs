@@ -1274,3 +1274,65 @@ fn scanner_detects_worker_boundary_violation_classes() {
         );
     }
 }
+
+fn canonical_crawler_error_boundary_violation(contents: &str) -> bool {
+    [
+        "Arc<reqwest::Error>",
+        "Arc<wreq::Error>",
+        "reqwest_middleware::Error>",
+        "pub error_for_status: Option<Result<",
+    ]
+    .iter()
+    .any(|pattern| contents.contains(pattern))
+}
+
+#[test]
+fn crawler_response_error_seam_has_one_neutral_owner() {
+    let root = workspace_root();
+    let transport = fs::read_to_string(root.join("spider_transport/src/crawler_outcome.rs"))
+        .expect("canonical crawler outcome module");
+    assert_eq!(transport.matches("pub enum CrawlerFailureKind").count(), 1);
+    assert_eq!(transport.matches("pub struct CrawlerFailure").count(), 1);
+    assert_eq!(transport.matches("pub struct CrawlerResponse").count(), 1);
+
+    let page = fs::read_to_string(root.join("spider/src/page.rs")).expect("Page source");
+    let utils = fs::read_to_string(root.join("spider/src/utils/mod.rs")).expect("crawler utils");
+    assert!(!canonical_crawler_error_boundary_violation(&page));
+    assert!(!canonical_crawler_error_boundary_violation(&utils));
+    assert!(page.contains("Arc<spider_transport::CrawlerFailure>"));
+    assert!(utils.contains("pub failure: Option<spider_transport::CrawlerFailure>"));
+}
+
+#[test]
+fn crawler_retry_policy_stays_above_transport_facts() {
+    let root = workspace_root();
+    let transport = fs::read_to_string(root.join("spider_transport/src/crawler_outcome.rs"))
+        .expect("canonical crawler outcome module");
+    for crawler_policy in ["should_retry", "backoff", "is_retryable_status"] {
+        assert!(
+            !transport.contains(crawler_policy),
+            "crawler retry policy leaked into transport facts: {crawler_policy}"
+        );
+    }
+
+    let page = fs::read_to_string(root.join("spider/src/page.rs")).expect("Page source");
+    assert!(page.contains("fn get_error_status_base("));
+    assert!(page.contains("is_retryable_status(pre_classified_status)"));
+}
+
+#[test]
+fn scanner_detects_backend_error_leakage_into_canonical_page_contract() {
+    for synthetic in [
+        "pub error_status: Option<Arc<reqwest::Error>>",
+        "pub error_status: Option<Arc<wreq::Error>>",
+        "pub error_for_status: Option<Result<Response, reqwest_middleware::Error>>",
+    ] {
+        assert!(
+            canonical_crawler_error_boundary_violation(synthetic),
+            "scanner missed backend error leakage: {synthetic}"
+        );
+    }
+    assert!(!canonical_crawler_error_boundary_violation(
+        "pub failure: Option<spider_transport::CrawlerFailure>"
+    ));
+}

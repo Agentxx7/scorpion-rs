@@ -150,10 +150,6 @@ pub(crate) type RequestError = wreq::Error;
 #[cfg(feature = "cache_request")]
 pub(crate) type RequestError = reqwest_middleware::Error;
 
-/// The request response.
-#[cfg(not(feature = "decentralized"))]
-pub(crate) type RequestResponse = Response;
-
 /// The wait for duration timeouts.
 #[cfg(feature = "chrome")]
 const WAIT_TIMEOUTS: [u64; 6] = [0, 20, 50, 100, 100, 500];
@@ -688,8 +684,8 @@ pub struct PageResponse {
     pub observed_status_code: Option<StatusCode>,
     /// The final url destination after any redirects.
     pub final_url: Option<String>,
-    /// The message of the response error if any.
-    pub error_for_status: Option<Result<Response, RequestError>>,
+    /// Backend-neutral transport failure, if request or body execution failed.
+    pub failure: Option<spider_transport::CrawlerFailure>,
     #[cfg(feature = "chrome")]
     /// The screenshot bytes of the page. The ScreenShotConfig bytes boolean needs to be set to true.
     pub screenshot_bytes: Option<Vec<u8>>,
@@ -6855,7 +6851,7 @@ pub(crate) async fn build_error_page_response(target_url: &str, err: RequestErro
         std::time::Duration::from_millis(1_500),
     )
     .await;
-    page_response.error_for_status = Some(Err(err));
+    page_response.failure = Some(crate::page::request_error_to_failure(err));
     page_response
 }
 
@@ -7152,7 +7148,7 @@ where
 /// rather than a typed `reqwest::Error`: for a proxy tunnel failure it
 /// runs the same independent local-DNS confirmation (503 → 525 on
 /// NXDOMAIN, plus cross-transport cache insert); every other category
-/// maps directly onto its synthetic status. `error_for_status` stays
+/// maps directly onto its synthetic status. `failure` stays
 /// `None`, so [`crate::page::build`] derives `should_retry` from the
 /// status alone — verified retry-equivalent to the reqwest path for the
 /// mapped 52x codes.
@@ -8024,7 +8020,7 @@ pub async fn fetch_page_html(target_url: &str, client: &Client) -> PageResponse 
             )
             .await;
 
-            page_response.error_for_status = Some(Err(err));
+            page_response.failure = Some(crate::page::request_error_to_failure(err));
             page_response
         }
     }
@@ -8225,7 +8221,8 @@ pub async fn fetch_page_html<'h>(
                                 )
                                 .await;
 
-                            page_response.error_for_status = Some(Err(err));
+                            page_response.failure =
+                                Some(crate::page::request_error_to_failure(err));
                             page_response
                         }
                     }
@@ -8984,7 +8981,8 @@ async fn _fetch_page_html_chrome<'h>(
                                 )
                                 .await;
 
-                            page_response.error_for_status = Some(Err(err));
+                            page_response.failure =
+                                Some(crate::page::request_error_to_failure(err));
                             page_response
                         }
                     }

@@ -2477,7 +2477,7 @@ pub struct Page {
     pub error_status: Option<String>,
     #[cfg(feature = "page_error_status_details")]
     /// The error of the request if any.
-    pub error_status: Option<std::sync::Arc<reqwest::Error>>,
+    pub error_status: Option<std::sync::Arc<spider_transport::CrawlerFailure>>,
     /// The external urls to group with the domain
     pub external_domains_caseless: Arc<HashSet<CaseInsensitiveString>>,
     /// The final destination of the page if redirects were performed [Not implemented in the chrome feature].
@@ -3429,75 +3429,78 @@ fn h2_permanent_reason_status(err: &crate::client::Error) -> Option<StatusCode> 
 /// the function preserves the original behaviour: examine the raw error
 /// and set `*should_retry = true` when appropriate.
 #[cfg(not(feature = "decentralized"))]
+pub(crate) fn request_error_to_failure(err: RequestError) -> spider_transport::CrawlerFailure {
+    use spider_transport::{BackendProvenance, CrawlerFailure, CrawlerFailureKind};
+
+    let observed = err.status();
+    let mapped = get_error_http_status_code(&err);
+    let protocol_retryable = should_attempt_retry(&err);
+    let protocol_permanent = h2_permanent_reason_status(&err).is_some();
+    let kind = if protocol_retryable {
+        CrawlerFailureKind::ProtocolRetryable
+    } else if protocol_permanent {
+        CrawlerFailureKind::ProtocolPermanent
+    } else if err.is_timeout() {
+        CrawlerFailureKind::Timeout
+    } else if is_dns_error(&err) {
+        CrawlerFailureKind::Dns
+    } else if is_proxy_tunnel_failure(&err) {
+        CrawlerFailureKind::ProxyTunnel
+    } else if is_ssl_handshake_error(&err) {
+        CrawlerFailureKind::TlsHandshake
+    } else if err.is_connect() {
+        if mapped == *CONNECTION_REFUSED_ERROR {
+            CrawlerFailureKind::ConnectionRefused
+        } else if mapped == *CONNECTION_ABORTED_ERROR {
+            CrawlerFailureKind::ConnectionAborted
+        } else if mapped == *CONNECTION_RESET_ERROR {
+            CrawlerFailureKind::ConnectionReset
+        } else if mapped == *ADDRESS_UNREACHABLE_ERROR {
+            CrawlerFailureKind::ConnectionUnreachable
+        } else {
+            CrawlerFailureKind::Connection
+        }
+    } else if err.is_decode() {
+        CrawlerFailureKind::Decode
+    } else if err.is_body() {
+        CrawlerFailureKind::BodyStream
+    } else if err.is_request() {
+        CrawlerFailureKind::Request
+    } else if observed.is_some() {
+        CrawlerFailureKind::HttpStatus
+    } else {
+        CrawlerFailureKind::Other
+    };
+
+    #[cfg(all(not(feature = "cache_request"), not(feature = "wreq")))]
+    let backend = BackendProvenance::Reqwest;
+    #[cfg(all(not(feature = "cache_request"), feature = "wreq"))]
+    let backend = BackendProvenance::Wreq;
+    #[cfg(feature = "cache_request")]
+    let backend = BackendProvenance::CacheMiddleware;
+
+    let mut failure = CrawlerFailure::with_source(kind, backend, err);
+    if let Some(status) = observed {
+        failure = failure.with_status(status);
+    }
+    failure
+}
+
+#[cfg(not(feature = "decentralized"))]
 fn get_error_status_base(
     should_retry: &mut bool,
-    error_for_status: Option<Result<crate::utils::RequestResponse, RequestError>>,
+    failure: Option<spider_transport::CrawlerFailure>,
     pre_classified_status: StatusCode,
-) -> Option<RequestError> {
-    match error_for_status {
-        Some(e) => match e {
-            Ok(_) => None,
-            Err(er) => {
-                // **Respect upstream classification (v2.51.172)**. If the
-                // caller already classified this error to a non-retryable
-                // status — typically via the async
-                // `confirm_tunnel_failure_with_local_dns` layer that pairs
-                // the proxy tunnel signal with a local DNS lookup — don't
-                // re-evaluate the raw error and risk overriding
-                // `*should_retry` back to true. The raw error itself is
-                // still a connect-class transport error, so the
-                // `is_retryable_status(get_error_http_status_code(&er))`
-                // check below would always set should_retry=true, undoing
-                // the async upgrade. Returning early preserves
-                // `*should_retry` at whatever build()'s heuristics decided
-                // (which already correctly excludes permanent codes via
-                // `should_retry_status`).
-                if !is_retryable_status(pre_classified_status) {
-                    return Some(er);
-                }
-
-                // Compute the mapped status once and reuse it across every
-                // branch below. Previously this was computed up to twice
-                // per error (once through `is_dns_error` in the connect
-                // fast-path, once in the catch-all fallback) — folding
-                // them into one call keeps the error path cheap when the
-                // full chain walk + io-error downcast get run.
-                //
-                // `is_retryable_status` (a few u16 compares) supersedes
-                // the earlier `!is_dns_error` gate: it covers DNS (525),
-                // address-unreachable (526), and redirect-cap (310) in a
-                // single check, so adding new permanent codes to
-                // `is_retryable_status` automatically propagates here.
-                let mapped_status = get_error_http_status_code(&er);
-                if er.is_timeout() || (er.is_connect() && is_retryable_status(mapped_status)) {
-                    *should_retry = true;
-                }
-                if !*should_retry && should_attempt_retry(&er) {
-                    *should_retry = true;
-                }
-                if let Some(status_code) = er.status() {
-                    let retry = matches!(
-                        status_code,
-                        StatusCode::TOO_MANY_REQUESTS
-                            | StatusCode::INTERNAL_SERVER_ERROR
-                            | StatusCode::BAD_GATEWAY
-                            | StatusCode::SERVICE_UNAVAILABLE
-                            | StatusCode::GATEWAY_TIMEOUT
-                    );
-                    if retry {
-                        *should_retry = true;
-                    }
-                }
-                // Catch-all: errors that neither set `is_timeout` /
-                // `is_connect` / `er.status()` nor matched an h2 reason
-                // can still map to a retryable status (e.g. 598/599).
-                if !*should_retry && is_retryable_status(mapped_status) {
-                    *should_retry = true;
-                }
-                Some(er)
-            }
-        },
-        _ => None,
+) -> Option<spider_transport::CrawlerFailure> {
+    if let Some(failure) = failure {
+        if is_retryable_status(pre_classified_status)
+            || failure.kind() == spider_transport::CrawlerFailureKind::ProtocolRetryable
+        {
+            *should_retry = true;
+        }
+        Some(failure)
+    } else {
+        None
     }
 }
 
@@ -3508,22 +3511,20 @@ fn get_error_status_base(
 /// Get the error status of the page.
 fn get_error_status(
     should_retry: &mut bool,
-    error_for_status: Option<Result<crate::utils::RequestResponse, RequestError>>,
+    failure: Option<spider_transport::CrawlerFailure>,
     pre_classified_status: StatusCode,
 ) -> Option<String> {
-    get_error_status_base(should_retry, error_for_status, pre_classified_status)
-        .map(|e| e.to_string())
+    get_error_status_base(should_retry, failure, pre_classified_status).map(|e| e.to_string())
 }
 
 #[cfg(all(feature = "page_error_status_details", not(feature = "decentralized")))]
 /// Get the error status of the page.
 fn get_error_status(
     should_retry: &mut bool,
-    error_for_status: Option<Result<crate::utils::RequestResponse, RequestError>>,
+    failure: Option<spider_transport::CrawlerFailure>,
     pre_classified_status: StatusCode,
-) -> Option<std::sync::Arc<reqwest::Error>> {
-    get_error_status_base(should_retry, error_for_status, pre_classified_status)
-        .map(std::sync::Arc::new)
+) -> Option<std::sync::Arc<spider_transport::CrawlerFailure>> {
+    get_error_status_base(should_retry, failure, pre_classified_status).map(std::sync::Arc::new)
 }
 
 #[cfg(not(feature = "decentralized"))]
@@ -3709,7 +3710,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
             duration: res.duration,
             status_code: res.status_code,
             observed_status_code: res.observed_status_code,
-            error_status: get_error_status(&mut should_retry, res.error_for_status, status),
+            error_status: get_error_status(&mut should_retry, res.failure, status),
             final_redirect_destination: if empty_page { None } else { res.final_url },
             #[cfg(feature = "chrome")]
             chrome_page: None,
@@ -3823,7 +3824,7 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
         duration: res.duration,
         status_code: res.status_code,
         observed_status_code: res.observed_status_code,
-        error_status: get_error_status(&mut should_retry, res.error_for_status, status),
+        error_status: get_error_status(&mut should_retry, res.failure, status),
         final_redirect_destination: if empty_page { None } else { res.final_url },
         #[cfg(feature = "chrome")]
         chrome_page: None,
@@ -3888,13 +3889,7 @@ pub fn build(_: &str, res: PageResponse) -> Page {
         metadata: res.metadata,
         spawn_pages: res.spawn_pages,
         content_truncated: res.content_truncated,
-        error_status: match res.error_for_status {
-            Some(e) => match e {
-                Ok(_) => None,
-                Err(er) => Some(er.to_string()),
-            },
-            _ => None,
-        },
+        error_status: res.failure.map(|failure| failure.to_string()),
         ..Default::default()
     }
 }
@@ -10828,13 +10823,12 @@ fn test_remote_addr_field() {
     assert_eq!(addr.port(), 8080);
 }
 
-/// Test page_error_status_details feature - error_status is Arc<reqwest::Error>.
+/// Test page_error_status_details feature uses the neutral failure vocabulary.
 #[test]
 #[cfg(all(feature = "page_error_status_details", not(feature = "decentralized")))]
 fn test_page_error_status_details() {
     use crate::utils::PageResponse;
 
-    // When page_error_status_details is enabled, error_status should be Option<Arc<reqwest::Error>>
     let page_response = PageResponse {
         content: None,
         status_code: StatusCode::INTERNAL_SERVER_ERROR,
@@ -10843,9 +10837,7 @@ fn test_page_error_status_details() {
 
     let page = build("https://example.com", page_response);
 
-    // The error_status type should be Option<Arc<reqwest::Error>> with this feature
-    // We just verify it compiles and can be accessed
-    let _error: &Option<std::sync::Arc<reqwest::Error>> = &page.error_status;
+    let _error: &Option<std::sync::Arc<spider_transport::CrawlerFailure>> = &page.error_status;
 }
 
 /// Test page_error_status_details feature disabled - error_status is String.
@@ -11315,6 +11307,51 @@ fn test_is_retryable_status_excludes_dns() {
         !is_retryable_status(*TOO_MANY_REDIRECTS_ERROR),
         "TOO_MANY_REDIRECTS_ERROR (310) must not be retryable — redirect loops are deterministic"
     );
+}
+
+/// The neutral seam carries transport facts; this table locks the existing
+/// crawler-owned retry decision after translation.
+#[test]
+#[cfg(not(feature = "decentralized"))]
+fn test_neutral_failure_retry_policy_matches_baseline_status_policy() {
+    use spider_transport::{BackendProvenance, CrawlerFailure, CrawlerFailureKind};
+
+    for (kind, status, expected_retry) in [
+        (CrawlerFailureKind::Timeout, *CONNECTION_TIMEOUT_ERROR, true),
+        (
+            CrawlerFailureKind::Connection,
+            *UNREACHABLE_REQUEST_ERROR,
+            true,
+        ),
+        (CrawlerFailureKind::Dns, *DNS_RESOLVE_ERROR, false),
+        (
+            CrawlerFailureKind::TlsHandshake,
+            *ADDRESS_UNREACHABLE_ERROR,
+            false,
+        ),
+        (
+            CrawlerFailureKind::ProxyTunnel,
+            *UNREACHABLE_REQUEST_ERROR,
+            true,
+        ),
+        (
+            CrawlerFailureKind::HttpStatus,
+            StatusCode::BAD_GATEWAY,
+            true,
+        ),
+        (CrawlerFailureKind::HttpStatus, StatusCode::NOT_FOUND, false),
+        (CrawlerFailureKind::BodyStream, *BODY_DECODE_ERROR, false),
+        (CrawlerFailureKind::Decode, *BODY_DECODE_ERROR, false),
+    ] {
+        let mut should_retry = false;
+        let retained = get_error_status_base(
+            &mut should_retry,
+            Some(CrawlerFailure::new(kind, BackendProvenance::Reqwest)),
+            status,
+        );
+        assert!(retained.is_some(), "neutral failure must remain diagnostic");
+        assert_eq!(should_retry, expected_retry, "retry drift for {kind:?}");
+    }
 }
 
 /// Test blocked_crawl field exists and works correctly.
@@ -11881,7 +11918,7 @@ async fn test_build_respects_pre_classified_525_does_not_force_retry() {
     let wrapped_err = err;
     let res = PageResponse {
         status_code: *DNS_RESOLVE_ERROR,
-        error_for_status: Some(Err(wrapped_err)),
+        failure: Some(request_error_to_failure(wrapped_err)),
         ..Default::default()
     };
 
@@ -11946,7 +11983,7 @@ async fn test_build_transient_503_still_retries() {
     let wrapped_err = err;
     let res = PageResponse {
         status_code: *UNREACHABLE_REQUEST_ERROR, // 503, transient
-        error_for_status: Some(Err(wrapped_err)),
+        failure: Some(request_error_to_failure(wrapped_err)),
         ..Default::default()
     };
 

@@ -27,8 +27,14 @@
 //! an explicit `user_agent: &str` supplied by the consumer, so the leaf
 //! never reaches up into a consumer's configuration.
 
+pub mod crawler_outcome;
 pub mod secret_request_headers;
 pub mod transport;
+
+pub use crawler_outcome::{
+    BackendProvenance, CrawlerBodyStream, CrawlerFailure, CrawlerFailureKind, CrawlerResponse,
+    ResponseOrigin,
+};
 
 pub use secret_request_headers::{SecretHeaderError, SecretRequestHeaders};
 pub use transport::{

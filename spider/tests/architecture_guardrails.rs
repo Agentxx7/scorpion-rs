@@ -1405,6 +1405,8 @@ fn cache_transport_ownership_violation(source: &str) -> bool {
 fn cache_request_is_policy_above_the_canonical_executor() {
     let root = workspace_root();
     let cache = fs::read_to_string(root.join("spider/src/cache_request.rs")).unwrap();
+    let website = fs::read_to_string(root.join("spider/src/website.rs")).unwrap();
+    let page = fs::read_to_string(root.join("spider/src/page.rs")).unwrap();
     let manifest = fs::read_to_string(root.join("spider/Cargo.toml")).unwrap();
     assert!(cache.contains("executor.execute(request)"));
     assert!(cache.contains("ResponseOrigin::ReconstructedCache"));
@@ -1412,6 +1414,21 @@ fn cache_request_is_policy_above_the_canonical_executor() {
     assert!(!cache.contains("BackendProvenance::CacheMiddleware"));
     assert!(cache.contains("request.secret_headers.is_empty()"));
     assert!(!cache_transport_ownership_violation(&cache));
+    for removed in [
+        "reqwest_middleware",
+        "ClientWithMiddleware",
+        "CACHE_WRAPPED_TRANSPORT_AC",
+        "HttpCache {",
+    ] {
+        assert!(
+            !website.contains(removed),
+            "historical Website cache transport: {removed}"
+        );
+        assert!(
+            !page.contains(removed),
+            "historical Page cache transport: {removed}"
+        );
+    }
     for removed in [
         "reqwest-middleware =",
         "spider-http-cache-reqwest",

@@ -40,25 +40,24 @@ fn canonical_cache_graph_has_one_network_executor() {
 #[test]
 fn canonical_website_remains_executor_based_with_cache_request() {
     let website = read("spider/src/website.rs");
+    let page = read("spider/src/page.rs");
     assert!(website.contains("resolved_executor: Option<Arc<ResolvedExecutor>>"));
-    // Four historical implementations remain syntactically retained only
-    // behind an impossible cfg while compatibility history is unwound. They
-    // cannot compile, and the dependencies required to revive them are gone.
-    let compact: String = website
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect();
-    assert_eq!(
-        compact
-            .matches("feature=\"cache_request\",not(feature=\"cache_request\")")
-            .count(),
-        4
-    );
-    assert_eq!(
-        website.matches("reqwest_middleware::ClientBuilder").count(),
-        4
-    );
-    assert_eq!(website.matches("HttpCache {").count(), 3);
+    for forbidden in [
+        "reqwest_middleware",
+        "ClientWithMiddleware",
+        "HttpCache {",
+        "CACHE_WRAPPED_TRANSPORT_AC",
+        "feature = \"cache_request\", not(feature = \"cache_request\")",
+    ] {
+        assert!(
+            !website.contains(forbidden),
+            "historical Website cache transport: {forbidden}"
+        );
+        assert!(
+            !page.contains(forbidden),
+            "historical Page cache transport: {forbidden}"
+        );
+    }
     assert!(!website.contains("cache_request builds are explicitly noncanonical"));
 }
 

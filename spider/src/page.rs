@@ -246,42 +246,6 @@ lazy_static! {
     ]).expect("valid patterns");
 }
 
-#[cfg(all(feature = "cache_request", not(feature = "cache_request")))]
-lazy_static! {
-    /// Aho-Corasick automaton for detecting `http-cache-reqwest`-wrapped
-    /// transport errors. The middleware stringifies the underlying
-    /// error via `BoxError::to_string()`. Two wrapper prefixes possible:
-    ///
-    ///   * `"Cache error: error sending request"` — legacy
-    ///     `HttpCacheError::Cache(String)` variant. Source chain
-    ///     destroyed; this regex is the ONLY signal we have.
-    ///   * `"HTTP client error: error sending request"` — fixed
-    ///     `HttpCacheError::Client(BoxError)` variant
-    ///     (spider-http-cache-reqwest 1.0.0-alpha.7+). Source chain
-    ///     preserved; the chain-walk path in
-    ///     `get_error_http_status_code` recovers the original
-    ///     `reqwest::Error` and returns proper DNS/refused/timeout
-    ///     classification before this regex even runs. The regex is
-    ///     kept as a safety net for callers still on the legacy variant
-    ///     and for any source-chain walk failure.
-    ///
-    /// Reqwest's transport-error Display is consistently
-    /// `"error sending request"` (DNS, connection refused/reset,
-    /// timeouts, TLS handshake all share that prefix), so matching on
-    /// either prefix alongside the inner phrase is a near-zero
-    /// false-positive signal that the original error was transport-level.
-    /// Used by `get_error_http_status_code` only when
-    /// `err.is_middleware()` is true so legitimate higher-level cache
-    /// errors (which would have a different Display prefix) keep their
-    /// existing classification.
-    static ref CACHE_WRAPPED_TRANSPORT_AC: aho_corasick::AhoCorasick =
-        aho_corasick::AhoCorasick::new([
-            "Cache error: error sending request",
-            "HTTP client error: error sending request",
-        ])
-            .expect("valid patterns");
-}
-
 /// Check if a connect error is a DNS resolution failure.
 /// Zero-alloc fast path via `downcast_ref`, fallback via Aho-Corasick O(n) scan
 /// against each source-chain layer's Display.
@@ -329,85 +293,6 @@ fn is_dns_error(err: &crate::client::Error) -> bool {
     }
 
     false
-}
-
-/// Walk the source chain of a middleware-wrapped error looking for the
-/// underlying `reqwest::Error`. With `spider-http-cache-reqwest 1.0.0-alpha.7+`
-/// (which uses `HttpCacheError::Client(BoxError)` instead of the legacy
-/// `HttpCacheError::Cache(String)`) the chain is preserved and we can
-/// recover the original transport error type. Returns `None` when the
-/// chain doesn't contain one (legacy stringified variant, depth cap, or
-/// some other middleware shape).
-///
-/// Bounded depth (6 layers) so we don't loop on cyclic chains, never
-/// allocate, and never panic.
-#[cfg(all(feature = "cache_request", not(feature = "cache_request")))]
-fn extract_inner_reqwest_error(err: &crate::client::Error) -> Option<&reqwest::Error> {
-    use std::error::Error;
-    let mut source: Option<&(dyn Error + 'static)> = err.source();
-    let mut depth = 0u8;
-    while let Some(e) = source {
-        if depth >= 6 {
-            return None;
-        }
-        if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
-            return Some(req_err);
-        }
-        source = e.source();
-        depth += 1;
-    }
-    None
-}
-
-/// Classify a borrowed `reqwest::Error` recovered from a middleware-wrapped
-/// chain into the same status codes the typed paths in
-/// `get_error_http_status_code` produce. Returns `None` when none of the
-/// typed inspectors fire — the caller falls back to its existing
-/// safety net (e.g. the cache-wrap regex).
-///
-/// Mirrors the same precedence order as the main classifier:
-///   1. `is_timeout()` → CONNECTION_TIMEOUT_ERROR (504)
-///   2. `is_connect()` with kernel-level kind inspection (refused/aborted/
-///      reset/host-unreachable/timed-out)
-///   3. `is_body()` → BODY_DECODE_ERROR
-///   4. `is_request()` → 400 BAD_REQUEST
-///
-/// Does NOT call `is_dns_error()` — that's already invoked by the main
-/// classifier on the top-level error before we reach this helper, and it
-/// already walks the chain.
-#[cfg(all(feature = "cache_request", not(feature = "cache_request")))]
-fn classify_reqwest_error_borrowed(err: &reqwest::Error) -> Option<StatusCode> {
-    use std::error::Error;
-
-    if err.is_timeout() {
-        return Some(*CONNECTION_TIMEOUT_ERROR);
-    }
-    if err.is_connect() {
-        if let Some(io_err) = err
-            .source()
-            .and_then(|e| e.downcast_ref::<std::io::Error>())
-        {
-            return Some(match io_err.kind() {
-                std::io::ErrorKind::ConnectionRefused => *CONNECTION_REFUSED_ERROR,
-                std::io::ErrorKind::ConnectionAborted => *CONNECTION_ABORTED_ERROR,
-                std::io::ErrorKind::ConnectionReset => *CONNECTION_RESET_ERROR,
-                std::io::ErrorKind::NotFound => *UNREACHABLE_REQUEST_ERROR,
-                std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable => {
-                    *ADDRESS_UNREACHABLE_ERROR
-                }
-                std::io::ErrorKind::TimedOut => *CONNECTION_TIMEOUT_ERROR,
-                _ => *UNREACHABLE_REQUEST_ERROR,
-            });
-        }
-        return Some(*UNREACHABLE_REQUEST_ERROR);
-    }
-    if err.is_body() {
-        return Some(*BODY_DECODE_ERROR);
-    }
-    if err.is_request() {
-        return Some(StatusCode::BAD_REQUEST);
-    }
-    None
 }
 
 /// Check whether a reqwest error is a proxy CONNECT failure — both
@@ -1374,50 +1259,23 @@ pub async fn host_resolves_locally(host: &str, timeout: std::time::Duration) -> 
     }
 }
 
-/// Pair an HTTP transport-failure classification with an independent
-/// local DNS lookup. Two qualifying buckets converge here:
-///
-/// **A. 503 + tunnel failure** (`UNREACHABLE_REQUEST_ERROR` + chain-walked
+/// Pair a 503 tunnel-failure classification with an independent local DNS
+/// lookup (`UNREACHABLE_REQUEST_ERROR` + chain-walked
 /// `TunnelUnsuccessful`).  The proxy signal alone is ambiguous — it
 /// covers both target NXDOMAIN at the proxy *and* transient proxy issues
 /// (rate limits, momentary outages).  Classifying as permanent (526) on
 /// the proxy signal alone produced the v2.51.165 regression where
 /// legitimate proxied requests on transient hiccups returned 526.
 ///
-/// **B. 526 + cache-wrapped transport error**
-/// (`ADDRESS_UNREACHABLE_ERROR` paired with `err.is_middleware()` and a
-/// `CACHE_WRAPPED_TRANSPORT_AC` match).  When `cache_request` is active,
-/// `http-cache-reqwest` flattens the underlying transport error into
-/// `HttpCacheError::Cache(String)`, discarding the source chain —
-/// `is_proxy_tunnel_failure` can't walk it, so
-/// [`get_error_http_status_code`] conservatively buckets the lot as 526
-/// to avoid the retry-loop hang. That conservative classification
-/// over-counts: a confirmed-NXDOMAIN host gets 526 instead of 525, so
-/// `is_permanent_target_failure` true but DNS-vs-unreachable diagnosis
-/// is lost downstream and any retry layer that distinguishes 525
-/// (rotate proxies pointless) from 526 (still rotate, "permanent
-/// through *this* client") burns budget.
-///
-/// **Decision matrix** (only when bucket A or B qualifies):
-///
-/// | Local DNS  | A — keep 503             | B — keep 526             |
-/// |------------|--------------------------|--------------------------|
-/// | NxDomain   | upgrade to 525 (permanent, no retry)                |
-/// | Resolved   | keep 503 (transient — retry path runs)              |
-/// | TimedOut   | keep 503 (no evidence — retry conservatively)       |
-///
-/// (For B, `Resolved` / `TimedOut` keep 526 so `is_retryable_status`
-/// still returns false — the cache shortcut's hang-prevention
-/// invariant is preserved.)
+/// Local NXDOMAIN upgrades the result to 525; a resolved host or timed-out
+/// lookup keeps 503 so retry policy remains unchanged.
 ///
 /// **Zero-cost on success**: never called when the request didn't error.
 /// **Zero-cost on unrelated errors**: returns `initial_status` after a
 /// status-code comparison + chain walk, no DNS lookup performed.
 /// **Zero locks**: pure async function over the error and a hostname.
-/// **No behavior change for non-qualifying paths**: gates
-/// `initial_status == *UNREACHABLE_REQUEST_ERROR` (bucket A) and
-/// `initial_status == *ADDRESS_UNREACHABLE_ERROR` + cache-wrap match
-/// (bucket B) ensure the function is inert for every other classification
+/// **No behavior change for non-qualifying paths**: the 503 tunnel gate
+/// ensures the function is inert for every other classification
 /// (525 from `is_dns_error`, 526 from SSL/h2/HostUnreachable, 524
 /// timeout, real upstream `er.status()`, etc.).
 pub async fn confirm_tunnel_failure_with_local_dns(
@@ -1429,17 +1287,7 @@ pub async fn confirm_tunnel_failure_with_local_dns(
     let qualifies_503_tunnel =
         initial_status == *UNREACHABLE_REQUEST_ERROR && is_proxy_tunnel_failure(err);
 
-    // The cache_request middleware wraps the underlying transport error
-    // with a `"Cache error: error sending request"` prefix and (depending
-    // on the inner classifier) can surface either ADDRESS_UNREACHABLE
-    // (526) OR UNREACHABLE_REQUEST_ERROR (503). Both shapes carry the
-    // same cache-wrapped phrase at the top level, and both need the
-    // independent local-DNS confirmation to upgrade to 525 NXDOMAIN.
-    // Matching only 526 (the original gate) leaves SOCKS5+cache_request
-    // chains that surface as 503 stuck retrying through the strategy.
-    let qualifies_cache_wrapped = false;
-
-    if !qualifies_503_tunnel && !qualifies_cache_wrapped {
+    if !qualifies_503_tunnel {
         return initial_status;
     }
 
@@ -1771,15 +1619,8 @@ pub(crate) fn get_error_http_status_code(err: &crate::client::Error) -> StatusCo
         return status;
     }
 
-    // DNS resolution failure check — runs BEFORE `is_connect()` so a
-    // middleware-wrapped error (e.g. `reqwest_middleware::Error::Middleware`,
-    // emitted by `http-cache-reqwest` when `cache_request`/`cache_mem` is
-    // active) is still classified as 525. The middleware variant short-
-    // circuits `is_connect()` to `false`, which previously hid permanent
-    // DNS failures behind the catch-all 599 and re-enabled retries.
-    // `is_dns_error` walks the underlying source chain, so non-DNS errors
-    // remain unaffected (it returns `false` and we fall through to the
-    // existing branches).
+    // DNS resolution failure check runs before `is_connect()`. The helper
+    // walks the source chain, so non-DNS errors remain unaffected.
     if is_dns_error(err) {
         return *DNS_RESOLVE_ERROR;
     }
@@ -1798,29 +1639,6 @@ pub(crate) fn get_error_http_status_code(err: &crate::client::Error) -> StatusCo
     // here keeps tunnel errors on the existing 503 fallthrough so the
     // retry loop runs exactly as before.
 
-    // `http-cache-reqwest` (the middleware spider attaches when
-    // `cache_request` / `cache_mem` is active and `cache=true` — the
-    // chrome-feature default) wraps any underlying transport error.
-    //
-    // Two wrapper shapes possible (see CACHE_WRAPPED_TRANSPORT_AC docs):
-    //
-    //   * Legacy `HttpCacheError::Cache(String)` (upstream
-    //     http-cache-reqwest ≤ 1.0.0-alpha.6) stringifies the error and
-    //     destroys the source chain. `is_connect()` / `is_dns_error` can't
-    //     recover the original classification — fall back to bucketing
-    //     as 526 ADDRESS_UNREACHABLE so the retry loop halts.
-    //
-    //   * Fixed `HttpCacheError::Client(BoxError)` (spider-http-cache-reqwest
-    //     1.0.0-alpha.7+) preserves the source chain. We walk down via
-    //     `source()` looking for the original `reqwest::Error` and, if
-    //     found, recursively classify it with the proper typed inspectors
-    //     (`is_connect()` / `is_timeout()` / `is_dns_error`). This recovers
-    //     the right status (CONNECTION_REFUSED, CONNECTION_TIMEOUT, etc.)
-    //     instead of conflating every transport class as 526.
-    //
-    // The chain-walk runs FIRST so we get accurate classification on the
-    // fixed variant. The string-match safety net only fires when the walk
-    // fails (legacy variant or unexpected chain shape).
     if err.is_connect() {
         if let Some(io_err) = err.source().and_then(|e| e.downcast_ref::<io::Error>()) {
             match io_err.kind() {
@@ -12653,157 +12471,6 @@ async fn test_confirm_tunnel_failure_no_op_for_non_tunnel_errors() {
         final_status, initial,
         "confirm helper must be no-op for non-tunnel classifications — \
          only triggers when initial_status == *UNREACHABLE_REQUEST_ERROR"
-    );
-}
-
-/// Cache-wrapped transport error + NXDOMAIN target must upgrade 526 → 525.
-///
-/// When `cache_request` is active, `http-cache-reqwest` flattens the
-/// underlying transport error into `HttpCacheError::Cache(String)` and
-/// the source chain is discarded. `is_proxy_tunnel_failure` can no longer
-/// walk the chain to detect `TunnelUnsuccessful`, so
-/// `get_error_http_status_code` conservatively buckets to 526
-/// (ADDRESS_UNREACHABLE_ERROR) via the cache shortcut. A confirmed-NXDOMAIN
-/// host caught in that bucket should still fast-fail at 525 — local DNS
-/// is the second independent signal that distinguishes truly-NXDOMAIN
-/// from transient-but-permanent-via-this-client.
-///
-/// We construct the cache-wrapped error directly via
-/// `reqwest_middleware::Error::Middleware(anyhow::anyhow!(...))` so the
-/// test doesn't need an `http_cache_reqwest::HttpCache` setup (and avoids
-/// a Cargo.toml change just for tests). This mirrors the exact Display
-/// output that `http-cache-reqwest` produces when its inner request fails:
-/// `"Cache error: error sending request for url (...)"`.
-#[cfg(all(
-    not(feature = "decentralized"),
-    feature = "cache_request",
-    not(feature = "cache_request")
-))]
-#[tokio::test(flavor = "current_thread")]
-async fn test_confirm_tunnel_failure_cache_wrapped_nxdomain_upgrades_to_525() {
-    let target = "https://this-host-must-not-exist.invalid/";
-    // Mirror http-cache-reqwest's wrap exactly: "Cache error: error sending
-    // request for url (...)". Using `Error::middleware` (the public
-    // constructor) lets us avoid pulling anyhow as a direct dev-dep.
-    let io = std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("Cache error: error sending request for url ({target})"),
-    );
-    let err: crate::client::Error = reqwest_middleware::Error::middleware(io);
-
-    assert!(
-        err.is_middleware(),
-        "constructed wrap must report is_middleware()=true: {err:?}"
-    );
-    assert!(
-        CACHE_WRAPPED_TRANSPORT_AC.is_match(&err.to_string()),
-        "Display must match the cache wrap pattern: {err}"
-    );
-
-    let initial = get_error_http_status_code(&err);
-    assert_eq!(
-        initial, *ADDRESS_UNREACHABLE_ERROR,
-        "cache shortcut must classify cache-wrapped transport errors to 526"
-    );
-
-    let final_status = confirm_tunnel_failure_with_local_dns(
-        initial,
-        &err,
-        target,
-        std::time::Duration::from_secs(2),
-    )
-    .await;
-    assert_eq!(
-        final_status, *DNS_RESOLVE_ERROR,
-        "cache-wrapped 526 + local NxDomain must upgrade to 525 — confirmed dead \
-         host fast-fails through the same path as the non-cached tunnel-failure case"
-    );
-}
-
-/// Cache-wrapped transport error + RESOLVING host must KEEP 526.
-///
-/// The hang-prevention invariant of the cache shortcut (avoid burning
-/// the retry budget on cache-wrapped transport errors) must hold for
-/// hosts that resolve locally — only NXDOMAIN evidence flips us to 525.
-/// `Resolved` and `TimedOut` keep 526 so `is_retryable_status` stays
-/// false and the loop still halts.
-#[cfg(all(
-    not(feature = "decentralized"),
-    feature = "cache_request",
-    not(feature = "cache_request")
-))]
-#[tokio::test(flavor = "current_thread")]
-async fn test_confirm_tunnel_failure_cache_wrapped_resolved_keeps_526() {
-    let target = "https://localhost/";
-    let io = std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("Cache error: error sending request for url ({target})"),
-    );
-    let err: crate::client::Error = reqwest_middleware::Error::middleware(io);
-
-    let initial = get_error_http_status_code(&err);
-    assert_eq!(
-        initial, *ADDRESS_UNREACHABLE_ERROR,
-        "cache-wrapped transport error must classify to 526"
-    );
-
-    let final_status = confirm_tunnel_failure_with_local_dns(
-        initial,
-        &err,
-        target,
-        std::time::Duration::from_secs(2),
-    )
-    .await;
-    assert_eq!(
-        final_status, *ADDRESS_UNREACHABLE_ERROR,
-        "cache-wrapped 526 + local Resolved must KEEP 526 — preserves the \
-         cache shortcut's hang-prevention invariant"
-    );
-    assert!(
-        !is_retryable_status(final_status),
-        "526 must stay non-retryable so the cache-error retry loop halts"
-    );
-}
-
-/// Cache-wrapped 526 must be no-op when the wrap message DOESN'T match.
-/// Some legitimate higher-level cache errors (e.g. cache-storage I/O,
-/// serialization) have a different Display prefix and shouldn't be
-/// misclassified as "transport". This test guards that the AC pattern
-/// continues to require the exact "Cache error: error sending request"
-/// prefix.
-#[cfg(all(
-    not(feature = "decentralized"),
-    feature = "cache_request",
-    not(feature = "cache_request")
-))]
-#[tokio::test(flavor = "current_thread")]
-async fn test_confirm_tunnel_failure_cache_wrapped_unrelated_keeps_initial() {
-    // Unrelated middleware error — not a transport wrap.
-    let io = std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "cache storage io error: disk full",
-    );
-    let err: crate::client::Error = reqwest_middleware::Error::middleware(io);
-
-    assert!(err.is_middleware());
-    assert!(
-        !CACHE_WRAPPED_TRANSPORT_AC.is_match(&err.to_string()),
-        "non-transport cache errors must NOT match the AC pattern"
-    );
-
-    // Caller passes some unrelated initial status — confirm helper must
-    // not touch it just because err.is_middleware() is true.
-    let initial = StatusCode::INTERNAL_SERVER_ERROR;
-    let final_status = confirm_tunnel_failure_with_local_dns(
-        initial,
-        &err,
-        "https://example.com/",
-        std::time::Duration::from_millis(50),
-    )
-    .await;
-    assert_eq!(
-        final_status, initial,
-        "non-cache-wrap middleware errors must short-circuit before any DNS lookup"
     );
 }
 

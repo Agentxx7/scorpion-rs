@@ -11,6 +11,13 @@
 use std::fs;
 use std::path::Path;
 
+fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("spider crate must be inside workspace")
+        .to_path_buf()
+}
+
 /// One Rust source file in the crate, with its contents.
 struct SourceFile {
     relative_path: String,
@@ -1144,4 +1151,126 @@ fn automation_proxy_resolution_cannot_authorize_direct_fallback() {
             && synthetic.contains("builder.build().ok()"),
         "guardrail conditions must detect swallowed parse and build failures"
     );
+}
+
+fn worker_boundary_violation(kind: &str, contents: &str) -> bool {
+    match kind {
+        "reverse_dependency" => contents.contains("path = \"../spider_worker\""),
+        "canonical_selection" => {
+            contents.contains("spider_worker")
+                || contents.contains("SPIDER_WORKER")
+                || contents.contains("worker_connection")
+        }
+        "canonical_ownership" => [
+            "TransportPolicy",
+            "trait SearchProvider",
+            "struct SearchOptions",
+            "enum SearchError",
+            "trait SourceProvider",
+            "struct EvidenceBundle",
+            "struct ArtifactReference",
+            "struct AgentConfig",
+            "struct WatchState",
+            "pub struct Job",
+        ]
+        .iter()
+        .any(|pattern| contents.contains(pattern)),
+        "ssrf_import" => contents.contains("spider_worker::target_host_blocked"),
+        _ => false,
+    }
+}
+
+#[test]
+fn spider_worker_is_a_terminal_upstream_compatibility_boundary() {
+    let root = workspace_root();
+    let worker_manifest = fs::read_to_string(root.join("spider_worker/Cargo.toml")).unwrap();
+    assert!(worker_manifest.contains("[dependencies.spider]"));
+    assert!(!root.join("spider_worker/src/lib.rs").exists());
+
+    for entry in fs::read_dir(&root).unwrap().flatten() {
+        let manifest = entry.path().join("Cargo.toml");
+        if !manifest.exists() || entry.file_name() == "spider_worker" {
+            continue;
+        }
+        let contents = fs::read_to_string(&manifest).unwrap();
+        assert!(
+            !worker_boundary_violation("reverse_dependency", &contents),
+            "workspace capability must not depend on spider_worker: {}",
+            manifest.display()
+        );
+    }
+}
+
+#[test]
+fn canonical_capabilities_cannot_select_worker_execution() {
+    for canonical in [
+        "features/transport.rs",
+        "utils/evidence.rs",
+        "features/artifact_download_execution.rs",
+        "features/github_source_provider.rs",
+        "features/hugging_face_source_provider.rs",
+        "features/acquisition_binding.rs",
+        "features/research_scope.rs",
+        "features/discovery_target.rs",
+        "features/search.rs",
+    ] {
+        let contents =
+            fs::read_to_string(workspace_root().join("spider/src").join(canonical)).unwrap();
+        assert!(
+            !worker_boundary_violation("canonical_selection", &contents),
+            "canonical capability selects worker protocol: {canonical}"
+        );
+        assert!(
+            !worker_boundary_violation("ssrf_import", &contents),
+            "canonical capability imports worker-local SSRF defense: {canonical}"
+        );
+    }
+}
+
+#[test]
+fn worker_defines_no_canonical_ownership_and_uses_exact_compat_primitives() {
+    let worker = fs::read_to_string(workspace_root().join("spider_worker/src/main.rs")).unwrap();
+    assert!(!worker_boundary_violation("canonical_ownership", &worker));
+    assert!(worker.contains("fn target_host_blocked("));
+    assert!(!worker.contains("pub fn target_host_blocked("));
+    assert!(!worker.contains("spider_transport::"));
+    for primitive in [
+        "configure_http_client()",
+        "Page::new_page_streaming(",
+        "fetch_page_html_raw(",
+    ] {
+        assert_eq!(
+            worker.matches(primitive).count(),
+            1,
+            "compatibility primitive drift: {primitive}"
+        );
+    }
+}
+
+#[test]
+fn decentralized_worker_remains_rejected_under_tor() {
+    let website = fs::read_to_string(workspace_root().join("spider/src/website.rs")).unwrap();
+    assert!(website.contains("if cfg!(feature = \"decentralized\")"));
+    assert!(website.contains("decentralized crawling is not audited for Tor"));
+}
+
+#[test]
+fn scanner_detects_worker_boundary_violation_classes() {
+    for (kind, synthetic) in [
+        (
+            "reverse_dependency",
+            "spider_worker = { path = \"../spider_worker\" }",
+        ),
+        (
+            "canonical_selection",
+            "fallback_to_spider_worker(worker_url)",
+        ),
+        ("canonical_ownership", "pub trait SearchProvider {}"),
+        ("ssrf_import", "use spider_worker::target_host_blocked;"),
+    ] {
+        assert!(
+            worker_boundary_violation(kind, synthetic),
+            "scanner missed {kind}"
+        );
+    }
 }

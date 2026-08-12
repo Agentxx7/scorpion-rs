@@ -200,6 +200,14 @@ select them as alternates, or fall back to them. See `SCORPION_SDD.md` §3.
 | `fetch_page_html*` variants | Legacy fetch matrix | Must not be extended |
 | `spider_mcp::evidence` re-export shim | API stability | Must not be extended; use `spider::utils::evidence` directly |
 | `spider_agent::automation` re-export layer | Agent compatibility | Compat only; new code should import canonical crates directly |
+| `spider_worker` | `UPSTREAM_COMPATIBILITY_BOUNDARY`: terminal executable for Spider decentralized mode | Permitted graph is `spider_worker -> spider`; canonical Scorpion capabilities must never select its external protocol as alternate/fallback execution |
+
+`spider_worker::target_host_blocked` is a private
+`COMPATIBILITY_LOCAL_DEFENSE`, not canonical SSRF validation and not equivalent
+to `spider_transport` enforcement. The worker may retain the exact upstream
+compatibility primitives `Website::configure_http_client`,
+`Page::new_page_streaming`, and `fetch_page_html_raw`. Tor continues to reject
+decentralized execution.
 
 ---
 
@@ -213,7 +221,6 @@ select them as alternates, or fall back to them. See `SCORPION_SDD.md` §3.
 | `RemoteFetcher` (`fetcher.rs`) | Coarser hook than `HttpFetchEngine` | Keep both; document `HttpFetchEngine` as preferred for transport swaps |
 | `page::build` / `Page` `decentralized` variants | Weaker behavior | Flag as legacy |
 | `Agent::new_page_with_url` | Deprecated | Schedule removal at next major |
-| `spider_worker` | Decentralized crawling proxy server | Defaults preserve legacy behavior; hardening is env-opt-in. Not a canonical owner. |
 
 ### 6.2 REJECTED
 

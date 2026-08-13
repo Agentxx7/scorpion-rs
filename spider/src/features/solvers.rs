@@ -1170,7 +1170,8 @@ async fn materialize_remote_challenge(
     let mut visuals = Vec::with_capacity(challenge.visuals.len());
     for visual in challenge.visuals {
         match visual {
-            CaptchaVisualInput::Materialized { .. } => visuals.push(visual),
+            CaptchaVisualInput::Materialized { .. }
+            | CaptchaVisualInput::MaterializedFullGrid(_) => visuals.push(visual),
             CaptchaVisualInput::RemoteAsset {
                 id,
                 media_type,

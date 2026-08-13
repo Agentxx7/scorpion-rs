@@ -19,6 +19,232 @@ pub enum CaptchaChallengeKind {
     PointSelection,
 }
 
+/// One explicitly identified cell in a materialized full-grid image.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptchaImageGridCell {
+    choice_id: String,
+    row: usize,
+    column: usize,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl CaptchaImageGridCell {
+    /// Construct one cell in original full-grid image coordinates.
+    pub fn new(
+        choice_id: impl Into<String>,
+        row: usize,
+        column: usize,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            choice_id: choice_id.into(),
+            row,
+            column,
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Stable caller-assigned choice identity.
+    pub fn choice_id(&self) -> &str {
+        &self.choice_id
+    }
+
+    /// Zero-based grid row.
+    pub const fn row(&self) -> usize {
+        self.row
+    }
+
+    /// Zero-based grid column.
+    pub const fn column(&self) -> usize {
+        self.column
+    }
+
+    /// Cell rectangle `(x, y, width, height)` in original-image coordinates.
+    pub const fn geometry(&self) -> (u32, u32, u32, u32) {
+        (self.x, self.y, self.width, self.height)
+    }
+
+    /// Left edge in original-image coordinates.
+    pub const fn x(&self) -> u32 {
+        self.x
+    }
+
+    /// Top edge in original-image coordinates.
+    pub const fn y(&self) -> u32 {
+        self.y
+    }
+
+    /// Cell width in original-image pixels.
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Cell height in original-image pixels.
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+/// Validation failure for canonical materialized full-grid semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptchaImageGridValidationError {
+    /// Image dimensions, row count, or column count is zero.
+    InvalidDimensions,
+    /// The supplied visual is not already materialized bytes.
+    FullGridNotMaterialized,
+    /// Cell count does not equal `rows * columns`.
+    ChoiceCountMismatch,
+    /// A stable choice identity is empty or duplicated.
+    InvalidChoiceIdentity,
+    /// A row/column position is missing, duplicated, or outside the grid.
+    InvalidGridPosition,
+    /// A cell has zero area or extends outside the original image.
+    CellOutsideImage,
+    /// Two cell rectangles overlap with positive area.
+    AmbiguousCellOverlap,
+}
+
+/// One already-materialized full-grid image with complete canonical grid
+/// semantics. Construction validates and stores cells in row-major order;
+/// identity always comes from each cell's explicit `choice_id`.
+#[derive(Clone, Debug)]
+pub struct CaptchaImageGridInput {
+    full_grid: Box<CaptchaVisualInput>,
+    original_width: u32,
+    original_height: u32,
+    rows: usize,
+    columns: usize,
+    cells: Vec<CaptchaImageGridCell>,
+    empty_selection_valid: bool,
+}
+
+impl CaptchaImageGridInput {
+    /// Validate and construct one canonical materialized full-grid input.
+    pub fn new(
+        full_grid: CaptchaVisualInput,
+        original_dimensions: (u32, u32),
+        rows: usize,
+        columns: usize,
+        mut cells: Vec<CaptchaImageGridCell>,
+        empty_selection_valid: bool,
+    ) -> Result<Self, CaptchaImageGridValidationError> {
+        if !matches!(full_grid, CaptchaVisualInput::Materialized { .. }) {
+            return Err(CaptchaImageGridValidationError::FullGridNotMaterialized);
+        }
+        let (original_width, original_height) = original_dimensions;
+        if original_width == 0 || original_height == 0 || rows == 0 || columns == 0 {
+            return Err(CaptchaImageGridValidationError::InvalidDimensions);
+        }
+        let expected = rows
+            .checked_mul(columns)
+            .ok_or(CaptchaImageGridValidationError::ChoiceCountMismatch)?;
+        if cells.len() != expected {
+            return Err(CaptchaImageGridValidationError::ChoiceCountMismatch);
+        }
+        let mut ids = std::collections::HashSet::with_capacity(expected);
+        let mut positions = std::collections::HashSet::with_capacity(expected);
+        for cell in &cells {
+            if cell.choice_id.is_empty() || !ids.insert(cell.choice_id.clone()) {
+                return Err(CaptchaImageGridValidationError::InvalidChoiceIdentity);
+            }
+            if cell.row >= rows
+                || cell.column >= columns
+                || !positions.insert((cell.row, cell.column))
+            {
+                return Err(CaptchaImageGridValidationError::InvalidGridPosition);
+            }
+            let Some(right) = cell.x.checked_add(cell.width) else {
+                return Err(CaptchaImageGridValidationError::CellOutsideImage);
+            };
+            let Some(bottom) = cell.y.checked_add(cell.height) else {
+                return Err(CaptchaImageGridValidationError::CellOutsideImage);
+            };
+            if cell.width == 0
+                || cell.height == 0
+                || right > original_width
+                || bottom > original_height
+            {
+                return Err(CaptchaImageGridValidationError::CellOutsideImage);
+            }
+        }
+        for (index, first) in cells.iter().enumerate() {
+            for second in cells.iter().skip(index + 1) {
+                if rectangles_overlap(first, second) {
+                    return Err(CaptchaImageGridValidationError::AmbiguousCellOverlap);
+                }
+            }
+        }
+        cells.sort_by_key(|cell| (cell.row, cell.column));
+        if cells
+            .iter()
+            .enumerate()
+            .any(|(index, cell)| (cell.row, cell.column) != (index / columns, index % columns))
+        {
+            return Err(CaptchaImageGridValidationError::InvalidGridPosition);
+        }
+        Ok(Self {
+            full_grid: Box::new(full_grid),
+            original_width,
+            original_height,
+            rows,
+            columns,
+            cells,
+            empty_selection_valid,
+        })
+    }
+
+    /// Already-materialized full-grid visual.
+    pub fn full_grid(&self) -> &CaptchaVisualInput {
+        &self.full_grid
+    }
+
+    /// Original full-grid dimensions.
+    pub const fn original_dimensions(&self) -> (u32, u32) {
+        (self.original_width, self.original_height)
+    }
+
+    /// Grid dimensions `(rows, columns)`.
+    pub const fn layout(&self) -> (usize, usize) {
+        (self.rows, self.columns)
+    }
+
+    /// Number of grid rows.
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of grid columns.
+    pub const fn columns(&self) -> usize {
+        self.columns
+    }
+
+    /// Complete stable mapping in canonical row-major order.
+    pub fn cells(&self) -> &[CaptchaImageGridCell] {
+        &self.cells
+    }
+
+    /// Whether a successful empty selected-ID set is semantically valid.
+    pub const fn empty_selection_valid(&self) -> bool {
+        self.empty_selection_valid
+    }
+}
+
+fn rectangles_overlap(first: &CaptchaImageGridCell, second: &CaptchaImageGridCell) -> bool {
+    first.x < second.x + second.width
+        && second.x < first.x + first.width
+        && first.y < second.y + second.height
+        && second.y < first.y + first.height
+}
+
 /// One visual input. Remote assets are planning inputs and must be
 /// materialized through canonical transport before provider execution.
 #[derive(Clone, Debug)]
@@ -41,6 +267,8 @@ pub enum CaptchaVisualInput {
         /// Canonically validated acquisition target.
         url: url::Url,
     },
+    /// One full-grid image whose cell semantics have already been validated.
+    MaterializedFullGrid(Box<CaptchaImageGridInput>),
 }
 
 impl CaptchaVisualInput {
@@ -57,12 +285,19 @@ impl CaptchaVisualInput {
         }
     }
 
+    /// Wrap a validated materialized full-grid input without reinterpreting an
+    /// existing collection of ordinary visuals.
+    pub fn materialized_full_grid(grid: CaptchaImageGridInput) -> Self {
+        Self::MaterializedFullGrid(Box::new(grid))
+    }
+
     /// Return the declared media type.
     pub fn media_type(&self) -> &str {
         match self {
             Self::Materialized { media_type, .. } | Self::RemoteAsset { media_type, .. } => {
                 media_type
             }
+            Self::MaterializedFullGrid(grid) => grid.full_grid().media_type(),
         }
     }
 
@@ -70,6 +305,7 @@ impl CaptchaVisualInput {
     pub fn id(&self) -> Option<&str> {
         match self {
             Self::Materialized { id, .. } | Self::RemoteAsset { id, .. } => id.as_deref(),
+            Self::MaterializedFullGrid(grid) => grid.full_grid().id(),
         }
     }
 
@@ -78,6 +314,15 @@ impl CaptchaVisualInput {
         match self {
             Self::Materialized { bytes, .. } => Some(bytes),
             Self::RemoteAsset { .. } => None,
+            Self::MaterializedFullGrid(grid) => grid.full_grid().bytes(),
+        }
+    }
+
+    /// Return canonical full-grid semantics for the explicit full-grid form.
+    pub fn image_grid(&self) -> Option<&CaptchaImageGridInput> {
+        match self {
+            Self::MaterializedFullGrid(grid) => Some(grid),
+            Self::Materialized { .. } | Self::RemoteAsset { .. } => None,
         }
     }
 }
@@ -439,7 +684,17 @@ pub async fn solve_captcha(
     {
         return unsupported();
     }
-    if request.challenge.visuals.is_empty()
+    let full_grid_count = request
+        .challenge
+        .visuals
+        .iter()
+        .filter(|visual| visual.image_grid().is_some())
+        .count();
+    if (full_grid_count > 0
+        && (request.challenge.kind != CaptchaChallengeKind::ImageGridSelection
+            || full_grid_count != 1
+            || request.challenge.visuals.len() != 1))
+        || request.challenge.visuals.is_empty()
         || request
             .challenge
             .visuals
@@ -494,6 +749,40 @@ mod tests {
 
     struct Provider {
         calls: Arc<AtomicUsize>,
+    }
+
+    fn cells(rows: usize, columns: usize) -> Vec<CaptchaImageGridCell> {
+        (0..rows)
+            .flat_map(|row| {
+                (0..columns).map(move |column| {
+                    CaptchaImageGridCell::new(
+                        format!("choice-{row}-{column}"),
+                        row,
+                        column,
+                        column as u32 * 10,
+                        row as u32 * 10,
+                        10,
+                        10,
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn grid(
+        rows: usize,
+        columns: usize,
+        cells: Vec<CaptchaImageGridCell>,
+        empty_selection_valid: bool,
+    ) -> Result<CaptchaImageGridInput, CaptchaImageGridValidationError> {
+        CaptchaImageGridInput::new(
+            CaptchaVisualInput::materialized(None, "image/png", [1, 2, 3]),
+            (columns as u32 * 10, rows as u32 * 10),
+            rows,
+            columns,
+            cells,
+            empty_selection_valid,
+        )
     }
 
     #[async_trait::async_trait]
@@ -663,5 +952,134 @@ mod tests {
             CaptchaChallengeKind::PointSelection,
             &CaptchaSolution::Point { x: 0.0, y: 0.0 }
         ));
+    }
+
+    #[test]
+    fn valid_three_by_three_full_grid_preserves_explicit_row_major_mapping() {
+        let mut supplied = cells(3, 3);
+        supplied.reverse();
+        let grid = grid(3, 3, supplied, true).unwrap();
+        assert_eq!(grid.original_dimensions(), (30, 30));
+        assert_eq!(grid.layout(), (3, 3));
+        assert!(grid.empty_selection_valid());
+        let ids: Vec<_> = grid.cells().iter().map(|cell| cell.choice_id()).collect();
+        assert_eq!(ids.first(), Some(&"choice-0-0"));
+        assert_eq!(ids.last(), Some(&"choice-2-2"));
+        assert!(grid
+            .cells()
+            .iter()
+            .enumerate()
+            .all(|(index, cell)| (cell.row(), cell.column()) == (index / 3, index % 3)));
+    }
+
+    #[test]
+    fn valid_four_by_four_full_grid_is_one_explicit_visual_form() {
+        let grid = grid(4, 4, cells(4, 4), false).unwrap();
+        let visual = CaptchaVisualInput::materialized_full_grid(grid);
+        assert_eq!(visual.bytes(), Some([1, 2, 3].as_slice()));
+        assert_eq!(visual.media_type(), "image/png");
+        assert_eq!(visual.image_grid().unwrap().cells().len(), 16);
+        assert!(!visual.image_grid().unwrap().empty_selection_valid());
+    }
+
+    #[test]
+    fn duplicate_choice_identity_is_rejected() {
+        let mut values = cells(3, 3);
+        values[1].choice_id = values[0].choice_id.clone();
+        assert_eq!(
+            grid(3, 3, values, false).unwrap_err(),
+            CaptchaImageGridValidationError::InvalidChoiceIdentity
+        );
+    }
+
+    #[test]
+    fn missing_and_extra_cells_are_rejected() {
+        let mut missing = cells(3, 3);
+        missing.pop();
+        assert_eq!(
+            grid(3, 3, missing, false).unwrap_err(),
+            CaptchaImageGridValidationError::ChoiceCountMismatch
+        );
+        let mut extra = cells(3, 3);
+        extra.push(CaptchaImageGridCell::new("extra", 3, 0, 0, 0, 1, 1));
+        assert_eq!(
+            grid(3, 3, extra, false).unwrap_err(),
+            CaptchaImageGridValidationError::ChoiceCountMismatch
+        );
+    }
+
+    #[test]
+    fn duplicate_or_out_of_range_grid_positions_are_rejected() {
+        let mut duplicate = cells(3, 3);
+        duplicate[1].column = duplicate[0].column;
+        assert_eq!(
+            grid(3, 3, duplicate, false).unwrap_err(),
+            CaptchaImageGridValidationError::InvalidGridPosition
+        );
+        let mut outside = cells(3, 3);
+        outside[8].row = 3;
+        assert_eq!(
+            grid(3, 3, outside, false).unwrap_err(),
+            CaptchaImageGridValidationError::InvalidGridPosition
+        );
+    }
+
+    #[test]
+    fn invalid_layout_and_original_dimensions_are_rejected() {
+        assert_eq!(
+            grid(0, 3, Vec::new(), false).unwrap_err(),
+            CaptchaImageGridValidationError::InvalidDimensions
+        );
+        assert_eq!(
+            CaptchaImageGridInput::new(
+                CaptchaVisualInput::materialized(None, "image/png", [1]),
+                (0, 30),
+                3,
+                3,
+                cells(3, 3),
+                false,
+            )
+            .unwrap_err(),
+            CaptchaImageGridValidationError::InvalidDimensions
+        );
+    }
+
+    #[test]
+    fn cells_must_have_positive_area_inside_original_bounds() {
+        let mut zero = cells(3, 3);
+        zero[0].width = 0;
+        assert_eq!(
+            grid(3, 3, zero, false).unwrap_err(),
+            CaptchaImageGridValidationError::CellOutsideImage
+        );
+        let mut outside = cells(3, 3);
+        outside[8].width = 11;
+        assert_eq!(
+            grid(3, 3, outside, false).unwrap_err(),
+            CaptchaImageGridValidationError::CellOutsideImage
+        );
+    }
+
+    #[test]
+    fn overlapping_geometry_is_rejected() {
+        let mut values = cells(3, 3);
+        values[1].x = 9;
+        assert_eq!(
+            grid(3, 3, values, false).unwrap_err(),
+            CaptchaImageGridValidationError::AmbiguousCellOverlap
+        );
+    }
+
+    #[test]
+    fn full_grid_requires_materialized_bytes() {
+        let remote = CaptchaVisualInput::RemoteAsset {
+            id: None,
+            media_type: "image/png".into(),
+            url: url::Url::parse("https://example.invalid/grid.png").unwrap(),
+        };
+        assert_eq!(
+            CaptchaImageGridInput::new(remote, (30, 30), 3, 3, cells(3, 3), false).unwrap_err(),
+            CaptchaImageGridValidationError::FullGridNotMaterialized
+        );
     }
 }

@@ -1626,6 +1626,52 @@ fn canonical_captcha_capability_separates_provider_transport_and_browser_authori
 }
 
 #[test]
+fn canonical_captcha_full_grid_has_one_validated_provider_neutral_owner() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/captcha.rs")).unwrap();
+    assert_eq!(
+        source.matches("pub struct CaptchaImageGridInput").count(),
+        1
+    );
+    assert!(source.contains("MaterializedFullGrid(Box<CaptchaImageGridInput>)"));
+    assert!(source.contains("pub fn image_grid(&self) -> Option<&CaptchaImageGridInput>"));
+    for forbidden in [
+        "Qwen3",
+        "Gemini",
+        "OpenAi",
+        "compose_tiles",
+        "infer_grid_layout",
+    ] {
+        let grid = source
+            .split("pub struct CaptchaImageGridInput")
+            .nth(1)
+            .unwrap()
+            .split("pub enum CaptchaVisualInput")
+            .next()
+            .unwrap();
+        assert!(!grid.contains(forbidden), "grid model contains {forbidden}");
+    }
+}
+
+#[test]
+fn scanner_rejects_synthetic_provider_owned_grid_inference() {
+    for fixture in [
+        "let rows = (visuals.len() as f64).sqrt()",
+        "let id = index.to_string()",
+        "compose_tiles(visuals)",
+        "infer_grid_layout(image)",
+    ] {
+        assert!(
+            fixture.contains("visuals.len")
+                || fixture.contains("index.to_string")
+                || fixture.contains("compose_tiles")
+                || fixture.contains("infer_grid_layout"),
+            "negative fixture was not detected"
+        );
+    }
+}
+
+#[test]
 fn scanner_rejects_synthetic_captcha_provider_authority_leaks() {
     for fixture in [
         "impl CaptchaProvider for RawProvider { reqwest::Client",

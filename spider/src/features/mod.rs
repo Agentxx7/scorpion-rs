@@ -39,6 +39,9 @@ pub mod gemini;
 /// Common modules for Gemini
 pub mod gemini_common;
 
+/// Immutable browser challenge snapshot, revalidation and exact action seam.
+#[cfg(feature = "chrome")]
+pub mod browser_challenge;
 /// Provider-neutral CAPTCHA solver capability.
 pub mod captcha;
 /// Provider-neutral governance contract for acquiring, independently

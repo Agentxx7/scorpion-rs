@@ -1944,3 +1944,51 @@ fn scanner_rejects_synthetic_captcha_corpus_governance_bypasses() {
         assert!(captcha_corpus_governance_violation(fixture));
     }
 }
+
+fn browser_challenge_authority_violation(source: &str) -> bool {
+    [
+        "find_element(",
+        "find_elements(",
+        "query_selector(",
+        ".clamp(",
+        "nearest_element",
+        "fallback_click",
+        "retry_action",
+        "let _ = page.click",
+        "this.click()",
+        "provider.solve",
+        "CaptchaSolveRequest",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn canonical_browser_challenge_seam_owns_only_snapshot_and_exact_action() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/browser_challenge.rs"))
+            .unwrap();
+    assert!(source.contains("pub struct BrowserChallengeSnapshot"));
+    assert!(source.contains("self.revalidate(page).await?"));
+    assert!(source.contains("backend_node_id"));
+    assert!(source.contains("BrowserChallengeFailure::UnsupportedContext"));
+    assert!(!browser_challenge_authority_violation(&source));
+}
+
+#[test]
+fn scanner_rejects_synthetic_browser_challenge_identity_and_action_bypasses() {
+    for fixture in [
+        "page.find_element(selector).await?.click().await?",
+        "page.find_elements(selector).await?[index].click().await?",
+        "document.query_selector(selector)",
+        "x.clamp(0.0, width)",
+        "nearest_element(point)",
+        "fallback_click(target)",
+        "retry_action(action)",
+        "let _ = page.click(point).await",
+        "element.call_js_fn(\"function(){this.click()}\", false)",
+        "provider.solve(CaptchaSolveRequest::new(challenge))",
+    ] {
+        assert!(browser_challenge_authority_violation(fixture));
+    }
+}

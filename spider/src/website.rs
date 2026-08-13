@@ -1644,6 +1644,8 @@ impl Website {
             ExecutionMode::NoncanonicalRemoteFetcher
         } else if self.fetch_engine.is_some() {
             ExecutionMode::NoncanonicalHttpFetchEngine
+        } else if cfg!(feature = "wreq") {
+            ExecutionMode::NoncanonicalWreq
         } else {
             ExecutionMode::Canonical
         };
@@ -3746,7 +3748,8 @@ impl Website {
         Some(Arc::new(NoncanonicalClientRotator::new(clients)))
     }
 
-    /// Configure http client.
+    /// UPSTREAM_COMPATIBILITY_BOUNDARY: construct the feature-selected raw
+    /// client. Canonical Website execution uses ResolvedExecutor instead.
     #[cfg(not(feature = "decentralized"))]
     pub fn configure_http_client(&self) -> Client {
         let client = self.configure_http_client_builder();
@@ -7536,6 +7539,9 @@ impl Website {
         let __body = async {
             if !self.status.eq(&CrawlStatus::FirewallBlocked) && self.transport_gate() {
                 self.start();
+                if !self.prepare_execution() {
+                    return;
+                }
                 let (client, handle) = self.setup().await;
                 let (handle, join_handle) = match handle {
                     Some(h) => (Some(h.0), Some(h.1)),

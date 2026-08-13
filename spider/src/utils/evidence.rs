@@ -13,6 +13,7 @@
 
 use crate::features::transport::{self, TransportPolicy};
 use crate::page::Page;
+#[cfg(not(feature = "wreq"))]
 use crate::website::Website;
 
 #[cfg(feature = "serde")]
@@ -207,18 +208,26 @@ pub fn build_evidence(
 /// evidence-first single-resource fetch, in both the MCP server and the
 /// CLI.
 pub async fn fetch_single_page(url: &str) -> Result<Page, String> {
-    let mut website = Website::new(url);
-    website.with_limit(1);
-    let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
-    let mut receiver = website.subscribe(1);
-    tokio::spawn(async move {
-        website.crawl_raw().await;
-        website.unsubscribe();
-    });
-    receiver
-        .recv()
-        .await
-        .map_err(|_| "Retrieval completed without producing a page".to_string())
+    #[cfg(feature = "wreq")]
+    {
+        let _ = url;
+        Err("canonical evidence acquisition is unavailable under wreq".to_string())
+    }
+    #[cfg(not(feature = "wreq"))]
+    {
+        let mut website = Website::new(url);
+        website.with_limit(1);
+        let mut website = website.build().map_err(|_| "Invalid URL".to_string())?;
+        let mut receiver = website.subscribe(1);
+        tokio::spawn(async move {
+            website.crawl_raw().await;
+            website.unsubscribe();
+        });
+        receiver
+            .recv()
+            .await
+            .map_err(|_| "Retrieval completed without producing a page".to_string())
+    }
 }
 
 /// Options for the transport-aware one-shot acquisition seam. `transport`

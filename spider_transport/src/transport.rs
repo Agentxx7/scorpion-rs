@@ -257,6 +257,9 @@ impl std::error::Error for TransportError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionMode {
     Canonical,
+    /// Compile-time selected wreq Website execution. Wreq owns the network
+    /// round trip and is not a backend of the canonical ResolvedExecutor.
+    NoncanonicalWreq,
     NoncanonicalHttpFetchEngine,
     NoncanonicalRemoteFetcher,
     UpstreamCompatibility,

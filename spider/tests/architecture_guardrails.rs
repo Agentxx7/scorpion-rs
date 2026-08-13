@@ -1460,3 +1460,61 @@ fn cache_transport_negative_fixtures_are_rejected() {
         "executor.execute(request).await"
     ));
 }
+
+fn wreq_authority_violation(source: &str) -> bool {
+    [
+        "ExecutionMode::CanonicalWreq",
+        "ResolvedExecutor::from_wreq",
+        "canonical_wreq_client",
+        "canonical_secret_headers.apply_to(wreq_request)",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn wreq_execution_authority_is_explicit_and_noncanonical() {
+    let root = workspace_root();
+    let transport = fs::read_to_string(root.join("spider_transport/src/transport.rs")).unwrap();
+    let website = fs::read_to_string(root.join("spider/src/website.rs")).unwrap();
+    let page = fs::read_to_string(root.join("spider/src/page.rs")).unwrap();
+    let evidence = fs::read_to_string(root.join("spider/src/utils/evidence.rs")).unwrap();
+    let cache = fs::read_to_string(root.join("spider/src/cache_request.rs")).unwrap();
+    let solvers = fs::read_to_string(root.join("spider/src/features/solvers.rs")).unwrap();
+    assert!(transport.contains("NoncanonicalWreq"));
+    assert!(website.contains("ExecutionMode::NoncanonicalWreq"));
+    assert!(!website.contains("ExecutionMode::CanonicalWreq"));
+    assert!(page.contains("UPSTREAM_COMPATIBILITY_BOUNDARY"));
+    assert!(evidence.contains("canonical evidence acquisition is unavailable under wreq"));
+    assert!(!evidence.contains("wreq::Client"));
+    assert!(!cache.contains("wreq::Client"));
+    assert!(solvers.contains("CAPABILITY_LOCAL_NONCANONICAL_WREQ"));
+    for manifest in [
+        "spider_cli/Cargo.toml",
+        "spider_mcp/Cargo.toml",
+        "spider_agent/Cargo.toml",
+    ] {
+        let contents = fs::read_to_string(root.join(manifest)).unwrap();
+        assert!(
+            !contents.contains("spider/wreq"),
+            "canonical product selects wreq: {manifest}"
+        );
+    }
+    assert!(!canonical_crawler_error_boundary_violation(&page));
+}
+
+#[test]
+fn scanner_rejects_synthetic_canonical_wreq_claims() {
+    for fixture in [
+        "ExecutionMode::CanonicalWreq",
+        "ResolvedExecutor::from_wreq(client)",
+        "let client = canonical_wreq_client();",
+        "canonical_secret_headers.apply_to(wreq_request)",
+    ] {
+        assert!(
+            wreq_authority_violation(fixture),
+            "wreq fixture escaped: {fixture}"
+        );
+    }
+    assert!(!wreq_authority_violation("ExecutionMode::NoncanonicalWreq"));
+}

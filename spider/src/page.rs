@@ -2253,6 +2253,10 @@ pub struct Page {
     /// setter, and it is never inferred from `Website::configuration`
     /// after the fact.
     pub(crate) transport: Option<crate::features::transport::AcquisitionTransport>,
+    /// Backend execution provenance, independent of canonical authority.
+    pub(crate) backend: Option<spider_transport::BackendProvenance>,
+    /// Neutral origin reported by the crawler response seam.
+    pub(crate) response_origin: Option<spider_transport::ResponseOrigin>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -2427,6 +2431,10 @@ pub struct Page {
     /// setter, and it is never inferred from `Website::configuration`
     /// after the fact.
     pub(crate) transport: Option<crate::features::transport::AcquisitionTransport>,
+    /// Backend execution provenance.
+    pub(crate) backend: Option<spider_transport::BackendProvenance>,
+    /// Neutral response origin.
+    pub(crate) response_origin: Option<spider_transport::ResponseOrigin>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -3492,6 +3500,10 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
             } else {
                 crate::features::transport::current_acquisition_transport()
             },
+            backend: res
+                .backend
+                .or_else(|| res.failure.as_ref().map(|failure| failure.backend())),
+            response_origin: res.response_origin,
             binary_file: spool.vitals.binary_file,
             is_valid_utf8: spool.vitals.is_valid_utf8,
             is_xml: spool.vitals.is_xml,
@@ -3607,6 +3619,10 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
         } else {
             crate::features::transport::current_acquisition_transport()
         },
+        backend: res
+            .backend
+            .or_else(|| res.failure.as_ref().map(|failure| failure.backend())),
+        response_origin: res.response_origin,
         binary_file,
         is_valid_utf8,
         is_xml,
@@ -4310,7 +4326,7 @@ where
 
 impl Page {
     /// Canonical request-only acquisition. Raw-client constructors below are
-    /// retained solely as the explicit upstream compatibility boundary.
+    /// retained solely as the explicit UPSTREAM_COMPATIBILITY_BOUNDARY.
     #[cfg(not(feature = "wreq"))]
     pub async fn new_page_with_executor(
         url: &str,
@@ -4456,6 +4472,8 @@ impl Page {
         http_first_byte_args: (Option<std::time::Duration>, Option<std::time::Duration>),
         engine: Option<crate::fetch_engine::EngineFetchCtx<'_>>,
     ) -> Self {
+        #[cfg(feature = "wreq")]
+        let _ = (cache_options, cache_namespace);
         #[cfg(not(feature = "wreq"))]
         if engine.is_none() {
             if let Some(executor) = _executor {
@@ -7127,6 +7145,16 @@ impl Page {
     /// construction time from the ambient acquisition scope.
     pub fn transport(&self) -> Option<crate::features::transport::AcquisitionTransport> {
         self.transport
+    }
+
+    /// Backend that performed or reconstructed this Page acquisition.
+    pub fn backend_provenance(&self) -> Option<spider_transport::BackendProvenance> {
+        self.backend
+    }
+
+    /// Neutral origin of this response representation, when known.
+    pub fn response_origin(&self) -> Option<spider_transport::ResponseOrigin> {
+        self.response_origin
     }
 
     /// Html getter for bytes on the page as string.

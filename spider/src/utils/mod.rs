@@ -649,6 +649,12 @@ pub struct PageResponse {
     /// [`build_cached_html_page_response`] still does so for clarity at
     /// its call sites.
     pub origin: AcquisitionOrigin,
+    /// Neutral response origin when the producer participates in the crawler
+    /// outcome seam.
+    pub response_origin: Option<spider_transport::ResponseOrigin>,
+    /// Backend that performed or reconstructed this response. Omission never
+    /// implies canonical execution authority.
+    pub backend: Option<spider_transport::BackendProvenance>,
     /// Unix epoch milliseconds when a live fetch finished materializing the
     /// representation carried by this response. `None` for responses without
     /// a materialized representation and for paths without canonical timing.
@@ -6452,6 +6458,11 @@ pub async fn handle_response_bytes(
 ) -> PageResponse {
     let mut response = handle_response_bytes_inner(res, target_url, only_html).await;
     response.origin = AcquisitionOrigin::Network;
+    #[cfg(feature = "wreq")]
+    {
+        response.response_origin = Some(spider_transport::ResponseOrigin::Network);
+        response.backend = Some(spider_transport::BackendProvenance::Wreq);
+    }
     response
 }
 
@@ -7541,6 +7552,8 @@ pub(crate) async fn page_response_from_crawler_response(
     PageResponse {
         content: Some(content),
         origin: AcquisitionOrigin::Network,
+        response_origin: Some(response.origin),
+        backend: Some(response.backend),
         retrieved_at: unix_epoch_millis_now(),
         headers: Some(headers),
         status_code: status,
@@ -7625,7 +7638,7 @@ pub(crate) async fn fetch_bytes_for_mode(
         .map_err(|_| {
             spider_transport::CrawlerFailure::new(
                 spider_transport::CrawlerFailureKind::Request,
-                spider_transport::BackendProvenance::UpstreamCompatibility,
+                spider_transport::BackendProvenance::Wreq,
             )
         })?;
     let status = response.status();
@@ -7636,13 +7649,13 @@ pub(crate) async fn fetch_bytes_for_mode(
     {
         return Err(spider_transport::CrawlerFailure::new(
             spider_transport::CrawlerFailureKind::BodyStream,
-            spider_transport::BackendProvenance::UpstreamCompatibility,
+            spider_transport::BackendProvenance::Wreq,
         ));
     }
     let bytes = response.bytes().await.map_err(|_| {
         spider_transport::CrawlerFailure::new(
             spider_transport::CrawlerFailureKind::BodyStream,
-            spider_transport::BackendProvenance::UpstreamCompatibility,
+            spider_transport::BackendProvenance::Wreq,
         )
     })?;
     Ok((status, bytes))

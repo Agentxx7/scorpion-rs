@@ -144,7 +144,8 @@ lazy_static! {
 }
 #[cfg(feature = "wreq")]
 lazy_static! {
-    /// Gemini client – plain wreq client (no middleware).
+    /// CAPABILITY_LOCAL_NONCANONICAL_WREQ: Gemini's direct alternate client
+    /// is independent of Website execution and claims no canonical authority.
     static ref GEMINI_CLIENT: wreq::Client = {
         wreq::ClientBuilder::new()
             .timeout(Duration::from_millis(20_000))

@@ -41,6 +41,9 @@ pub mod gemini_common;
 
 /// Provider-neutral CAPTCHA solver capability.
 pub mod captcha;
+/// Provider-neutral governance contract for acquiring, independently
+/// annotating, splitting and immutably freezing CAPTCHA evaluation corpora.
+pub mod captcha_evaluation_corpus;
 
 /// Solve all.
 pub mod solvers;

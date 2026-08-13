@@ -1743,3 +1743,46 @@ fn scanner_rejects_synthetic_qwen_generation_state_leaks() {
         "factory.begin_request().await?"
     ));
 }
+
+fn captcha_corpus_governance_violation(source: &str) -> bool {
+    [
+        "impl From<CaptchaCorpusDraft> for FrozenCaptchaCorpus",
+        "pub draft: CaptchaCorpusDraft",
+        "minimum_cases: 199",
+        "annotations.len() < 1",
+        "qualification_split.unsealed()",
+        "provider_output.relabel",
+        "reqwest::Client",
+        "Qwen3VlGenerationFactory",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn canonical_captcha_corpus_protocol_is_provider_and_transport_neutral() {
+    let root = workspace_root();
+    let source =
+        fs::read_to_string(root.join("spider/src/features/captcha_evaluation_corpus.rs")).unwrap();
+    assert!(source.contains("pub struct FrozenCaptchaCorpus"));
+    assert!(source.contains("const MINIMUM_CASES: usize = 200"));
+    assert!(source.contains("pub fn freeze("));
+    assert!(source.contains("qualification_seal_record"));
+    assert!(!captcha_corpus_governance_violation(&source));
+}
+
+#[test]
+fn scanner_rejects_synthetic_captcha_corpus_governance_bypasses() {
+    for fixture in [
+        "impl From<CaptchaCorpusDraft> for FrozenCaptchaCorpus",
+        "pub draft: CaptchaCorpusDraft",
+        "minimum_cases: 199",
+        "annotations.len() < 1",
+        "qualification_split.unsealed()",
+        "provider_output.relabel(case)",
+        "impl CorpusLoader { reqwest::Client }",
+        "evaluate(Qwen3VlGenerationFactory, draft)",
+    ] {
+        assert!(captcha_corpus_governance_violation(fixture));
+    }
+}

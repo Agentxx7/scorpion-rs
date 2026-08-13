@@ -38,10 +38,10 @@ fn one_persistent_feature_selected_executor_owns_all_solver_networking() {
 #[test]
 fn challenge_get_and_all_post_families_use_crawler_request() {
     let source = source();
-    assert!(source.contains("fn gemini_get_request"));
+    assert!(source.contains("async fn materialize_remote_challenge"));
     assert!(source.contains("fn gemini_post_request"));
     assert!(source.contains("CrawlerRequest::get"));
-    assert!(source.matches("GEMINI_EXECUTOR.execute(").count() >= 4);
+    assert!(source.contains("execute_external_gemini_json"));
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn neutral_response_and_failure_seam_is_consumed() {
         "CrawlerFailureKind::HttpStatus",
         "response.backend",
         "collect_gemini_body",
-        "record_gemini_transport_skip",
+        "CaptchaSolveFailure::Transport",
     ] {
         assert!(
             source.contains(required),
@@ -75,10 +75,10 @@ fn neutral_response_and_failure_seam_is_consumed() {
 #[test]
 fn solver_policy_remains_above_transport_execution() {
     let source = source();
-    assert!(source.contains("GEMINI_SEM.acquire_many"));
-    assert!(source.contains("GEMINI_SEM.acquire()"));
-    assert!(source.contains("tokio::time::timeout(per_tile_timeout"));
-    assert!(source.contains("tokio::time::timeout(per_tile"));
+    assert!(source.contains(".acquire_many(permits)"));
+    assert!(source.contains(".acquire()"));
+    assert!(source.contains("tokio::time::timeout(request.deadline"));
+    assert!(source.contains("per_operation"));
 }
 
 #[test]

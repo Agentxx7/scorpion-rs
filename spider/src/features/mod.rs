@@ -39,6 +39,9 @@ pub mod gemini;
 /// Common modules for Gemini
 pub mod gemini_common;
 
+/// Provider-neutral CAPTCHA solver capability.
+pub mod captcha;
+
 /// Solve all.
 pub mod solvers;
 
@@ -124,9 +127,9 @@ pub mod source_provider;
 /// fail-closed `.onion` protection and transport-pinned redirects.
 pub mod transport;
 
-#[cfg(all(not(feature = "simd"), any(feature = "openai", feature = "gemini")))]
+#[cfg(all(not(feature = "simd"), feature = "openai"))]
 pub(crate) use serde_json;
-#[cfg(all(feature = "simd", any(feature = "openai", feature = "gemini")))]
+#[cfg(all(feature = "simd", feature = "openai"))]
 pub(crate) use sonic_rs as serde_json;
 
 /// Automation scripts.

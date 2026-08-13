@@ -11,16 +11,52 @@ use chromiumoxide::{
 use std::time::Duration;
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
+use crate::features::captcha::{
+    solve_captcha, CaptchaChallenge, CaptchaChallengeKind, CaptchaProvider,
+    CaptchaProviderCapabilities, CaptchaProviderId, CaptchaProviderLocality, CaptchaSolution,
+    CaptchaSolveFailure, CaptchaSolveOutcome, CaptchaSolveProvenance, CaptchaSolveRequest,
+    CaptchaVisualInput,
+};
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
 use crate::utils::{page_wait, perform_smart_mouse_movement, CF_WAIT_FOR};
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use base64::prelude::*;
 #[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
 use spider_transport::{
-    BackendProvenance, CanonicalExecutor, CrawlerBodyStream, CrawlerFailure, CrawlerFailureKind,
-    CrawlerRequest, SecretRequestHeaders,
+    CanonicalExecutor, CrawlerBodyStream, CrawlerFailure, CrawlerFailureKind, CrawlerRequest,
+    SecretRequestHeaders,
 };
 #[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
 use tokio_stream::StreamExt;
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+static LOCAL_LANGUAGE_MODEL_CAPABILITIES: CaptchaProviderCapabilities =
+    CaptchaProviderCapabilities {
+        provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+        locality: CaptchaProviderLocality::Local,
+        supported_kinds: &[
+            CaptchaChallengeKind::ImageGridSelection,
+            CaptchaChallengeKind::HorizontalOffset,
+            CaptchaChallengeKind::PointSelection,
+        ],
+        supported_media_types: &["image/jpeg", "image/png"],
+        maximum_inputs: 64,
+        requires_credentials: false,
+    };
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+static EXTERNAL_GEMINI_CAPABILITIES: CaptchaProviderCapabilities = CaptchaProviderCapabilities {
+    provider: CaptchaProviderId::EXTERNAL_GEMINI,
+    locality: CaptchaProviderLocality::External,
+    supported_kinds: &[
+        CaptchaChallengeKind::ImageGridSelection,
+        CaptchaChallengeKind::HorizontalOffset,
+        CaptchaChallengeKind::PointSelection,
+    ],
+    supported_media_types: &["image/jpeg", "image/png"],
+    maximum_inputs: 64,
+    requires_credentials: true,
+};
 
 static VERIFY_PATTERNS: &[&[u8]] = &[
     b"verifying you are human",
@@ -223,11 +259,6 @@ async fn collect_gemini_body(mut body: CrawlerBodyStream) -> Result<Vec<u8>, Cra
 }
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
-fn gemini_get_request(endpoint: &str) -> Result<CrawlerRequest, url::ParseError> {
-    Ok(CrawlerRequest::get(url::Url::parse(endpoint)?))
-}
-
-#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
 fn gemini_post_request(
     endpoint: &str,
     api_key: &str,
@@ -256,24 +287,514 @@ fn gemini_post_request(
     })
 }
 
-#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
-fn gemini_http_status_failure(
-    status: reqwest::StatusCode,
-    backend: BackendProvenance,
-) -> CrawlerFailure {
-    CrawlerFailure::new(CrawlerFailureKind::HttpStatus, backend).with_status(status)
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn visual_as_data_url(visual: &CaptchaVisualInput) -> Result<String, CaptchaSolveFailure> {
+    let bytes = visual
+        .bytes()
+        .ok_or(CaptchaSolveFailure::InvalidChallenge)?;
+    Ok(format!(
+        "data:{};base64,{}",
+        visual.media_type(),
+        BASE64_STANDARD.encode(bytes)
+    ))
 }
 
-/// Translate a neutral transport failure into the solver's established
-/// skip/retry decision while retaining its structured facts in diagnostics.
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
-fn record_gemini_transport_skip(failure: &CrawlerFailure) {
-    log::debug!(
-        "Gemini solver skipped an operation after canonical transport failure: kind={:?} backend={:?} status={:?}",
-        failure.kind(),
-        failure.backend(),
-        failure.observed_status()
+fn local_failure(error: &CdpError) -> CaptchaSolveFailure {
+    if is_missing_helper_error(error) {
+        CaptchaSolveFailure::ProviderUnavailable
+    } else if matches!(error, CdpError::Timeout) {
+        CaptchaSolveFailure::DeadlineExceeded
+    } else {
+        CaptchaSolveFailure::LocalExecutionFailure
+    }
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+struct LocalLanguageModelProvider<'a> {
+    page: &'a Page,
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+#[async_trait::async_trait]
+impl CaptchaProvider for LocalLanguageModelProvider<'_> {
+    fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+        &LOCAL_LANGUAGE_MODEL_CAPABILITIES
+    }
+
+    async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+        let solution = match request.challenge.kind {
+            CaptchaChallengeKind::ImageGridSelection => {
+                let mut tiles = Vec::with_capacity(request.challenge.visuals.len());
+                for visual in &request.challenge.visuals {
+                    let dataurl = match visual_as_data_url(visual) {
+                        Ok(value) => value,
+                        Err(failure) => {
+                            return CaptchaSolveOutcome::Failed {
+                                failure,
+                                provenance: None,
+                            }
+                        }
+                    };
+                    tiles.push(serde_json::json!({
+                        "id": visual.id().and_then(|id| id.parse::<u8>().ok()).unwrap_or_default(),
+                        "dataurl": dataurl,
+                    }));
+                }
+                match solve_with_inpage_helper(
+                    self.page,
+                    &tiles,
+                    &request.challenge.instruction,
+                    request.deadline.as_millis() as u64,
+                )
+                .await
+                {
+                    Ok(ids) => CaptchaSolution::SelectedChoices(
+                        ids.into_iter().map(|id| id.to_string()).collect(),
+                    ),
+                    Err(error) => {
+                        return CaptchaSolveOutcome::Failed {
+                            failure: local_failure(&error),
+                            provenance: Some(CaptchaSolveProvenance::local(
+                                CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+                            )),
+                        }
+                    }
+                }
+            }
+            CaptchaChallengeKind::HorizontalOffset => {
+                let dataurl = match request
+                    .challenge
+                    .visuals
+                    .first()
+                    .ok_or(CaptchaSolveFailure::InvalidChallenge)
+                    .and_then(visual_as_data_url)
+                {
+                    Ok(value) => value,
+                    Err(failure) => {
+                        return CaptchaSolveOutcome::Failed {
+                            failure,
+                            provenance: None,
+                        }
+                    }
+                };
+                match solve_geetest_with_local_language_model(
+                    self.page,
+                    &dataurl,
+                    request.deadline.as_millis() as u64,
+                )
+                .await
+                {
+                    Ok(offset) => CaptchaSolution::HorizontalOffset(offset),
+                    Err(error) => {
+                        return CaptchaSolveOutcome::Failed {
+                            failure: local_failure(&error),
+                            provenance: Some(CaptchaSolveProvenance::local(
+                                CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+                            )),
+                        }
+                    }
+                }
+            }
+            CaptchaChallengeKind::PointSelection => {
+                let dataurl = match request
+                    .challenge
+                    .visuals
+                    .first()
+                    .ok_or(CaptchaSolveFailure::InvalidChallenge)
+                    .and_then(visual_as_data_url)
+                {
+                    Ok(value) => value,
+                    Err(failure) => {
+                        return CaptchaSolveOutcome::Failed {
+                            failure,
+                            provenance: None,
+                        }
+                    }
+                };
+                match solve_lemin_with_inpage_helper(
+                    self.page,
+                    &dataurl,
+                    request.deadline.as_millis() as u64,
+                )
+                .await
+                {
+                    Ok((x, y)) => CaptchaSolution::Point { x, y },
+                    Err(error) => {
+                        return CaptchaSolveOutcome::Failed {
+                            failure: local_failure(&error),
+                            provenance: Some(CaptchaSolveProvenance::local(
+                                CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+                            )),
+                        }
+                    }
+                }
+            }
+        };
+        CaptchaSolveOutcome::Solved {
+            solution,
+            provenance: CaptchaSolveProvenance::local(CaptchaProviderId::LOCAL_LANGUAGE_MODEL),
+        }
+    }
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+struct ExternalGeminiProvider<'a> {
+    api_key: &'a str,
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+async fn execute_external_gemini_json(
+    endpoint: &str,
+    api_key: &str,
+    payload: &serde_json::Value,
+) -> Result<(serde_json::Value, CaptchaSolveProvenance), CaptchaSolveFailure> {
+    let body = serde_json::to_vec(payload).map_err(|_| CaptchaSolveFailure::InvalidChallenge)?;
+    let request = gemini_post_request(endpoint, api_key, body)
+        .map_err(|_| CaptchaSolveFailure::InvalidChallenge)?;
+    let response = GEMINI_EXECUTOR
+        .execute(request)
+        .await
+        .map_err(CaptchaSolveFailure::Transport)?;
+    let provenance = CaptchaSolveProvenance::external(
+        CaptchaProviderId::EXTERNAL_GEMINI,
+        response.backend,
+        response.origin,
     );
+    if !response.status.is_success() {
+        return Err(CaptchaSolveFailure::ProviderRejected);
+    }
+    let body = collect_gemini_body(response.body)
+        .await
+        .map_err(CaptchaSolveFailure::Transport)?;
+    let value =
+        serde_json::from_slice(&body).map_err(|_| CaptchaSolveFailure::InvalidProviderResponse)?;
+    Ok((value, provenance))
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn external_failure(failure: CaptchaSolveFailure) -> CaptchaSolveOutcome {
+    let transport_backend = match &failure {
+        CaptchaSolveFailure::Transport(failure) => Some(failure.backend()),
+        _ => None,
+    };
+    CaptchaSolveOutcome::Failed {
+        failure,
+        provenance: Some(CaptchaSolveProvenance {
+            provider: CaptchaProviderId::EXTERNAL_GEMINI,
+            locality: CaptchaProviderLocality::External,
+            transport_backend,
+            response_origin: None,
+        }),
+    }
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+async fn solve_external_gemini_request(
+    request: &CaptchaSolveRequest,
+    api_key: &str,
+) -> CaptchaSolveOutcome {
+    if api_key.is_empty() {
+        return external_failure(CaptchaSolveFailure::CredentialUnavailable);
+    }
+    let solve = async {
+        match request.challenge.kind {
+            CaptchaChallengeKind::ImageGridSelection => {
+                let mut selected = Vec::new();
+                let mut provenance = None;
+                let mut successful_answers = 0usize;
+                let mut last_failure = None;
+                let per_operation = request.deadline / (request.challenge.visuals.len() as u32 + 1);
+                for visual in &request.challenge.visuals {
+                    let bytes = match visual.bytes() {
+                        Some(bytes) => bytes,
+                        None => return external_failure(CaptchaSolveFailure::InvalidChallenge),
+                    };
+                    let payload = serde_json::json!({
+                        "contents": [{
+                            "role": "user",
+                            "parts": [
+                                { "text": format!("Does this image contain a {}? Answer only with \"yes\" or \"no\".", request.challenge.instruction) },
+                                { "inlineData": { "mimeType": visual.media_type(), "data": BASE64_STANDARD.encode(bytes) } }
+                            ]
+                        }],
+                        "generationConfig": { "maxOutputTokens": 5, "temperature": 0.0 }
+                    });
+                    match tokio::time::timeout(
+                        per_operation,
+                        execute_external_gemini_json(&GEMINI_VISION_ENDPOINT, api_key, &payload),
+                    )
+                    .await
+                    {
+                        Err(_) => last_failure = Some(CaptchaSolveFailure::DeadlineExceeded),
+                        Ok(Err(failure)) => last_failure = Some(failure),
+                        Ok(Ok((response, observed))) => {
+                            successful_answers += 1;
+                            provenance.get_or_insert(observed);
+                            let answer = response
+                                .get("candidates")
+                                .and_then(|value| value.get(0))
+                                .and_then(|value| value.get("content"))
+                                .and_then(|value| value.get("parts"))
+                                .and_then(|value| value.get(0))
+                                .and_then(|value| value.get("text"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .trim()
+                                .to_ascii_lowercase();
+                            if answer.contains("yes") {
+                                selected.push(visual.id().unwrap_or_default().to_string());
+                            }
+                        }
+                    }
+                }
+                if successful_answers == 0 {
+                    return external_failure(
+                        last_failure.unwrap_or(CaptchaSolveFailure::Inconclusive),
+                    );
+                }
+                CaptchaSolveOutcome::Solved {
+                    solution: CaptchaSolution::SelectedChoices(selected),
+                    provenance: provenance.expect("successful response records provenance"),
+                }
+            }
+            CaptchaChallengeKind::PointSelection => {
+                let visual = match request.challenge.visuals.first() {
+                    Some(visual) => visual,
+                    None => return external_failure(CaptchaSolveFailure::InvalidChallenge),
+                };
+                let bytes = match visual.bytes() {
+                    Some(bytes) => bytes,
+                    None => return external_failure(CaptchaSolveFailure::InvalidChallenge),
+                };
+                let payload = serde_json::json!({
+                    "contents": [{
+                        "role": "user",
+                        "parts": [
+                            { "text": "Give me the centre (x and y coordinates) of the missing puzzle piece in this image. Return a JSON array like [x, y] with numbers only." },
+                            { "inlineData": { "mimeType": visual.media_type(), "data": BASE64_STANDARD.encode(bytes) } }
+                        ]
+                    }],
+                    "generationConfig": { "maxOutputTokens": 16, "temperature": 0.0 }
+                });
+                match execute_external_gemini_json(&GEMINI_VISION_ENDPOINT, api_key, &payload).await
+                {
+                    Ok((response, provenance)) => {
+                        let text = response
+                            .get("candidates")
+                            .and_then(|value| value.get(0))
+                            .and_then(|value| value.get("content"))
+                            .and_then(|value| value.get("parts"))
+                            .and_then(|value| value.get(0))
+                            .and_then(|value| value.get("text"))
+                            .and_then(|value| value.as_str());
+                        let coordinates = text
+                            .and_then(|value| serde_json::from_str::<Vec<f64>>(value.trim()).ok());
+                        match coordinates {
+                            Some(coordinates) if coordinates.len() == 2 => {
+                                CaptchaSolveOutcome::Solved {
+                                    solution: CaptchaSolution::Point {
+                                        x: coordinates[0],
+                                        y: coordinates[1],
+                                    },
+                                    provenance,
+                                }
+                            }
+                            _ => external_failure(CaptchaSolveFailure::InvalidProviderResponse),
+                        }
+                    }
+                    Err(failure) => external_failure(failure),
+                }
+            }
+            CaptchaChallengeKind::HorizontalOffset => {
+                let visual = match request.challenge.visuals.first() {
+                    Some(visual) => visual,
+                    None => return external_failure(CaptchaSolveFailure::InvalidChallenge),
+                };
+                let image = match visual_as_data_url(visual) {
+                    Ok(image) => image,
+                    Err(failure) => return external_failure(failure),
+                };
+                let payload = serde_json::json!({
+                    "image": image,
+                    "prompt": r#"
+You are shown a screenshot of a GeeTest sliding‑puzzle captcha.
+The image contains a background with a single missing puzzle piece cut‑out.
+Return **only** the horizontal pixel offset (integer or float) of the left edge of the missing piece
+measured from the left border of the image.
+Do NOT return any extra text, JSON keys, or explanations.
+"#,
+                });
+                let endpoint = format!("{}:generateContent", *GEMINI_VISION_ENDPOINT);
+                match execute_external_gemini_json(&endpoint, api_key, &payload).await {
+                    Ok((response, provenance)) => {
+                        match response.get("x").and_then(|x| x.as_f64()) {
+                            Some(offset) => CaptchaSolveOutcome::Solved {
+                                solution: CaptchaSolution::HorizontalOffset(offset),
+                                provenance,
+                            },
+                            None => external_failure(CaptchaSolveFailure::InvalidProviderResponse),
+                        }
+                    }
+                    Err(failure) => external_failure(failure),
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(request.deadline, solve).await {
+        Ok(outcome) => outcome,
+        Err(_) => external_failure(CaptchaSolveFailure::DeadlineExceeded),
+    }
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn visual_from_data_url(
+    id: Option<String>,
+    dataurl: &str,
+) -> Result<CaptchaVisualInput, CaptchaSolveFailure> {
+    let (metadata, encoded) = dataurl
+        .split_once(',')
+        .ok_or(CaptchaSolveFailure::InvalidChallenge)?;
+    let media_type = metadata
+        .strip_prefix("data:")
+        .and_then(|value| value.strip_suffix(";base64"))
+        .ok_or(CaptchaSolveFailure::InvalidChallenge)?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded.trim())
+        .map_err(|_| CaptchaSolveFailure::InvalidChallenge)?;
+    Ok(CaptchaVisualInput::materialized(id, media_type, bytes))
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+async fn materialize_remote_challenge(
+    challenge: CaptchaChallenge,
+) -> Result<CaptchaChallenge, CaptchaSolveFailure> {
+    let mut visuals = Vec::with_capacity(challenge.visuals.len());
+    for visual in challenge.visuals {
+        match visual {
+            CaptchaVisualInput::Materialized { .. } => visuals.push(visual),
+            CaptchaVisualInput::RemoteAsset {
+                id,
+                media_type,
+                url,
+            } => {
+                let response = GEMINI_EXECUTOR
+                    .execute(CrawlerRequest::get(url))
+                    .await
+                    .map_err(CaptchaSolveFailure::Transport)?;
+                if !response.status.is_success() {
+                    return Err(CaptchaSolveFailure::Transport(
+                        CrawlerFailure::new(CrawlerFailureKind::HttpStatus, response.backend)
+                            .with_status(response.status),
+                    ));
+                }
+                let bytes = collect_gemini_body(response.body)
+                    .await
+                    .map_err(CaptchaSolveFailure::Transport)?;
+                visuals.push(CaptchaVisualInput::materialized(id, media_type, bytes));
+            }
+        }
+    }
+    Ok(CaptchaChallenge {
+        visuals,
+        ..challenge
+    })
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn outcome_error(outcome: CaptchaSolveOutcome) -> CdpError {
+    match outcome {
+        CaptchaSolveOutcome::Failed { failure, .. } => {
+            CdpError::msg(format!("CAPTCHA solver failed: {failure:?}"))
+        }
+        CaptchaSolveOutcome::Solved { .. } => {
+            CdpError::msg("CAPTCHA solver returned an unexpected solution shape")
+        }
+    }
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+async fn solve_horizontal_offset_with_legacy_routing(
+    page: &Page,
+    dataurl: &str,
+    timeout_ms: u64,
+    _compatibility_fallback: f64,
+) -> Result<f64, CdpError> {
+    let visual = visual_from_data_url(None, dataurl)
+        .map_err(|_| CdpError::msg("invalid CAPTCHA visual input"))?;
+    let challenge = CaptchaChallenge {
+        kind: CaptchaChallengeKind::HorizontalOffset,
+        instruction: "Return only the horizontal pixel offset (as a number) of the missing puzzle piece gap in this image.".into(),
+        visuals: vec![visual],
+    };
+    let local_request = CaptchaSolveRequest {
+        correlation_id: "geetest-horizontal-offset".into(),
+        selected_provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+        challenge: challenge.clone(),
+        deadline: Duration::from_millis(timeout_ms),
+    };
+    let local = solve_captcha(&LocalLanguageModelProvider { page }, &local_request).await;
+    match local {
+        CaptchaSolveOutcome::Solved {
+            solution: CaptchaSolution::HorizontalOffset(offset),
+            ..
+        } => Ok(offset),
+        CaptchaSolveOutcome::Failed {
+            failure: CaptchaSolveFailure::ProviderUnavailable,
+            ..
+        } => {
+            #[cfg(feature = "gemini")]
+            {
+                let api_key = std::env::var("GEMINI_API_KEY")
+                    .map_err(|_| CdpError::msg("GEMINI_API_KEY not set"))?;
+                let request = CaptchaSolveRequest {
+                    correlation_id: "geetest-horizontal-offset-external".into(),
+                    selected_provider: CaptchaProviderId::EXTERNAL_GEMINI,
+                    challenge,
+                    deadline: Duration::from_millis(timeout_ms),
+                };
+                let _permit = crate::utils::GEMINI_SEM
+                    .acquire()
+                    .await
+                    .map_err(|_| CdpError::msg("Gemini solver admission cancelled"))?;
+                match solve_captcha(&ExternalGeminiProvider { api_key: &api_key }, &request).await {
+                    CaptchaSolveOutcome::Solved {
+                        solution: CaptchaSolution::HorizontalOffset(offset),
+                        ..
+                    } => Ok(offset),
+                    outcome => Err(outcome_error(outcome)),
+                }
+            }
+            #[cfg(not(feature = "gemini"))]
+            {
+                Ok(_compatibility_fallback)
+            }
+        }
+        outcome => Err(outcome_error(outcome)),
+    }
+}
+
+/// Upstream-compatible in-page GeeTest entrypoint. Provider routing remains
+/// caller policy and delegates to the canonical single-provider seam.
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+pub async fn solve_geetest_with_inpage_helper(
+    page: &Page,
+    canvas_dataurl: &str,
+    timeout_ms: u64,
+) -> Result<f64, CdpError> {
+    solve_horizontal_offset_with_legacy_routing(page, canvas_dataurl, timeout_ms, 0.0).await
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+#[async_trait::async_trait]
+impl CaptchaProvider for ExternalGeminiProvider<'_> {
+    fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+        &EXTERNAL_GEMINI_CAPABILITIES
+    }
+
+    async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+        solve_external_gemini_request(request, self.api_key).await
+    }
 }
 
 lazy_static! {
@@ -1126,24 +1647,97 @@ pub async fn solve_enterprise_with_browser_gemini(
     challenge: &RcEnterpriseChallenge<'_>,
     timeout_ms: u64,
 ) -> Result<Vec<u8>, CdpError> {
-    let mut tiles_json = Vec::with_capacity(challenge.tiles.len());
+    let mut visuals = Vec::with_capacity(challenge.tiles.len());
 
     for tile in &challenge.tiles {
         let dataurl = extract_image_dataurl(page, tile.img_src).await?;
-        tiles_json.push(serde_json::json!({ "id": tile.id, "dataurl": dataurl }));
+        visuals.push(
+            visual_from_data_url(Some(tile.id.to_string()), &dataurl)
+                .map_err(|_| CdpError::msg("invalid reCAPTCHA tile image"))?,
+        );
     }
 
     let target = challenge.target.unwrap_or("target object").to_string();
-
-    match solve_with_inpage_helper(page, &tiles_json, &target, timeout_ms).await {
-        Ok(ids) => return Ok(ids),
-        Err(e) if !is_missing_helper_error(&e) => return Err(e),
-        Err(_) => {} // helper missing → fall back
+    let normalized = CaptchaChallenge {
+        kind: CaptchaChallengeKind::ImageGridSelection,
+        instruction: target.clone(),
+        visuals,
+    };
+    let local_request = CaptchaSolveRequest {
+        correlation_id: "recaptcha-enterprise-grid".into(),
+        selected_provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+        challenge: normalized,
+        deadline: Duration::from_millis(timeout_ms),
+    };
+    match solve_captcha(&LocalLanguageModelProvider { page }, &local_request).await {
+        CaptchaSolveOutcome::Solved {
+            solution: CaptchaSolution::SelectedChoices(ids),
+            ..
+        } => Ok(ids
+            .into_iter()
+            .filter_map(|id| id.parse::<u8>().ok())
+            .collect()),
+        CaptchaSolveOutcome::Failed {
+            failure: CaptchaSolveFailure::ProviderUnavailable,
+            ..
+        } => {
+            let api_key = match std::env::var("GEMINI_API_KEY") {
+                Ok(api_key) => api_key,
+                Err(_) => return Ok(Vec::new()),
+            };
+            let permits = challenge
+                .tiles
+                .len()
+                .min(*crate::utils::GEMINI_SEM_PERMITS)
+                .max(1) as u32;
+            let _permit = crate::utils::GEMINI_SEM
+                .acquire_many(permits)
+                .await
+                .map_err(|_| CdpError::msg("Gemini solver admission cancelled"))?;
+            let remote = CaptchaChallenge {
+                kind: CaptchaChallengeKind::ImageGridSelection,
+                instruction: target,
+                visuals: challenge
+                    .tiles
+                    .iter()
+                    .map(|tile| {
+                        url::Url::parse(tile.img_src)
+                            .map(|url| CaptchaVisualInput::RemoteAsset {
+                                id: Some(tile.id.to_string()),
+                                media_type: "image/jpeg".into(),
+                                url,
+                            })
+                            .map_err(|_| CdpError::msg("invalid reCAPTCHA tile URL"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
+            let remote = materialize_remote_challenge(remote)
+                .await
+                .map_err(|failure| CdpError::msg(format!("CAPTCHA asset failure: {failure:?}")))?;
+            let external_request = CaptchaSolveRequest {
+                correlation_id: "recaptcha-enterprise-grid-external".into(),
+                selected_provider: CaptchaProviderId::EXTERNAL_GEMINI,
+                challenge: remote,
+                deadline: Duration::from_millis(timeout_ms),
+            };
+            match solve_captcha(
+                &ExternalGeminiProvider { api_key: &api_key },
+                &external_request,
+            )
+            .await
+            {
+                CaptchaSolveOutcome::Solved {
+                    solution: CaptchaSolution::SelectedChoices(ids),
+                    ..
+                } => Ok(ids
+                    .into_iter()
+                    .filter_map(|id| id.parse::<u8>().ok())
+                    .collect()),
+                outcome => Err(outcome_error(outcome)),
+            }
+        }
+        outcome => Err(outcome_error(outcome)),
     }
-
-    solve_with_external_gemini(challenge, timeout_ms)
-        .await
-        .map_err(|e| CdpError::msg(format!("external‑gemini failed: {e}")))
 }
 
 /// In‑page Gemini helper – receives tiles that already contain a
@@ -1239,141 +1833,6 @@ fn is_missing_helper_error(err: &CdpError) -> bool {
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 /// Extract gemini fallback.
-async fn solve_with_external_gemini(
-    challenge: &RcEnterpriseChallenge<'_>,
-    timeout_ms: u64,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
-        // Clamp to the semaphore's total permits: `acquire_many(n)` with `n`
-        // greater than the total never resolves (permits are never added), which
-        // would hang the solve forever on a tile grid larger than the permit
-        // count. For tile counts <= the permit count `min` is a no-op, so this is
-        // byte-identical to the previous `acquire_many(tiles.len())`.
-        let want = challenge
-            .tiles
-            .len()
-            .min(*crate::utils::GEMINI_SEM_PERMITS)
-            .max(1)
-            .try_into()
-            .unwrap_or(1);
-        if let Ok(_sem) = crate::utils::GEMINI_SEM.acquire_many(want).await {
-            let target = challenge.target.unwrap_or("target object").to_string();
-
-            let mut yes_ids = Vec::with_capacity(challenge.tiles.len().min(64));
-
-            for tile in &challenge.tiles {
-                // -------------------------------------------------------------
-                // a) Download the image bytes.
-                // -------------------------------------------------------------
-                let image_request = match gemini_get_request(tile.img_src) {
-                    Ok(request) => request,
-                    Err(_) => continue,
-                };
-                let image_response = match GEMINI_EXECUTOR.execute(image_request).await {
-                    Ok(response) if response.status.is_success() => response,
-                    Ok(response) => {
-                        let failure = gemini_http_status_failure(response.status, response.backend);
-                        record_gemini_transport_skip(&failure);
-                        continue;
-                    }
-                    Err(failure) => {
-                        record_gemini_transport_skip(&failure);
-                        continue;
-                    }
-                };
-                let img_bytes = match collect_gemini_body(image_response.body).await {
-                    Ok(bytes) => bytes,
-                    Err(failure) => {
-                        record_gemini_transport_skip(&failure);
-                        continue;
-                    }
-                };
-
-                // -------------------------------------------------------------
-                // b) Build the Gemini request body.
-                // -------------------------------------------------------------
-                // Gemini expects a JSON object with a `contents` array.
-                // Each element contains a `parts` array.  We send one text part and
-                // one image part (base64‑encoded).
-                let request_body = serde_json::json!({
-                    "contents": [{
-                        "role": "user",
-                        "parts": [
-                            {
-                                "text": format!("Does this image contain a {}? Answer only with \"yes\" or \"no\".", target)
-                            },
-                            {
-                                "inlineData": {
-                                    "mimeType": "image/jpeg",   // recaptcha images are JPEGs
-                                    "data": BASE64_STANDARD.encode(&img_bytes)
-                                }
-                            }
-                        ]
-                    }],
-                    // The model may be asked to stop after it emits the answer.
-                    "generationConfig": {
-                        "maxOutputTokens": 5,
-                        "temperature": 0.0
-                    }
-                });
-
-                // -------------------------------------------------------------
-                // c) Send the request (with a per‑tile timeout that is a fraction of
-                //    the total timeout we were given).
-                // -------------------------------------------------------------
-                let per_tile_timeout =
-                    Duration::from_millis(timeout_ms / (challenge.tiles.len() as u64 + 1));
-                let request = gemini_post_request(
-                    &GEMINI_VISION_ENDPOINT,
-                    &api_key,
-                    serde_json::to_vec(&request_body)?,
-                )?;
-                let resp =
-                    tokio::time::timeout(per_tile_timeout, GEMINI_EXECUTOR.execute(request)).await;
-
-                let resp = match resp {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(failure)) => {
-                        record_gemini_transport_skip(&failure);
-                        continue;
-                    }
-                    // The solver-owned per-operation deadline elapsed.
-                    Err(_) => continue,
-                };
-
-                // -------------------------------------------------------------
-                // d) Parse the Gemini answer.
-                // -------------------------------------------------------------
-                let resp_json: serde_json::Value =
-                    serde_json::from_slice(&collect_gemini_body(resp.body).await?)?;
-                // The answer text lives in `candidates[0].content.parts[0].text`.
-                let answer_text = resp_json
-                    .get("candidates")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("content"))
-                    .and_then(|c| c.get("parts"))
-                    .and_then(|p| p.get(0))
-                    .and_then(|p| p.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_ascii_lowercase();
-
-                if answer_text.contains("yes") {
-                    yes_ids.push(tile.id);
-                }
-            }
-
-            Ok(yes_ids)
-        } else {
-            Ok(Vec::new())
-        }
-    } else {
-        Ok(Vec::new())
-    }
-}
-
-/// Warm‑up the in‑page Gemini `LanguageModel` for the given Chrome page.
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 pub async fn warm_gemini_model(page: &Page) -> Result<(), CdpError> {
     let eval_params = EvaluateParams::builder()
@@ -1696,132 +2155,41 @@ pub async fn recaptcha_handle(
         Err(_) => Err(CdpError::Timeout),
     }
 }
-
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
-/// Remove solve lemin external.
+/// Upstream-compatible external Gemini entrypoint. Canonical callers use the
+/// neutral provider seam; this wrapper preserves the historical tuple shape.
 pub async fn solve_lemin_with_external_gemini(image_dataurl: &str, timeout_ms: u64) -> (f64, f64) {
     let api_key = match std::env::var("GEMINI_API_KEY") {
-        Ok(k) => k,
+        Ok(api_key) => api_key,
         Err(_) => return (0.0, 0.0),
     };
-
-    /* ----------------------------------------------------------------- *
-     * 2️⃣  Acquire the semaphore that throttles concurrent Gemini calls.
-     * ----------------------------------------------------------------- */
-    if crate::utils::GEMINI_SEM.acquire().await.is_err() {
-        return (0.0, 0.0);
-    }
-
-    /* ----------------------------------------------------------------- *
-     * 3️⃣  Decode the `data:` URL into raw PNG bytes.
-     * ----------------------------------------------------------------- */
-    let b64_part = match image_dataurl.split_once(',').map(|x| x.1) {
-        Some(p) => p.trim(),
-        None => return (0.0, 0.0),
-    };
-
-    let img_bytes = match BASE64_STANDARD.decode(b64_part) {
-        Ok(b) => b,
+    let visual = match visual_from_data_url(None, image_dataurl) {
+        Ok(visual) => visual,
         Err(_) => return (0.0, 0.0),
     };
-
-    /* ----------------------------------------------------------------- *
-     * 4️⃣  Build the Gemini request payload – we ask for a JSON array `[x,y]`.
-     * ----------------------------------------------------------------- */
-    let request_body = serde_json::json!({
-        "contents": [{
-            "role": "user",
-            "parts": [
-                {
-                    "text": "Give me the centre (x and y coordinates) of the missing puzzle piece in this image. Return a JSON array like [x, y] with numbers only."
-                },
-                {
-                    "inlineData": {
-                        "mimeType": "image/png",
-                        "data": BASE64_STANDARD.encode(&img_bytes)
-                    }
-                }
-            ]
-        }],
-        "generationConfig": {
-            "maxOutputTokens": 16,
-            "temperature": 0.0
-        }
-    });
-
-    /* ----------------------------------------------------------------- *
-     * 5️⃣  Perform the HTTP request, respecting a per‑tile timeout.
-     * ----------------------------------------------------------------- */
-    let per_tile = Duration::from_millis(timeout_ms / 2);
-    let request = match serde_json::to_vec(&request_body)
-        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
-        .and_then(|body| gemini_post_request(&GEMINI_VISION_ENDPOINT, &api_key, body))
-    {
-        Ok(request) => request,
+    let request = CaptchaSolveRequest {
+        correlation_id: "lemin-point-external-compatibility".into(),
+        selected_provider: CaptchaProviderId::EXTERNAL_GEMINI,
+        challenge: CaptchaChallenge {
+            kind: CaptchaChallengeKind::PointSelection,
+            instruction: "Give me the centre (x and y coordinates) of the missing puzzle piece in this image.".into(),
+            visuals: vec![visual],
+        },
+        deadline: Duration::from_millis(timeout_ms / 2),
+    };
+    let _permit = match crate::utils::GEMINI_SEM.acquire().await {
+        Ok(permit) => permit,
         Err(_) => return (0.0, 0.0),
     };
-    let resp = match tokio::time::timeout(per_tile, GEMINI_EXECUTOR.execute(request)).await {
-        Ok(Ok(r)) => r,
-        Ok(Err(failure)) => {
-            record_gemini_transport_skip(&failure);
-            return (0.0, 0.0);
-        }
-        Err(_) => return (0.0, 0.0),
-    };
-
-    /* ----------------------------------------------------------------- *
-     * 6️⃣  Verify we received a 200 OK.
-     * ----------------------------------------------------------------- */
-    if !resp.status.is_success() {
-        let failure = gemini_http_status_failure(resp.status, resp.backend);
-        record_gemini_transport_skip(&failure);
-        return (0.0, 0.0);
-    }
-
-    /* ----------------------------------------------------------------- *
-     * 7️⃣  Pull the textual answer out of Gemini’s JSON envelope.
-     * ----------------------------------------------------------------- */
-    let body = match collect_gemini_body(resp.body).await {
-        Ok(body) => body,
-        Err(failure) => {
-            record_gemini_transport_skip(&failure);
-            return (0.0, 0.0);
-        }
-    };
-    let json: serde_json::Value = match serde_json::from_slice(&body) {
-        Ok(json) => json,
-        Err(_) => return (0.0, 0.0),
-    };
-
-    let txt = match json
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("content"))
-        .and_then(|c| c.get("parts"))
-        .and_then(|p| p.get(0))
-        .and_then(|p| p.get("text"))
-        .and_then(|t| t.as_str())
-    {
-        Some(t) => t.trim(),
-        None => return (0.0, 0.0),
-    };
-
-    /* ----------------------------------------------------------------- *
-     * 8️⃣  Parse the `[x, y]` JSON array we asked Gemini for.
-     * ----------------------------------------------------------------- */
-    let coords: Vec<f64> = match serde_json::from_str(txt) {
-        Ok(v) => v,
-        Err(_) => return (0.0, 0.0),
-    };
-
-    if coords.len() == 2 {
-        (coords[0], coords[1])
-    } else {
-        (0.0, 0.0)
+    match solve_captcha(&ExternalGeminiProvider { api_key: &api_key }, &request).await {
+        CaptchaSolveOutcome::Solved {
+            solution: CaptchaSolution::Point { x, y },
+            ..
+        } => (x, y),
+        _ => (0.0, 0.0),
     }
 }
 
-/// Lemin in page helper.
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 async fn solve_lemin_with_inpage_helper(
     page: &Page,
@@ -1882,6 +2250,65 @@ async fn solve_lemin_with_inpage_helper(
             _ => Err(CdpError::msg("Gemini did not return a valid [x, y] array")),
         },
         Err(e) => Err(e), // propagate Chrome errors (including missing helper)
+    }
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+async fn solve_point_with_legacy_routing(
+    page: &Page,
+    dataurl: &str,
+    timeout_ms: u64,
+) -> Result<(f64, f64), CdpError> {
+    let visual = visual_from_data_url(None, dataurl)
+        .map_err(|_| CdpError::msg("invalid CAPTCHA visual input"))?;
+    let challenge = CaptchaChallenge {
+        kind: CaptchaChallengeKind::PointSelection,
+        instruction:
+            "Give me the centre (x and y coordinates) of the missing puzzle piece in this image."
+                .into(),
+        visuals: vec![visual],
+    };
+    let local_request = CaptchaSolveRequest {
+        correlation_id: "lemin-point".into(),
+        selected_provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+        challenge: challenge.clone(),
+        deadline: Duration::from_millis(timeout_ms),
+    };
+    match solve_captcha(&LocalLanguageModelProvider { page }, &local_request).await {
+        CaptchaSolveOutcome::Solved {
+            solution: CaptchaSolution::Point { x, y },
+            ..
+        } => Ok((x, y)),
+        CaptchaSolveOutcome::Failed {
+            failure: CaptchaSolveFailure::ProviderUnavailable,
+            ..
+        } => {
+            let api_key = std::env::var("GEMINI_API_KEY")
+                .map_err(|_| CdpError::msg("GEMINI_API_KEY not set"))?;
+            let external_request = CaptchaSolveRequest {
+                correlation_id: "lemin-point-external".into(),
+                selected_provider: CaptchaProviderId::EXTERNAL_GEMINI,
+                challenge,
+                deadline: Duration::from_millis(timeout_ms / 2),
+            };
+            let _permit = crate::utils::GEMINI_SEM
+                .acquire()
+                .await
+                .map_err(|_| CdpError::msg("Gemini solver admission cancelled"))?;
+            match solve_captcha(
+                &ExternalGeminiProvider { api_key: &api_key },
+                &external_request,
+            )
+            .await
+            {
+                CaptchaSolveOutcome::Solved {
+                    solution: CaptchaSolution::Point { x, y },
+                    ..
+                } => Ok((x, y)),
+                outcome => Err(outcome_error(outcome)),
+            }
+        }
+        outcome => Err(outcome_error(outcome)),
     }
 }
 
@@ -2006,18 +2433,8 @@ pub async fn lemin_handle(
             // e) Ask Gemini for the missing piece centre (x, y) – first try the
             //    in‑page helper, then fall back to the remote call.
             // ---------------------------------------------------------
-            let (target_x, target_y) = match solve_lemin_with_inpage_helper(page, &dataurl, 20_000).await {
-                Ok(p) => p,
-                Err(e) if is_missing_helper_error(&e) => {
-                    // -----------------------------------------------------------------
-                    // Remote fallback – this is the same behaviour you already have
-                    // for Recaptcha‑Enterprise.
-                    // -----------------------------------------------------------------
-                    solve_lemin_with_external_gemini(&dataurl, 20_000)
-                        .await
-                }
-                Err(e) => return Err(e), // any other Chrome error bubbles up
-            };
+            let (target_x, target_y) =
+                solve_point_with_legacy_routing(page, &dataurl, 20_000).await?;
 
             // ---------------------------------------------------------
             // f) Locate the **draggable piece**.
@@ -2341,72 +2758,10 @@ pub fn extract_rc_enterprise_challenge<'a>(html: &'a [u8]) -> Option<RcEnterpris
         Some(out)
     }
 }
-#[cfg(feature = "gemini")]
-mod gemini {
-    use super::*;
-    // ----  no `anyhow` import any more  ----
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Serialize)]
-    struct Payload<'a> {
-        /// Base‑64 data URL of the canvas (`data:image/png;base64,…`).
-        image: &'a str,
-        /// Prompt that makes Gemini return the **horizontal pixel offset** of the
-        /// missing piece.
-        prompt: &'static str,
-    }
-
-    #[derive(Deserialize)]
-    struct GeminiResponse {
-        /// X‑offset of the gap (relative to the left edge of the image).
-        x: f64,
-    }
-
-    /// Calls Gemini‑Pro‑Vision and returns the x‑coordinate of the gap.
-    ///
-    /// Transport failures remain canonical neutral facts until this domain
-    /// boundary converts them into the solver's public boxed error contract.
-    pub async fn solve_with_gemini(
-        api_key: &str,
-        image_dataurl: &str,
-    ) -> Result<f64, Box<dyn std::error::Error>> {
-        // Prompt that works best for GeeTest sliders.
-        const PROMPT: &str = r#"
-You are shown a screenshot of a GeeTest sliding‑puzzle captcha.
-The image contains a background with a single missing puzzle piece cut‑out.
-Return **only** the horizontal pixel offset (integer or float) of the left edge of the missing piece
-measured from the left border of the image.
-Do NOT return any extra text, JSON keys, or explanations.
-"#;
-
-        let payload = Payload {
-            image: image_dataurl,
-            prompt: PROMPT,
-        };
-
-        let endpoint = format!("{}:generateContent", *GEMINI_VISION_ENDPOINT);
-        let request = gemini_post_request(
-            &endpoint,
-            api_key,
-            crate::features::serde_json::to_vec(&payload)?,
-        )?;
-        let response = GEMINI_EXECUTOR.execute(request).await?;
-        if !response.status.is_success() {
-            return Err(Box::new(gemini_http_status_failure(
-                response.status,
-                response.backend,
-            )));
-        }
-        let body = collect_gemini_body(response.body).await?;
-        let resp: GeminiResponse = crate::features::serde_json::from_slice(&body)?;
-
-        Ok(resp.x)
-    }
-}
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 /// In page geetest helper.
-pub async fn solve_geetest_with_inpage_helper(
+async fn solve_geetest_with_local_language_model(
     page: &Page,
     canvas_dataurl: &str,
     timeout_ms: u64,
@@ -2481,25 +2836,7 @@ pub async fn solve_geetest_with_inpage_helper(
     let eval_res = match eval_outcome {
         Ok(res) => res,
         Err(err) => {
-            if is_missing_helper_error(&err) {
-                #[cfg(feature = "gemini")]
-                {
-                    let api_key = std::env::var("GEMINI_API_KEY")
-                        .map_err(|_| CdpError::msg("GEMINI_API_KEY not set"))?;
-                    return gemini::solve_with_gemini(&api_key, canvas_dataurl)
-                        .await
-                        .map_err(|e| CdpError::msg(format!("Gemini external error: {e}")));
-                }
-
-                #[cfg(not(feature = "gemini"))]
-                {
-                    // No Gemini compiled – return centre of track.
-                    return Ok(0.0);
-                }
-            } else {
-                // Some other Chrome‑side error – propagate it.
-                return Err(err);
-            }
+            return Err(err);
         }
     };
 
@@ -2718,27 +3055,15 @@ pub async fn geetest_handle(
                     //     exist we fall back to the external Gemini API (or the
                     //     centre‑of‑track when the gemini feature is disabled).
                     // -------------------------------------------------
-                    let gap_x = match solve_geetest_with_inpage_helper(page, &dataurl, 20_000).await
+                    let gap_x = match solve_horizontal_offset_with_legacy_routing(
+                        page,
+                        &dataurl,
+                        20_000,
+                        (track_bb.width * 0.5) as f64,
+                    )
+                    .await
                     {
                         Ok(x) => x,
-                        Err(e) if is_missing_helper_error(&e) => {
-                            #[cfg(feature = "gemini")]
-                            {
-                                let api_key = std::env::var("GEMINI_API_KEY")
-                                    .map_err(|_| CdpError::msg("GEMINI_API_KEY not set"))?;
-                                gemini::solve_with_gemini(&api_key, &dataurl)
-                                    .await
-                                    .map_err(|e| {
-                                        CdpError::msg(format!("Gemini external error: {e}"))
-                                    })?
-                            }
-
-                            #[cfg(not(feature = "gemini"))]
-                            {
-                                // centre of the track – old hard‑coded fallback.
-                                (track_bb.width * 0.5) as f64
-                            }
-                        }
                         Err(e) => return Err(e), // real Chrome error – bubble up
                     };
 

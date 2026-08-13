@@ -1574,3 +1574,48 @@ fn scanner_rejects_synthetic_raw_gemini_transport() {
         "GEMINI_EXECUTOR.execute(request).await"
     ));
 }
+
+fn captcha_provider_authority_violation(source: &str) -> bool {
+    [
+        "impl CaptchaProvider for RawProvider { reqwest::Client",
+        "impl CaptchaProvider for RawProvider { wreq::Client",
+        "CaptchaSolveRequest { client:",
+        "provider.solve(request).or_else(fallback_provider)",
+        "provider_id = BackendProvenance::Reqwest",
+        "CaptchaSolveFailure::LocalExecutionFailure(cdp_error)",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn canonical_captcha_capability_separates_provider_transport_and_browser_authority() {
+    let root = workspace_root();
+    let core = fs::read_to_string(root.join("spider/src/features/captcha.rs")).unwrap();
+    let solvers = fs::read_to_string(root.join("spider/src/features/solvers.rs")).unwrap();
+    assert!(core.contains("pub trait CaptchaProvider"));
+    assert!(core.contains("request.selected_provider != capabilities.provider"));
+    assert!(core.contains("provider.solve(request).await"));
+    assert!(!core.contains("reqwest::Client"));
+    assert!(!core.contains("wreq::Client"));
+    assert!(!core.contains("CdpError"));
+    assert!(solvers.contains("impl CaptchaProvider for LocalLanguageModelProvider"));
+    assert!(solvers.contains("impl CaptchaProvider for ExternalGeminiProvider"));
+}
+
+#[test]
+fn scanner_rejects_synthetic_captcha_provider_authority_leaks() {
+    for fixture in [
+        "impl CaptchaProvider for RawProvider { reqwest::Client",
+        "impl CaptchaProvider for RawProvider { wreq::Client",
+        "CaptchaSolveRequest { client: raw_client }",
+        "provider.solve(request).or_else(fallback_provider)",
+        "provider_id = BackendProvenance::Reqwest",
+        "CaptchaSolveFailure::LocalExecutionFailure(cdp_error)",
+    ] {
+        assert!(captcha_provider_authority_violation(fixture));
+    }
+    assert!(!captcha_provider_authority_violation(
+        "solve_captcha(&selected_provider, &request).await"
+    ));
+}

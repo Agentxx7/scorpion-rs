@@ -1820,6 +1820,46 @@ fn scanner_rejects_synthetic_qwen_generation_state_leaks() {
     ));
 }
 
+fn qwen_structured_generation_violation(source: &str) -> bool {
+    [
+        "push_str(\"}\")",
+        "trim_end_matches",
+        "extract_first_valid",
+        "unwrap_or_default",
+        "CaptchaSolution",
+        "reqwest::Client",
+        "Device::new_cuda",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn qwen_structured_generation_is_token_constrained_and_runtime_owned() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/qwen3_vl_runtime.rs"))
+            .unwrap();
+    assert!(source.contains("fn constrained_token("));
+    assert!(source.contains("NoValidStructuredContinuation"));
+    assert!(source.contains("schema_state(schema, &text)"));
+    assert!(!qwen_structured_generation_violation(&source));
+}
+
+#[test]
+fn scanner_rejects_synthetic_qwen_structured_output_repairs() {
+    for fixture in [
+        "output.push_str(\"}\")",
+        "output.trim_end_matches(',')",
+        "extract_first_valid(output)",
+        "parse(output).unwrap_or_default()",
+        "fn decode(value: CaptchaSolution)",
+        "reqwest::Client::new()",
+        "Device::new_cuda(0)",
+    ] {
+        assert!(qwen_structured_generation_violation(fixture));
+    }
+}
+
 fn captcha_corpus_governance_violation(source: &str) -> bool {
     [
         "impl From<CaptchaCorpusDraft> for FrozenCaptchaCorpus",

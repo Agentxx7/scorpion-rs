@@ -148,6 +148,8 @@ pub enum Qwen3VlRuntimeFailure {
     Tokenization(String),
     /// Request-local inference failed.
     Inference(String),
+    /// No model token can legally continue the active structured grammar.
+    NoValidStructuredContinuation,
 }
 
 impl std::fmt::Display for Qwen3VlRuntimeFailure {
@@ -167,6 +169,9 @@ impl std::fmt::Display for Qwen3VlRuntimeFailure {
             Self::Processing(reason) => write!(f, "Qwen3-VL processing failed: {reason}"),
             Self::Tokenization(reason) => write!(f, "Qwen3-VL tokenization failed: {reason}"),
             Self::Inference(reason) => write!(f, "Qwen3-VL inference failed: {reason}"),
+            Self::NoValidStructuredContinuation => {
+                write!(f, "Qwen3-VL structured grammar has no valid continuation")
+            }
         }
     }
 }
@@ -192,6 +197,37 @@ impl Default for Qwen3VlGenerationConfiguration {
             maximum_generated_tokens: 64,
         }
     }
+}
+
+/// Explicit deterministic contract for machine-parseable assistant output.
+/// The model must generate a non-empty suffix after this template-owned prefill.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Qwen3VlStructuredGenerationContract {
+    /// Fixed assistant prefix establishing the requested output grammar.
+    pub assistant_prefill: String,
+    /// Hard bound for tokens generated after the assistant prefix.
+    pub maximum_generated_tokens: usize,
+    /// Neutral JSON grammar enforced before every token selection.
+    pub schema: Qwen3VlStructuredSchema,
+}
+
+/// Neutral structured-output grammars required by local model consumers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Qwen3VlStructuredSchema {
+    /// `{"field":["allowed-id",...]}` with unique IDs.
+    StringIdArray {
+        /// JSON object field name.
+        field: String,
+        /// Complete set of legal variable string values.
+        allowed_ids: Vec<String>,
+        /// Whether an empty array is legal.
+        allow_empty: bool,
+    },
+    /// Compact JSON object containing finite numeric fields in declared order.
+    FiniteNumbers {
+        /// `(field, inclusive minimum, inclusive maximum)` declarations.
+        fields: Vec<(String, f64, f64)>,
+    },
 }
 
 /// Observable preprocessing facts required for coordinate and parity checks.
@@ -290,14 +326,60 @@ impl Qwen3VlCpuRuntime {
         prompt: &str,
         configuration: Qwen3VlGenerationConfiguration,
     ) -> Result<Qwen3VlGenerationResult, Qwen3VlRuntimeFailure> {
+        self.generate_with_prefill(image_bytes, prompt, "", configuration, None)
+            .await
+    }
+
+    /// Generate a structured response using an explicit assistant-template
+    /// prefill. Immediate EOS is a typed failure, never synthetic success.
+    pub async fn generate_structured(
+        &self,
+        image_bytes: &[u8],
+        prompt: &str,
+        contract: Qwen3VlStructuredGenerationContract,
+    ) -> Result<Qwen3VlGenerationResult, Qwen3VlRuntimeFailure> {
+        if contract.assistant_prefill.is_empty() {
+            return Err(Qwen3VlRuntimeFailure::InvalidInput(
+                "empty structured assistant prefill",
+            ));
+        }
+        if !schema_is_viable(&contract.schema)
+            || schema_state(&contract.schema, &contract.assistant_prefill) == GrammarState::Invalid
+        {
+            return Err(Qwen3VlRuntimeFailure::NoValidStructuredContinuation);
+        }
+        self.generate_with_prefill(
+            image_bytes,
+            prompt,
+            &contract.assistant_prefill,
+            Qwen3VlGenerationConfiguration {
+                maximum_generated_tokens: contract.maximum_generated_tokens,
+            },
+            Some(&contract.schema),
+        )
+        .await
+    }
+
+    async fn generate_with_prefill(
+        &self,
+        image_bytes: &[u8],
+        prompt: &str,
+        assistant_prefill: &str,
+        configuration: Qwen3VlGenerationConfiguration,
+        structured_schema: Option<&Qwen3VlStructuredSchema>,
+    ) -> Result<Qwen3VlGenerationResult, Qwen3VlRuntimeFailure> {
         if prompt.is_empty() || configuration.maximum_generated_tokens == 0 {
             return Err(Qwen3VlRuntimeFailure::InvalidInput(
                 "empty prompt or token bound",
             ));
         }
         let processed = process_image(image_bytes, &self.device)?;
-        let (prompt_ids, image_span) =
-            build_prompt_tokens(&self.tokenizer, prompt, processed.merged_visual_tokens)?;
+        let (prompt_ids, image_span) = build_prompt_tokens(
+            &self.tokenizer,
+            prompt,
+            assistant_prefill,
+            processed.merged_visual_tokens,
+        )?;
         let started = Instant::now();
         let session = self
             .factory
@@ -327,8 +409,18 @@ impl Qwen3VlCpuRuntime {
             .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))?;
         let mut generated = Vec::with_capacity(configuration.maximum_generated_tokens);
         let mut offset = prompt_ids.len();
-        for _ in 0..configuration.maximum_generated_tokens {
-            let token = greedy_token(&logits)?;
+        for step in 0..configuration.maximum_generated_tokens {
+            let token = match structured_schema {
+                Some(schema) => constrained_token(
+                    &logits,
+                    &self.tokenizer,
+                    assistant_prefill,
+                    &generated,
+                    schema,
+                    step + 1 == configuration.maximum_generated_tokens,
+                )?,
+                None => greedy_token(&logits)?,
+            };
             if token == EOS_TOKEN_ID {
                 break;
             }
@@ -352,10 +444,21 @@ impl Qwen3VlCpuRuntime {
                 .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))?;
             offset += 1;
         }
-        let text = self
+        if structured_schema.is_some() && generated.is_empty() {
+            return Err(Qwen3VlRuntimeFailure::Inference(
+                "structured generation ended before producing a suffix".into(),
+            ));
+        }
+        let generated_text = self
             .tokenizer
             .decode(&generated, true)
             .map_err(|e| Qwen3VlRuntimeFailure::Tokenization(e.to_string()))?;
+        let text = format!("{assistant_prefill}{generated_text}");
+        if structured_schema
+            .is_some_and(|schema| schema_state(schema, &text) != GrammarState::Complete)
+        {
+            return Err(Qwen3VlRuntimeFailure::NoValidStructuredContinuation);
+        }
         Ok(Qwen3VlGenerationResult {
             text,
             token_ids: generated,
@@ -556,11 +659,12 @@ fn smart_resize(height: usize, width: usize) -> Result<(usize, usize), Qwen3VlRu
 fn build_prompt_tokens(
     tokenizer: &Tokenizer,
     prompt: &str,
+    assistant_prefill: &str,
     visual_tokens: usize,
 ) -> Result<(Vec<u32>, (usize, usize)), Qwen3VlRuntimeFailure> {
     let image_pads = "<|image_pad|>".repeat(visual_tokens);
     let rendered = format!(
-        "<|im_start|>user\n<|vision_start|>{image_pads}<|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        "<|im_start|>user\n<|vision_start|>{image_pads}<|vision_end|>{prompt}<|im_end|>\n<|im_start|>assistant\n{assistant_prefill}"
     );
     let encoding = tokenizer
         .encode(rendered, false)
@@ -602,6 +706,223 @@ fn greedy_token(logits: &Tensor) -> Result<u32, Qwen3VlRuntimeFailure> {
     last.argmax(0)
         .and_then(|value| value.to_scalar::<u32>())
         .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GrammarState {
+    Invalid,
+    Prefix,
+    Complete,
+}
+
+fn constrained_token(
+    logits: &Tensor,
+    tokenizer: &Tokenizer,
+    assistant_prefill: &str,
+    generated: &[u32],
+    schema: &Qwen3VlStructuredSchema,
+    must_complete: bool,
+) -> Result<u32, Qwen3VlRuntimeFailure> {
+    if schema_state(
+        schema,
+        &decode_structured(tokenizer, assistant_prefill, generated)?,
+    ) == GrammarState::Complete
+    {
+        return Ok(EOS_TOKEN_ID);
+    }
+    let last = last_logits(logits)?;
+    let values = last
+        .to_vec1::<f32>()
+        .map_err(|error| Qwen3VlRuntimeFailure::Inference(error.to_string()))?;
+    let mut ranked: Vec<usize> = (0..values.len()).collect();
+    ranked.sort_unstable_by(|left, right| values[*right].total_cmp(&values[*left]));
+    for token in ranked {
+        let token = token as u32;
+        if token == EOS_TOKEN_ID {
+            continue;
+        }
+        let mut candidate = generated.to_vec();
+        candidate.push(token);
+        let text = decode_structured(tokenizer, assistant_prefill, &candidate)?;
+        let state = schema_state(schema, &text);
+        if state != GrammarState::Invalid && (!must_complete || state == GrammarState::Complete) {
+            return Ok(token);
+        }
+    }
+    Err(Qwen3VlRuntimeFailure::NoValidStructuredContinuation)
+}
+
+fn last_logits(logits: &Tensor) -> Result<Tensor, Qwen3VlRuntimeFailure> {
+    match logits.dims() {
+        [_, sequence, _] => logits.i((0, sequence - 1)),
+        [sequence, _] => logits.i(sequence - 1),
+        _ => Err(candle::Error::Msg("unexpected logits shape".into())),
+    }
+    .map_err(|error| Qwen3VlRuntimeFailure::Inference(error.to_string()))
+}
+
+fn decode_structured(
+    tokenizer: &Tokenizer,
+    assistant_prefill: &str,
+    generated: &[u32],
+) -> Result<String, Qwen3VlRuntimeFailure> {
+    let suffix = tokenizer
+        .decode(generated, true)
+        .map_err(|error| Qwen3VlRuntimeFailure::Tokenization(error.to_string()))?;
+    Ok(format!("{assistant_prefill}{suffix}"))
+}
+
+fn schema_state(schema: &Qwen3VlStructuredSchema, text: &str) -> GrammarState {
+    match schema {
+        Qwen3VlStructuredSchema::StringIdArray {
+            field,
+            allowed_ids,
+            allow_empty,
+        } => {
+            let opening = format!("{{{}:[", serde_json::to_string(field).unwrap());
+            match strip_literal_prefix(text, &opening) {
+                Err(state) => state,
+                Ok(rest) => id_array_state(rest, allowed_ids, &[], *allow_empty),
+            }
+        }
+        Qwen3VlStructuredSchema::FiniteNumbers { fields } => number_object_state(text, fields, 0),
+    }
+}
+
+fn schema_is_viable(schema: &Qwen3VlStructuredSchema) -> bool {
+    match schema {
+        Qwen3VlStructuredSchema::StringIdArray {
+            allowed_ids,
+            allow_empty,
+            ..
+        } => *allow_empty || !allowed_ids.is_empty(),
+        Qwen3VlStructuredSchema::FiniteNumbers { fields } => {
+            !fields.is_empty()
+                && fields.iter().all(|(name, minimum, maximum)| {
+                    !name.is_empty()
+                        && minimum.is_finite()
+                        && maximum.is_finite()
+                        && minimum <= maximum
+                })
+        }
+    }
+}
+
+fn strip_literal_prefix<'a>(input: &'a str, literal: &str) -> Result<&'a str, GrammarState> {
+    if input.starts_with(literal) {
+        Ok(&input[literal.len()..])
+    } else if literal.starts_with(input) {
+        Err(GrammarState::Prefix)
+    } else {
+        Err(GrammarState::Invalid)
+    }
+}
+
+fn id_array_state(
+    input: &str,
+    allowed: &[String],
+    used: &[usize],
+    allow_empty: bool,
+) -> GrammarState {
+    if input.is_empty() {
+        return GrammarState::Prefix;
+    }
+    if (allow_empty || !used.is_empty()) && "]}".starts_with(input) {
+        return if input == "]}" {
+            GrammarState::Complete
+        } else {
+            GrammarState::Prefix
+        };
+    }
+    for (index, id) in allowed.iter().enumerate() {
+        if used.contains(&index) {
+            continue;
+        }
+        let encoded = serde_json::to_string(id).expect("string JSON encoding is infallible");
+        if encoded.starts_with(input) {
+            return GrammarState::Prefix;
+        }
+        let Some(rest) = input.strip_prefix(&encoded) else {
+            continue;
+        };
+        let mut next_used = used.to_vec();
+        next_used.push(index);
+        if rest.is_empty() {
+            return GrammarState::Prefix;
+        }
+        if let Some(next) = rest.strip_prefix(',') {
+            let state = id_array_state(next, allowed, &next_used, false);
+            if state != GrammarState::Invalid {
+                return state;
+            }
+        }
+        if "]}".starts_with(rest) {
+            return if rest == "]}" {
+                GrammarState::Complete
+            } else {
+                GrammarState::Prefix
+            };
+        }
+    }
+    GrammarState::Invalid
+}
+
+fn number_object_state(input: &str, fields: &[(String, f64, f64)], index: usize) -> GrammarState {
+    if fields.is_empty() || index >= fields.len() {
+        return GrammarState::Invalid;
+    }
+    let opening = format!(
+        "{}{}:",
+        if index == 0 { "{" } else { "," },
+        serde_json::to_string(&fields[index].0).unwrap()
+    );
+    let rest = match strip_literal_prefix(input, &opening) {
+        Ok(rest) => rest,
+        Err(state) => return state,
+    };
+    let delimiter = if index + 1 == fields.len() { '}' } else { ',' };
+    if let Some(position) = rest.find(delimiter) {
+        let number = &rest[..position];
+        let Ok(json_number) = serde_json::from_str::<Value>(number) else {
+            return GrammarState::Invalid;
+        };
+        let Some(value) = json_number.as_f64() else {
+            return GrammarState::Invalid;
+        };
+        if !value.is_finite() || value < fields[index].1 || value > fields[index].2 {
+            return GrammarState::Invalid;
+        }
+        let tail = &rest[position..];
+        if delimiter == '}' {
+            return if tail == "}" {
+                GrammarState::Complete
+            } else {
+                GrammarState::Invalid
+            };
+        }
+        return number_object_state(tail, fields, index + 1);
+    }
+    if number_prefix_is_legal(rest) {
+        GrammarState::Prefix
+    } else {
+        GrammarState::Invalid
+    }
+}
+
+fn number_prefix_is_legal(value: &str) -> bool {
+    if value.is_empty() || value == "-" {
+        return true;
+    }
+    if value
+        .bytes()
+        .any(|byte| !matches!(byte, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E'))
+    {
+        return false;
+    }
+    let candidate = format!("{value}0");
+    value.parse::<f64>().is_ok()
+        || candidate.parse::<f64>().is_ok()
+        || format!("{value}e0").parse::<f64>().is_ok()
 }
 
 #[cfg(test)]
@@ -654,6 +975,57 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn structured_contract_rejects_empty_prefill() {
+        assert!(Qwen3VlStructuredGenerationContract {
+            assistant_prefill: String::new(),
+            maximum_generated_tokens: 8,
+            schema: Qwen3VlStructuredSchema::FiniteNumbers {
+                fields: vec![("answer".into(), 0.0, 2.0)],
+            },
+        }
+        .assistant_prefill
+        .is_empty());
+    }
+
+    #[test]
+    fn structured_grammars_validate_variable_ids_numbers_and_dead_ends() {
+        let ids = Qwen3VlStructuredSchema::StringIdArray {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-alpha".into(), "cell-42".into()],
+            allow_empty: true,
+        };
+        assert_eq!(
+            schema_state(&ids, "{\"selected_ids\":[\"cell-alpha\",\"cell-42\"]}"),
+            GrammarState::Complete
+        );
+        assert_eq!(
+            schema_state(&ids, "{\"selected_ids\":[\"unknown\""),
+            GrammarState::Invalid
+        );
+        assert_eq!(
+            schema_state(&ids, "{\"selected_ids\":[\"cell-alpha\",\"cell-alpha\"]}"),
+            GrammarState::Invalid
+        );
+
+        let coordinates = Qwen3VlStructuredSchema::FiniteNumbers {
+            fields: vec![("x".into(), 0.0, 96.0), ("y".into(), 0.0, 64.0)],
+        };
+        assert_eq!(
+            schema_state(&coordinates, "{\"x\":12.5,\"y\":32}"),
+            GrammarState::Complete
+        );
+        assert_eq!(
+            schema_state(&coordinates, "{\"x\":NaN"),
+            GrammarState::Invalid
+        );
+        assert!(!schema_is_viable(&Qwen3VlStructuredSchema::StringIdArray {
+            field: "selected_ids".into(),
+            allowed_ids: Vec::new(),
+            allow_empty: false,
+        }));
+    }
+
     /// Real qualification-host proof. Acquisition is deliberately external to
     /// the runtime; set the variable to a directory containing the six pinned
     /// files. The test hard-links them into canonical staging, atomically
@@ -690,5 +1062,86 @@ mod tests {
             assert!(!output.text.trim().is_empty());
             runtime.unload();
         }
+    }
+
+    /// Real pinned-model proof that assistant-prefilled output contains a
+    /// model-generated suffix accepted by a strict structured parser.
+    #[tokio::test]
+    #[ignore = "requires the pinned 4.25 GB offline model installation"]
+    async fn real_structured_generation_is_nonempty_and_strictly_parsed() {
+        let source = PathBuf::from(
+            std::env::var("SCORPION_QWEN3_VL_PINNED_ARTIFACTS")
+                .expect("set pinned offline artifact directory"),
+        );
+        let parent = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
+        let staging = parent.path().join("staging");
+        let active = parent.path().join("active");
+        std::fs::create_dir(&staging).unwrap();
+        for name in REQUIRED_ARTIFACTS {
+            std::fs::hard_link(source.join(name), staging.join(name)).unwrap();
+        }
+        let installation = qwen3_vl_cpu_f32_manifest()
+            .activate(&staging, &active)
+            .unwrap();
+        let runtime = Qwen3VlCpuRuntime::initialize_from_host(&installation).unwrap();
+        let numeric_contract = Qwen3VlStructuredGenerationContract {
+            assistant_prefill: "{\"answer\":".into(),
+            maximum_generated_tokens: 8,
+            schema: Qwen3VlStructuredSchema::FiniteNumbers {
+                fields: vec![("answer".into(), 0.0, 2.0)],
+            },
+        };
+        let output = runtime
+            .generate_structured(
+                &fixture_png(),
+                "Return exactly one JSON object whose answer field is the integer 1. No prose.",
+                numeric_contract.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(!output.token_ids.is_empty(), "model generated no suffix");
+        let value: serde_json::Value = serde_json::from_str(&output.text)
+            .unwrap_or_else(|error| panic!("structured output {0:?}: {error}", output.text));
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 1);
+        let answer = object
+            .get("answer")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!(answer.is_finite() && (0.0..=2.0).contains(&answer));
+        let repeated = runtime
+            .generate_structured(
+                &fixture_png(),
+                "Return exactly one JSON object whose answer field is the integer 1. No prose.",
+                numeric_contract,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.text, repeated.text);
+
+        let ids = runtime
+            .generate_structured(
+                &fixture_png(),
+                "Choose cell-beta. Return only the requested JSON object.",
+                Qwen3VlStructuredGenerationContract {
+                    assistant_prefill: "{\"selected_ids\":[".into(),
+                    maximum_generated_tokens: 8,
+                    schema: Qwen3VlStructuredSchema::StringIdArray {
+                        field: "selected_ids".into(),
+                        allowed_ids: vec!["cell-alpha".into(), "cell-beta".into()],
+                        allow_empty: false,
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!ids.token_ids.is_empty());
+        let parsed: serde_json::Value = serde_json::from_str(&ids.text).unwrap();
+        let selected = parsed["selected_ids"].as_array().unwrap();
+        assert!(!selected.is_empty());
+        assert!(selected
+            .iter()
+            .all(|id| matches!(id.as_str(), Some("cell-alpha" | "cell-beta"))));
+        runtime.unload();
     }
 }

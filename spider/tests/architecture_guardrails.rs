@@ -1860,6 +1860,48 @@ fn scanner_rejects_synthetic_qwen_structured_output_repairs() {
     }
 }
 
+fn qwen_captcha_provider_violation(source: &str) -> bool {
+    [
+        "Qwen3VLModel::new",
+        "VarBuilder::from_",
+        "fn constrained_token(",
+        "reqwest::Client",
+        "wreq::Client",
+        "Device::new_cuda",
+        "EmpiricallyQualified",
+        "fallback_provider",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn qwen_captcha_provider_is_runtime_owned_and_unqualified() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/qwen3_vl_captcha.rs"))
+            .unwrap();
+    assert!(source.contains("Qwen3VlCpuRuntime"));
+    assert!(source.contains("generate_structured("));
+    assert!(source.contains("ExecutableUnqualified"));
+    assert!(!qwen_captcha_provider_violation(&source));
+}
+
+#[test]
+fn scanner_rejects_synthetic_qwen_captcha_authority_leaks() {
+    for fixture in [
+        "Qwen3VLModel::new(config, weights)",
+        "VarBuilder::from_mmaped_safetensors(files)",
+        "fn constrained_token(logits: Tensor)",
+        "reqwest::Client::new()",
+        "wreq::Client::new()",
+        "Device::new_cuda(0)",
+        "qualification = EmpiricallyQualified",
+        "fallback_provider.solve(request)",
+    ] {
+        assert!(qwen_captcha_provider_violation(fixture));
+    }
+}
+
 fn captcha_corpus_governance_violation(source: &str) -> bool {
     [
         "impl From<CaptchaCorpusDraft> for FrozenCaptchaCorpus",

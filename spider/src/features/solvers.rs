@@ -584,6 +584,7 @@ fn openai_failure(
             locality: CaptchaProviderLocality::External,
             transport_backend,
             response_origin,
+            local_runtime: None,
         }),
     }
 }
@@ -983,6 +984,7 @@ fn external_failure(failure: CaptchaSolveFailure) -> CaptchaSolveOutcome {
             locality: CaptchaProviderLocality::External,
             transport_backend,
             response_origin: None,
+            local_runtime: None,
         }),
     }
 }

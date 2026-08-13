@@ -100,6 +100,10 @@ pub mod news_sitemap;
 /// unconditionally, independent of the `transport_tor` feature: this is
 /// URL classification, not Tor networking.
 pub mod onion_seed;
+/// Canonical provider adapter for executable, empirically unqualified local
+/// Qwen3-VL CAPTCHA requests.
+#[cfg(feature = "local_qwen3_vl")]
+pub mod qwen3_vl_captcha;
 /// Request-isolated generation sessions for the native Candle Qwen3-VL
 /// runtime. Every session owns fresh KV state while immutable weight backend
 /// resources remain factory-owned.

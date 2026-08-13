@@ -312,6 +312,7 @@ local_qwen3_vl = [
     "dep:candle-transformers",
     "dep:image",
     "dep:tokenizers",
+    "dep:serde",
     "dep:serde_json",
     "dep:sysinfo",
     "dep:tempfile",

@@ -349,11 +349,26 @@ impl CaptchaProviderId {
     pub const EXTERNAL_GEMINI: Self = Self("external-gemini");
     /// OpenAI vision provider reached through canonical transport.
     pub const OPENAI_VISION: Self = Self("openai-vision");
+    /// Embedded Qwen3-VL runtime using the canonical local-model contract.
+    pub const QWEN3_VL_LOCAL: Self = Self("qwen3-vl-local");
 
     /// Return the stable provider label.
     pub const fn as_str(self) -> &'static str {
         self.0
     }
+}
+
+/// Qualification state is independent of whether a challenge representation
+/// is executable by a provider adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptchaCapabilityQualification {
+    /// Empirical qualification is not part of this provider's capability
+    /// contract (for example external or compatibility providers).
+    NotApplicable,
+    /// The shape is executable, but no empirical accuracy claim is permitted.
+    ExecutableUnqualified,
+    /// A separately pinned empirical evaluation authorizes advertisement.
+    EmpiricallyQualified,
 }
 
 /// Whether provider execution is local or uses external transport.
@@ -435,6 +450,28 @@ pub struct CaptchaSolveProvenance {
     pub transport_backend: Option<BackendProvenance>,
     /// Canonical response origin for external execution only.
     pub response_origin: Option<ResponseOrigin>,
+    /// Detailed local runtime facts, absent for browser-local compatibility and
+    /// external providers.
+    pub local_runtime: Option<CaptchaLocalRuntimeProvenance>,
+}
+
+/// Immutable facts for one local model execution attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptchaLocalRuntimeProvenance {
+    /// Exact immutable model revision.
+    pub model_revision: String,
+    /// Stable device/dtype/runtime identity.
+    pub runtime_identity: String,
+    /// Stable preprocessing identity.
+    pub processor_identity: String,
+    /// Challenge kind executed.
+    pub challenge_kind: CaptchaChallengeKind,
+    /// Deterministic prompt and output grammar identity.
+    pub prompt_grammar_identity: String,
+    /// Time spent in this provider attempt.
+    pub elapsed: Duration,
+    /// Whether strict provider translation produced a solution.
+    pub succeeded: bool,
 }
 
 impl CaptchaSolveProvenance {
@@ -445,6 +482,7 @@ impl CaptchaSolveProvenance {
             locality: CaptchaProviderLocality::Local,
             transport_backend: None,
             response_origin: None,
+            local_runtime: None,
         }
     }
 
@@ -459,6 +497,21 @@ impl CaptchaSolveProvenance {
             locality: CaptchaProviderLocality::External,
             transport_backend: Some(backend),
             response_origin: Some(origin),
+            local_runtime: None,
+        }
+    }
+
+    /// Construct detailed local runtime provenance without transport claims.
+    pub fn local_runtime(
+        provider: CaptchaProviderId,
+        facts: CaptchaLocalRuntimeProvenance,
+    ) -> Self {
+        Self {
+            provider,
+            locality: CaptchaProviderLocality::Local,
+            transport_backend: None,
+            response_origin: None,
+            local_runtime: Some(facts),
         }
     }
 }
@@ -522,6 +575,17 @@ pub trait CaptchaProvider: Send + Sync {
         CaptchaProviderAvailability::Available
     }
 
+    /// Return the truthful qualification state for one advertised kind.
+    fn qualification_state(
+        &self,
+        kind: CaptchaChallengeKind,
+    ) -> Option<CaptchaCapabilityQualification> {
+        self.capabilities()
+            .supported_kinds
+            .contains(&kind)
+            .then_some(CaptchaCapabilityQualification::NotApplicable)
+    }
+
     /// Execute one already-routed normalized request.
     async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome;
 }
@@ -569,6 +633,15 @@ impl<'a> CaptchaProviderRegistry<'a> {
         id: CaptchaProviderId,
     ) -> Option<&'static CaptchaProviderCapabilities> {
         self.resolve(id).map(CaptchaProvider::capabilities)
+    }
+
+    /// Expose the provider-owned read-only qualification state for one kind.
+    pub fn qualification_state(
+        &self,
+        id: CaptchaProviderId,
+        kind: CaptchaChallengeKind,
+    ) -> Option<CaptchaCapabilityQualification> {
+        self.resolve(id)?.qualification_state(kind)
     }
 }
 
@@ -645,6 +718,7 @@ fn unavailable_provenance(
             locality: CaptchaProviderLocality::External,
             transport_backend: None,
             response_origin: None,
+            local_runtime: None,
         }),
     }
 }

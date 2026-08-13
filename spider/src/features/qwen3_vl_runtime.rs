@@ -245,6 +245,15 @@ pub struct Qwen3VlProcessedImage {
     pub merged_visual_tokens: usize,
 }
 
+/// Image dimensions observed by the canonical pinned processor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Qwen3VlImageMetadata {
+    /// Original decoded image dimensions.
+    pub original_dimensions: (u32, u32),
+    /// Dimensions admitted by the qualified processor envelope.
+    pub processed_dimensions: (u32, u32),
+}
+
 /// One decoded production inference result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Qwen3VlGenerationResult {
@@ -316,6 +325,19 @@ impl Qwen3VlCpuRuntime {
     /// Verified installation identity used by this initialized runtime.
     pub fn installation_identity(&self) -> &crate::features::local_model::InstalledModelIdentity {
         &self.installation_identity
+    }
+
+    /// Validate an encoded image through the canonical processor and expose
+    /// only dimensions required for provider prompt and bounds semantics.
+    pub fn image_metadata(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<Qwen3VlImageMetadata, Qwen3VlRuntimeFailure> {
+        let processed = process_image(image_bytes, &self.device)?;
+        Ok(Qwen3VlImageMetadata {
+            original_dimensions: processed.original_dimensions,
+            processed_dimensions: processed.processed_dimensions,
+        })
     }
 
     /// Execute one deterministic image+text generation with fresh model/KV

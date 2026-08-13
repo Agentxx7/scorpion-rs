@@ -1583,6 +1583,10 @@ fn captcha_provider_authority_violation(source: &str) -> bool {
         "provider.solve(request).or_else(fallback_provider)",
         "provider_id = BackendProvenance::Reqwest",
         "CaptchaSolveFailure::LocalExecutionFailure(cdp_error)",
+        "registry.first()",
+        "registry.iter().find(|provider| provider.capabilities().locality",
+        "execute_explicit_attempt(request).or_else",
+        "attempts.clear()",
     ]
     .iter()
     .any(|pattern| source.contains(pattern))
@@ -1596,6 +1600,9 @@ fn canonical_captcha_capability_separates_provider_transport_and_browser_authori
     assert!(core.contains("pub trait CaptchaProvider"));
     assert!(core.contains("request.selected_provider != capabilities.provider"));
     assert!(core.contains("provider.solve(request).await"));
+    assert!(core.contains("pub struct CaptchaProviderRegistry<'a>"));
+    assert!(core.contains("DuplicateProvider(CaptchaProviderId)"));
+    assert!(core.contains("pub struct CaptchaRouteAttempts"));
     assert!(!core.contains("reqwest::Client"));
     assert!(!core.contains("wreq::Client"));
     assert!(!core.contains("CdpError"));
@@ -1612,6 +1619,10 @@ fn scanner_rejects_synthetic_captcha_provider_authority_leaks() {
         "provider.solve(request).or_else(fallback_provider)",
         "provider_id = BackendProvenance::Reqwest",
         "CaptchaSolveFailure::LocalExecutionFailure(cdp_error)",
+        "registry.first()",
+        "registry.iter().find(|provider| provider.capabilities().locality",
+        "execute_explicit_attempt(request).or_else",
+        "attempts.clear()",
     ] {
         assert!(captcha_provider_authority_violation(fixture));
     }

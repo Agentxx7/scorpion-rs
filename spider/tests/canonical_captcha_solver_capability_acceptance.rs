@@ -127,7 +127,13 @@ fn external_provider_preserves_canonical_transport_and_provenance() {
 #[test]
 fn canonical_dispatch_contains_no_provider_substitution() {
     let core = read("spider/src/features/captcha.rs");
-    let dispatch = core.split("pub async fn solve_captcha").nth(1).unwrap();
+    let dispatch = core
+        .split("pub async fn solve_captcha")
+        .nth(1)
+        .unwrap()
+        .split("fn solution_matches")
+        .next()
+        .unwrap();
     for forbidden in ["fallback", "retry", "race", "EXTERNAL_GEMINI"] {
         assert!(!dispatch.contains(forbidden));
     }

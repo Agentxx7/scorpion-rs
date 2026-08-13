@@ -135,6 +135,17 @@ pub struct CaptchaProviderCapabilities {
     pub requires_credentials: bool,
 }
 
+/// Read-only runtime availability reported by a provider adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptchaProviderAvailability {
+    /// The provider can accept an eligible request.
+    Available,
+    /// The provider runtime is not currently available.
+    ProviderUnavailable,
+    /// The provider requires credentials that are not currently available.
+    CredentialUnavailable,
+}
+
 /// A caller-routed solve request. Exactly one provider is selected before
 /// dispatch; the core contains no fallback chain or substitution policy.
 #[derive(Clone, Debug)]
@@ -259,8 +270,136 @@ pub trait CaptchaProvider: Send + Sync {
     /// Advertise immutable provider capabilities.
     fn capabilities(&self) -> &'static CaptchaProviderCapabilities;
 
+    /// Report runtime availability without acquiring credentials or executing.
+    fn availability(&self) -> CaptchaProviderAvailability {
+        CaptchaProviderAvailability::Available
+    }
+
     /// Execute one already-routed normalized request.
     async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome;
+}
+
+/// Registration failure for a runtime-scoped provider registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptchaProviderRegistrationError {
+    /// A provider with the same stable identity is already registered.
+    DuplicateProvider(CaptchaProviderId),
+}
+
+/// Runtime-scoped provider lookup. Registration order has no routing meaning.
+#[derive(Default)]
+pub struct CaptchaProviderRegistry<'a> {
+    providers: std::collections::HashMap<CaptchaProviderId, &'a dyn CaptchaProvider>,
+}
+
+impl<'a> CaptchaProviderRegistry<'a> {
+    /// Construct an empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register one provider, rejecting ambiguous duplicate identities.
+    pub fn register(
+        &mut self,
+        provider: &'a dyn CaptchaProvider,
+    ) -> Result<(), CaptchaProviderRegistrationError> {
+        let id = provider.capabilities().provider;
+        if self.providers.contains_key(&id) {
+            return Err(CaptchaProviderRegistrationError::DuplicateProvider(id));
+        }
+        self.providers.insert(id, provider);
+        Ok(())
+    }
+
+    /// Resolve exactly the caller-selected provider identity.
+    pub fn resolve(&self, id: CaptchaProviderId) -> Option<&'a dyn CaptchaProvider> {
+        self.providers.get(&id).copied()
+    }
+
+    /// Expose immutable capabilities for one explicitly identified provider.
+    pub fn capabilities(
+        &self,
+        id: CaptchaProviderId,
+    ) -> Option<&'static CaptchaProviderCapabilities> {
+        self.resolve(id).map(CaptchaProvider::capabilities)
+    }
+}
+
+/// One explicit provider attempt and its unmodified canonical outcome.
+#[derive(Debug)]
+pub struct CaptchaRouteAttempt {
+    /// Provider explicitly selected for this attempt.
+    pub provider: CaptchaProviderId,
+    /// Provider result, including provider/locality/transport provenance.
+    pub outcome: CaptchaSolveOutcome,
+}
+
+/// Caller-owned attempt ledger. It performs no retry or provider substitution.
+#[derive(Debug, Default)]
+pub struct CaptchaRouteAttempts {
+    attempts: Vec<CaptchaRouteAttempt>,
+}
+
+impl CaptchaRouteAttempts {
+    /// Construct an empty explicit route history.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Execute exactly the provider selected by `request` and retain its outcome.
+    pub async fn execute_explicit_attempt(
+        &mut self,
+        registry: &CaptchaProviderRegistry<'_>,
+        request: &CaptchaSolveRequest,
+    ) -> &CaptchaSolveOutcome {
+        let outcome = match registry.resolve(request.selected_provider) {
+            None => CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::ProviderUnavailable,
+                provenance: None,
+            },
+            Some(provider) => match provider.availability() {
+                CaptchaProviderAvailability::Available => solve_captcha(provider, request).await,
+                CaptchaProviderAvailability::ProviderUnavailable => CaptchaSolveOutcome::Failed {
+                    failure: CaptchaSolveFailure::ProviderUnavailable,
+                    provenance: unavailable_provenance(provider.capabilities()),
+                },
+                CaptchaProviderAvailability::CredentialUnavailable => CaptchaSolveOutcome::Failed {
+                    failure: CaptchaSolveFailure::CredentialUnavailable,
+                    provenance: unavailable_provenance(provider.capabilities()),
+                },
+            },
+        };
+        self.attempts.push(CaptchaRouteAttempt {
+            provider: request.selected_provider,
+            outcome,
+        });
+        &self
+            .attempts
+            .last()
+            .expect("attempt was just recorded")
+            .outcome
+    }
+
+    /// Return every explicit attempt in caller-selected order.
+    pub fn attempts(&self) -> &[CaptchaRouteAttempt] {
+        &self.attempts
+    }
+}
+
+fn unavailable_provenance(
+    capabilities: &CaptchaProviderCapabilities,
+) -> Option<CaptchaSolveProvenance> {
+    match capabilities.locality {
+        CaptchaProviderLocality::Local => {
+            Some(CaptchaSolveProvenance::local(capabilities.provider))
+        }
+        CaptchaProviderLocality::External => Some(CaptchaSolveProvenance {
+            provider: capabilities.provider,
+            locality: CaptchaProviderLocality::External,
+            transport_backend: None,
+            response_origin: None,
+        }),
+    }
 }
 
 fn unsupported() -> CaptchaSolveOutcome {
@@ -337,9 +476,11 @@ fn solution_matches(kind: CaptchaChallengeKind, solution: &CaptchaSolution) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
     static CAPS: CaptchaProviderCapabilities = CaptchaProviderCapabilities {
         provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
         locality: CaptchaProviderLocality::Local,
@@ -349,7 +490,9 @@ mod tests {
         requires_credentials: false,
     };
 
-    struct Provider;
+    struct Provider {
+        calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
     impl CaptchaProvider for Provider {
@@ -358,7 +501,7 @@ mod tests {
         }
 
         async fn solve(&self, _request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
-            CALLS.fetch_add(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
             CaptchaSolveOutcome::Failed {
                 failure: CaptchaSolveFailure::Inconclusive,
                 provenance: Some(CaptchaSolveProvenance::local(CAPS.provider)),
@@ -366,9 +509,90 @@ mod tests {
         }
     }
 
+    #[test]
+    fn registry_rejects_duplicate_provider_ids() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = Provider {
+            calls: Arc::clone(&calls),
+        };
+        let duplicate = Provider { calls };
+        let mut registry = CaptchaProviderRegistry::new();
+        assert_eq!(registry.register(&first), Ok(()));
+        assert_eq!(
+            registry.register(&duplicate),
+            Err(CaptchaProviderRegistrationError::DuplicateProvider(
+                CAPS.provider
+            ))
+        );
+    }
+
+    #[test]
+    fn registry_resolves_only_an_explicit_identity() {
+        let provider = Provider {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut registry = CaptchaProviderRegistry::new();
+        registry.register(&provider).unwrap();
+        assert_eq!(
+            registry
+                .capabilities(CaptchaProviderId::LOCAL_LANGUAGE_MODEL)
+                .map(|capabilities| capabilities.provider),
+            Some(CaptchaProviderId::LOCAL_LANGUAGE_MODEL)
+        );
+        assert!(registry
+            .resolve(CaptchaProviderId::EXTERNAL_GEMINI)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_attempt_ledger_preserves_every_outcome() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Provider {
+            calls: Arc::clone(&calls),
+        };
+        let mut registry = CaptchaProviderRegistry::new();
+        registry.register(&provider).unwrap();
+        let request = CaptchaSolveRequest {
+            correlation_id: "ledger".into(),
+            selected_provider: CAPS.provider,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::HorizontalOffset,
+                instruction: String::new(),
+                visuals: vec![CaptchaVisualInput::materialized(
+                    None,
+                    "image/png",
+                    Vec::<u8>::new(),
+                )],
+            },
+            deadline: Duration::from_secs(1),
+        };
+        let mut route = CaptchaRouteAttempts::new();
+        route.execute_explicit_attempt(&registry, &request).await;
+        route.execute_explicit_attempt(&registry, &request).await;
+        assert_eq!(route.attempts().len(), 2);
+        assert!(route.attempts().iter().all(|attempt| {
+            attempt.provider == CAPS.provider
+                && matches!(
+                    &attempt.outcome,
+                    CaptchaSolveOutcome::Failed {
+                        failure: CaptchaSolveFailure::Inconclusive,
+                        provenance: Some(CaptchaSolveProvenance {
+                            provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+                            locality: CaptchaProviderLocality::Local,
+                            ..
+                        })
+                    }
+                )
+        }));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn unsupported_kind_is_rejected_before_provider_execution() {
-        CALLS.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Provider {
+            calls: Arc::clone(&calls),
+        };
         let request = CaptchaSolveRequest {
             correlation_id: "test".into(),
             selected_provider: CAPS.provider,
@@ -384,18 +608,21 @@ mod tests {
             deadline: Duration::from_secs(1),
         };
         assert!(matches!(
-            solve_captcha(&Provider, &request).await,
+            solve_captcha(&provider, &request).await,
             CaptchaSolveOutcome::Failed {
                 failure: CaptchaSolveFailure::UnsupportedChallenge,
                 ..
             }
         ));
-        assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn remote_asset_is_rejected_before_provider_execution() {
-        CALLS.store(0, Ordering::SeqCst);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Provider {
+            calls: Arc::clone(&calls),
+        };
         let request = CaptchaSolveRequest {
             correlation_id: "remote".into(),
             selected_provider: CAPS.provider,
@@ -411,13 +638,13 @@ mod tests {
             deadline: Duration::from_secs(1),
         };
         assert!(matches!(
-            solve_captcha(&Provider, &request).await,
+            solve_captcha(&provider, &request).await,
             CaptchaSolveOutcome::Failed {
                 failure: CaptchaSolveFailure::InvalidChallenge,
                 ..
             }
         ));
-        assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

@@ -13,7 +13,8 @@ use std::time::Duration;
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use crate::features::captcha::{
     solve_captcha, CaptchaChallenge, CaptchaChallengeKind, CaptchaProvider,
-    CaptchaProviderCapabilities, CaptchaProviderId, CaptchaProviderLocality, CaptchaSolution,
+    CaptchaProviderAvailability, CaptchaProviderCapabilities, CaptchaProviderId,
+    CaptchaProviderLocality, CaptchaProviderRegistry, CaptchaRouteAttempts, CaptchaSolution,
     CaptchaSolveFailure, CaptchaSolveOutcome, CaptchaSolveProvenance, CaptchaSolveRequest,
     CaptchaVisualInput,
 };
@@ -320,6 +321,10 @@ struct LocalLanguageModelProvider<'a> {
 impl CaptchaProvider for LocalLanguageModelProvider<'_> {
     fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
         &LOCAL_LANGUAGE_MODEL_CAPABILITIES
+    }
+
+    fn availability(&self) -> CaptchaProviderAvailability {
+        CaptchaProviderAvailability::Available
     }
 
     async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
@@ -702,15 +707,11 @@ async fn materialize_remote_challenge(
 }
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
-fn outcome_error(outcome: CaptchaSolveOutcome) -> CdpError {
-    match outcome {
-        CaptchaSolveOutcome::Failed { failure, .. } => {
-            CdpError::msg(format!("CAPTCHA solver failed: {failure:?}"))
-        }
-        CaptchaSolveOutcome::Solved { .. } => {
-            CdpError::msg("CAPTCHA solver returned an unexpected solution shape")
-        }
-    }
+fn route_error(route: &CaptchaRouteAttempts) -> CdpError {
+    CdpError::msg(format!(
+        "CAPTCHA solver route failed: {:?}",
+        route.attempts()
+    ))
 }
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
@@ -733,12 +734,20 @@ async fn solve_horizontal_offset_with_legacy_routing(
         challenge: challenge.clone(),
         deadline: Duration::from_millis(timeout_ms),
     };
-    let local = solve_captcha(&LocalLanguageModelProvider { page }, &local_request).await;
-    match local {
+    let local_provider = LocalLanguageModelProvider { page };
+    let mut registry = CaptchaProviderRegistry::new();
+    registry
+        .register(&local_provider)
+        .expect("local provider identity is unique");
+    let mut route = CaptchaRouteAttempts::new();
+    match route
+        .execute_explicit_attempt(&registry, &local_request)
+        .await
+    {
         CaptchaSolveOutcome::Solved {
             solution: CaptchaSolution::HorizontalOffset(offset),
             ..
-        } => Ok(offset),
+        } => Ok(*offset),
         CaptchaSolveOutcome::Failed {
             failure: CaptchaSolveFailure::ProviderUnavailable,
             ..
@@ -757,12 +766,16 @@ async fn solve_horizontal_offset_with_legacy_routing(
                     .acquire()
                     .await
                     .map_err(|_| CdpError::msg("Gemini solver admission cancelled"))?;
-                match solve_captcha(&ExternalGeminiProvider { api_key: &api_key }, &request).await {
+                let external_provider = ExternalGeminiProvider { api_key: &api_key };
+                registry
+                    .register(&external_provider)
+                    .expect("external provider identity is unique");
+                match route.execute_explicit_attempt(&registry, &request).await {
                     CaptchaSolveOutcome::Solved {
                         solution: CaptchaSolution::HorizontalOffset(offset),
                         ..
-                    } => Ok(offset),
-                    outcome => Err(outcome_error(outcome)),
+                    } => Ok(*offset),
+                    _ => Err(route_error(&route)),
                 }
             }
             #[cfg(not(feature = "gemini"))]
@@ -770,7 +783,7 @@ async fn solve_horizontal_offset_with_legacy_routing(
                 Ok(_compatibility_fallback)
             }
         }
-        outcome => Err(outcome_error(outcome)),
+        _ => Err(route_error(&route)),
     }
 }
 
@@ -790,6 +803,14 @@ pub async fn solve_geetest_with_inpage_helper(
 impl CaptchaProvider for ExternalGeminiProvider<'_> {
     fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
         &EXTERNAL_GEMINI_CAPABILITIES
+    }
+
+    fn availability(&self) -> CaptchaProviderAvailability {
+        if self.api_key.is_empty() {
+            CaptchaProviderAvailability::CredentialUnavailable
+        } else {
+            CaptchaProviderAvailability::Available
+        }
     }
 
     async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
@@ -1669,14 +1690,20 @@ pub async fn solve_enterprise_with_browser_gemini(
         challenge: normalized,
         deadline: Duration::from_millis(timeout_ms),
     };
-    match solve_captcha(&LocalLanguageModelProvider { page }, &local_request).await {
+    let local_provider = LocalLanguageModelProvider { page };
+    let mut registry = CaptchaProviderRegistry::new();
+    registry
+        .register(&local_provider)
+        .expect("local provider identity is unique");
+    let mut route = CaptchaRouteAttempts::new();
+    match route
+        .execute_explicit_attempt(&registry, &local_request)
+        .await
+    {
         CaptchaSolveOutcome::Solved {
             solution: CaptchaSolution::SelectedChoices(ids),
             ..
-        } => Ok(ids
-            .into_iter()
-            .filter_map(|id| id.parse::<u8>().ok())
-            .collect()),
+        } => Ok(ids.iter().filter_map(|id| id.parse::<u8>().ok()).collect()),
         CaptchaSolveOutcome::Failed {
             failure: CaptchaSolveFailure::ProviderUnavailable,
             ..
@@ -1720,23 +1747,22 @@ pub async fn solve_enterprise_with_browser_gemini(
                 challenge: remote,
                 deadline: Duration::from_millis(timeout_ms),
             };
-            match solve_captcha(
-                &ExternalGeminiProvider { api_key: &api_key },
-                &external_request,
-            )
-            .await
+            let external_provider = ExternalGeminiProvider { api_key: &api_key };
+            registry
+                .register(&external_provider)
+                .expect("external provider identity is unique");
+            match route
+                .execute_explicit_attempt(&registry, &external_request)
+                .await
             {
                 CaptchaSolveOutcome::Solved {
                     solution: CaptchaSolution::SelectedChoices(ids),
                     ..
-                } => Ok(ids
-                    .into_iter()
-                    .filter_map(|id| id.parse::<u8>().ok())
-                    .collect()),
-                outcome => Err(outcome_error(outcome)),
+                } => Ok(ids.iter().filter_map(|id| id.parse::<u8>().ok()).collect()),
+                _ => Err(route_error(&route)),
             }
         }
-        outcome => Err(outcome_error(outcome)),
+        _ => Err(route_error(&route)),
     }
 }
 
@@ -2274,11 +2300,20 @@ async fn solve_point_with_legacy_routing(
         challenge: challenge.clone(),
         deadline: Duration::from_millis(timeout_ms),
     };
-    match solve_captcha(&LocalLanguageModelProvider { page }, &local_request).await {
+    let local_provider = LocalLanguageModelProvider { page };
+    let mut registry = CaptchaProviderRegistry::new();
+    registry
+        .register(&local_provider)
+        .expect("local provider identity is unique");
+    let mut route = CaptchaRouteAttempts::new();
+    match route
+        .execute_explicit_attempt(&registry, &local_request)
+        .await
+    {
         CaptchaSolveOutcome::Solved {
             solution: CaptchaSolution::Point { x, y },
             ..
-        } => Ok((x, y)),
+        } => Ok((*x, *y)),
         CaptchaSolveOutcome::Failed {
             failure: CaptchaSolveFailure::ProviderUnavailable,
             ..
@@ -2295,20 +2330,22 @@ async fn solve_point_with_legacy_routing(
                 .acquire()
                 .await
                 .map_err(|_| CdpError::msg("Gemini solver admission cancelled"))?;
-            match solve_captcha(
-                &ExternalGeminiProvider { api_key: &api_key },
-                &external_request,
-            )
-            .await
+            let external_provider = ExternalGeminiProvider { api_key: &api_key };
+            registry
+                .register(&external_provider)
+                .expect("external provider identity is unique");
+            match route
+                .execute_explicit_attempt(&registry, &external_request)
+                .await
             {
                 CaptchaSolveOutcome::Solved {
                     solution: CaptchaSolution::Point { x, y },
                     ..
-                } => Ok((x, y)),
-                outcome => Err(outcome_error(outcome)),
+                } => Ok((*x, *y)),
+                _ => Err(route_error(&route)),
             }
         }
-        outcome => Err(outcome_error(outcome)),
+        _ => Err(route_error(&route)),
     }
 }
 

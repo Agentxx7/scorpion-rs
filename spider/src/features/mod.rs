@@ -105,6 +105,9 @@ pub mod onion_seed;
 /// resources remain factory-owned.
 #[cfg(feature = "local_qwen3_vl")]
 pub mod qwen3_vl_generation;
+/// Offline CPU/F32 production runtime for the pinned Qwen3-VL-2B model.
+#[cfg(feature = "local_qwen3_vl")]
+pub mod qwen3_vl_runtime;
 /// `ResearchScope`: the smallest canonical declarative discovery-scope
 /// boundary (onion seeds / already-produced candidates only — never
 /// fetched document bytes), plus the `discover` orchestration seam that

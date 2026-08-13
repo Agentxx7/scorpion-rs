@@ -1727,6 +1727,36 @@ fn qwen_generation_state_is_request_local_and_transport_free() {
 }
 
 #[test]
+fn qwen_cpu_runtime_is_installation_only_and_transport_free() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/qwen3_vl_runtime.rs"))
+            .unwrap();
+    assert!(source.contains("installation.reverify()?"));
+    assert!(source.contains("Qwen3VlGenerationFactory"));
+    assert!(source.contains("Device::Cpu"));
+    for forbidden in ["reqwest::", "wreq::", "hf_hub", "Client::new", ".send()"] {
+        assert!(!source.contains(forbidden), "runtime contains {forbidden}");
+    }
+}
+
+#[test]
+fn scanner_rejects_synthetic_qwen_runtime_network_and_fallbacks() {
+    for fixture in [
+        "reqwest::Client::new()",
+        "wreq::Client::new()",
+        "hf_hub::api::sync::Api::new()",
+        "if cpu_fails { Device::new_cuda(0) }",
+    ] {
+        assert!(
+            fixture.contains("Client::new")
+                || fixture.contains("hf_hub")
+                || fixture.contains("new_cuda"),
+            "negative fixture was not detected"
+        );
+    }
+}
+
+#[test]
 fn scanner_rejects_synthetic_qwen_generation_state_leaks() {
     for fixture in [
         "model: Mutex<Qwen3VLModel>",

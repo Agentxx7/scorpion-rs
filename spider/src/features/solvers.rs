@@ -10,7 +10,7 @@ use chromiumoxide::{
 #[cfg(feature = "chrome")]
 use std::time::Duration;
 
-#[cfg(all(feature = "chrome", feature = "real_browser"))]
+#[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
 use crate::features::captcha::{
     solve_captcha, CaptchaChallenge, CaptchaChallengeKind, CaptchaProvider,
     CaptchaProviderAvailability, CaptchaProviderCapabilities, CaptchaProviderId,
@@ -20,15 +20,37 @@ use crate::features::captcha::{
 };
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use crate::utils::{page_wait, perform_smart_mouse_movement, CF_WAIT_FOR};
-#[cfg(all(feature = "chrome", feature = "real_browser"))]
+#[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
 use base64::prelude::*;
-#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+#[cfg(any(
+    feature = "openai",
+    feature = "gemini",
+    all(feature = "chrome", feature = "real_browser")
+))]
 use spider_transport::{
     CanonicalExecutor, CrawlerBodyStream, CrawlerFailure, CrawlerFailureKind, CrawlerRequest,
     SecretRequestHeaders,
 };
-#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+#[cfg(any(
+    feature = "openai",
+    feature = "gemini",
+    all(feature = "chrome", feature = "real_browser")
+))]
 use tokio_stream::StreamExt;
+
+#[cfg(feature = "openai")]
+static OPENAI_VISION_CAPABILITIES: CaptchaProviderCapabilities = CaptchaProviderCapabilities {
+    provider: CaptchaProviderId::OPENAI_VISION,
+    locality: CaptchaProviderLocality::External,
+    supported_kinds: &[
+        CaptchaChallengeKind::ImageGridSelection,
+        CaptchaChallengeKind::HorizontalOffset,
+        CaptchaChallengeKind::PointSelection,
+    ],
+    supported_media_types: &["image/jpeg", "image/png"],
+    maximum_inputs: 16,
+    requires_credentials: true,
+};
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 static LOCAL_LANGUAGE_MODEL_CAPABILITIES: CaptchaProviderCapabilities =
@@ -207,6 +229,134 @@ mod gemini_transport_tests {
     }
 }
 
+#[cfg(all(test, feature = "openai"))]
+mod openai_vision_provider_tests {
+    use super::*;
+
+    fn request(kind: CaptchaChallengeKind, ids: &[&str]) -> CaptchaSolveRequest {
+        CaptchaSolveRequest {
+            correlation_id: "openai-test".into(),
+            selected_provider: CaptchaProviderId::OPENAI_VISION,
+            challenge: CaptchaChallenge {
+                kind,
+                instruction: "test".into(),
+                visuals: ids
+                    .iter()
+                    .map(|id| {
+                        CaptchaVisualInput::materialized(
+                            Some((*id).into()),
+                            "image/png",
+                            vec![1_u8],
+                        )
+                    })
+                    .collect(),
+            },
+            deadline: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn credential_is_secret_header_and_debug_is_redacted() {
+        const SECRET: &str = "openai-provider-secret-sentinel";
+        let crawler_request = openai_request(SECRET, b"{}".to_vec()).unwrap();
+        assert!(crawler_request.url.query().is_none());
+        assert_eq!(crawler_request.secret_headers.len(), 1);
+        assert!(!format!("{:?}", crawler_request.secret_headers).contains(SECRET));
+        let provider = OpenAiVisionCaptchaProvider::new("vision-model", SECRET);
+        assert!(!format!("{provider:?}").contains(SECRET));
+    }
+
+    #[test]
+    fn payload_contains_explicit_model_and_images_but_no_credential() {
+        const SECRET: &str = "must-not-enter-payload";
+        let payload = openai_payload(
+            &request(CaptchaChallengeKind::PointSelection, &["visual-a"]),
+            "explicit-vision-model",
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&payload).unwrap();
+        assert!(encoded.contains("explicit-vision-model"));
+        assert!(encoded.contains("data:image/png;base64,"));
+        assert!(encoded.contains("visual-a"));
+        assert!(!encoded.contains(SECRET));
+        assert!(!encoded.contains("api_key"));
+        assert!(!encoded.contains("authorization"));
+    }
+
+    #[test]
+    fn responses_output_text_is_extracted_only_from_output_text_content() {
+        let response = serde_json::json!({
+            "output": [{
+                "content": [
+                    {"type": "refusal", "text": "ignored"},
+                    {"type": "output_text", "text": "{\"x\":1}"}
+                ]
+            }]
+        });
+        assert_eq!(openai_output_text(&response), Some("{\"x\":1}"));
+        assert_eq!(openai_output_text(&serde_json::json!({"output": []})), None);
+    }
+
+    #[test]
+    fn explicit_model_and_credential_availability_are_truthful() {
+        let available = OpenAiVisionCaptchaProvider::new("vision-model", "secret");
+        assert_eq!(available.model(), "vision-model");
+        assert_eq!(
+            available.availability(),
+            CaptchaProviderAvailability::Available
+        );
+        assert_eq!(
+            OpenAiVisionCaptchaProvider::new("vision-model", "").availability(),
+            CaptchaProviderAvailability::CredentialUnavailable
+        );
+        assert_eq!(
+            OpenAiVisionCaptchaProvider::new("", "secret").availability(),
+            CaptchaProviderAvailability::ProviderUnavailable
+        );
+    }
+
+    #[test]
+    fn strict_response_parser_accepts_only_kind_specific_shapes() {
+        assert!(matches!(
+            openai_prompt_and_solution(
+                &request(CaptchaChallengeKind::ImageGridSelection, &["a", "b"]),
+                r#"{"selected_ids":["b"]}"#,
+            ),
+            Ok(CaptchaSolution::SelectedChoices(ids)) if ids == ["b"]
+        ));
+        assert!(matches!(
+            openai_prompt_and_solution(
+                &request(CaptchaChallengeKind::HorizontalOffset, &["a"]),
+                r#"{"x":12.5}"#,
+            ),
+            Ok(CaptchaSolution::HorizontalOffset(12.5))
+        ));
+        assert!(matches!(
+            openai_prompt_and_solution(
+                &request(CaptchaChallengeKind::PointSelection, &["a"]),
+                r#"{"x":1.0,"y":2.0}"#,
+            ),
+            Ok(CaptchaSolution::Point { x: 1.0, y: 2.0 })
+        ));
+    }
+
+    #[test]
+    fn strict_response_parser_rejects_unknown_duplicate_and_wrong_shapes() {
+        let grid = request(CaptchaChallengeKind::ImageGridSelection, &["a", "b"]);
+        for invalid in [
+            r#"{"selected_ids":["missing"]}"#,
+            r#"{"selected_ids":["a","a"]}"#,
+            r#"{"selected_ids":[],"extra":true}"#,
+            r#"{"x":1}"#,
+        ] {
+            assert!(matches!(
+                openai_prompt_and_solution(&grid, invalid),
+                Err(CaptchaSolveFailure::InvalidProviderResponse)
+            ));
+        }
+    }
+}
+
 #[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
 lazy_static! {
     /// One persistent, feature-selected canonical executor for all external
@@ -250,8 +400,12 @@ fn resolve_gemini_executor() -> CanonicalExecutor {
     .expect("failed to resolve canonical Gemini executor")
 }
 
-#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
-async fn collect_gemini_body(mut body: CrawlerBodyStream) -> Result<Vec<u8>, CrawlerFailure> {
+#[cfg(any(
+    feature = "openai",
+    feature = "gemini",
+    all(feature = "chrome", feature = "real_browser")
+))]
+async fn collect_captcha_body(mut body: CrawlerBodyStream) -> Result<Vec<u8>, CrawlerFailure> {
     let mut bytes = Vec::new();
     while let Some(chunk) = body.next().await {
         bytes.extend_from_slice(&chunk?);
@@ -288,7 +442,7 @@ fn gemini_post_request(
     })
 }
 
-#[cfg(all(feature = "chrome", feature = "real_browser"))]
+#[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
 fn visual_as_data_url(visual: &CaptchaVisualInput) -> Result<String, CaptchaSolveFailure> {
     let bytes = visual
         .bytes()
@@ -298,6 +452,345 @@ fn visual_as_data_url(visual: &CaptchaVisualInput) -> Result<String, CaptchaSolv
         visual.media_type(),
         BASE64_STANDARD.encode(bytes)
     ))
+}
+
+#[cfg(feature = "openai")]
+const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+
+#[cfg(feature = "openai")]
+lazy_static! {
+    /// Persistent canonical executor for OpenAI vision provider traffic.
+    static ref OPENAI_VISION_EXECUTOR: CanonicalExecutor = resolve_openai_vision_executor();
+}
+
+#[cfg(all(feature = "openai", not(feature = "wreq")))]
+fn resolve_openai_vision_executor() -> CanonicalExecutor {
+    let mut config = spider_transport::CrawlerTransportConfiguration::default();
+    config.user_agent = "spider-openai-vision-captcha".into();
+    config.request_timeout = Duration::from_secs(30);
+    CanonicalExecutor::resolve(config).expect("failed to resolve canonical OpenAI executor")
+}
+
+#[cfg(all(feature = "openai", feature = "wreq"))]
+fn resolve_openai_vision_executor() -> CanonicalExecutor {
+    CanonicalExecutor::resolve(spider_transport::WreqTransportConfiguration {
+        policy: spider_transport::TransportPolicy::Default,
+        user_agent: "spider-openai-vision-captcha".into(),
+        default_headers: reqwest::header::HeaderMap::new(),
+        proxies: Vec::new(),
+        request_timeout: Duration::from_secs(30),
+        connect_timeout: Duration::from_secs(20),
+        read_timeout: Duration::from_secs(30),
+        accept_invalid_certs: false,
+        local_address: None,
+        network_interface: None,
+        dns_resolver: None,
+        cookie_jar: None,
+        emulation: None,
+        redirect_limit: 10,
+        redirect_mode: spider_transport::WreqRedirectMode::Follow,
+    })
+    .expect("failed to resolve canonical OpenAI executor")
+}
+
+/// OpenAI vision CAPTCHA provider configuration and adapter.
+///
+/// The API key is caller-supplied, remains private and is applied only through
+/// `SecretRequestHeaders`. The adapter owns no raw HTTP client.
+#[cfg(feature = "openai")]
+pub struct OpenAiVisionCaptchaProvider {
+    model: String,
+    api_key: String,
+}
+
+#[cfg(feature = "openai")]
+impl std::fmt::Debug for OpenAiVisionCaptchaProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenAiVisionCaptchaProvider")
+            .field("model", &self.model)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(feature = "openai")]
+impl OpenAiVisionCaptchaProvider {
+    /// Construct an explicitly configured provider. Credential acquisition is
+    /// caller-owned; this constructor performs no environment lookup.
+    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            api_key: api_key.into(),
+        }
+    }
+
+    /// Return the explicitly configured OpenAI model identifier.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+#[cfg(feature = "openai")]
+#[async_trait::async_trait]
+impl CaptchaProvider for OpenAiVisionCaptchaProvider {
+    fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+        &OPENAI_VISION_CAPABILITIES
+    }
+
+    fn availability(&self) -> CaptchaProviderAvailability {
+        if self.api_key.is_empty() {
+            CaptchaProviderAvailability::CredentialUnavailable
+        } else if self.model.trim().is_empty() {
+            CaptchaProviderAvailability::ProviderUnavailable
+        } else {
+            CaptchaProviderAvailability::Available
+        }
+    }
+
+    async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+        solve_openai_vision_request(request, &self.model, &self.api_key).await
+    }
+}
+
+#[cfg(feature = "openai")]
+fn openai_request(api_key: &str, body: Vec<u8>) -> Result<CrawlerRequest, CaptchaSolveFailure> {
+    let mut secret_headers = SecretRequestHeaders::new();
+    let bearer = format!("Bearer {api_key}");
+    secret_headers
+        .try_insert("authorization", &bearer)
+        .map_err(|_| CaptchaSolveFailure::CredentialUnavailable)?;
+    Ok(CrawlerRequest {
+        url: url::Url::parse(OPENAI_RESPONSES_ENDPOINT)
+            .map_err(|_| CaptchaSolveFailure::ProviderUnavailable)?,
+        method: reqwest::Method::POST,
+        headers: reqwest::header::HeaderMap::new(),
+        secret_headers,
+        body: Some(body),
+        content_type: Some("application/json".into()),
+    })
+}
+
+#[cfg(feature = "openai")]
+fn openai_failure(
+    failure: CaptchaSolveFailure,
+    transport_backend: Option<spider_transport::BackendProvenance>,
+    response_origin: Option<spider_transport::ResponseOrigin>,
+) -> CaptchaSolveOutcome {
+    CaptchaSolveOutcome::Failed {
+        failure,
+        provenance: Some(CaptchaSolveProvenance {
+            provider: CaptchaProviderId::OPENAI_VISION,
+            locality: CaptchaProviderLocality::External,
+            transport_backend,
+            response_origin,
+        }),
+    }
+}
+
+#[cfg(feature = "openai")]
+fn openai_output_text(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("output")?
+        .as_array()?
+        .iter()
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+        })
+        .find_map(|content| {
+            (content.get("type").and_then(|v| v.as_str()) == Some("output_text"))
+                .then(|| content.get("text").and_then(|v| v.as_str()))
+                .flatten()
+        })
+}
+
+#[cfg(feature = "openai")]
+fn openai_prompt_and_solution(
+    request: &CaptchaSolveRequest,
+    text: &str,
+) -> Result<CaptchaSolution, CaptchaSolveFailure> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Choices {
+        selected_ids: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Offset {
+        x: f64,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+
+    match request.challenge.kind {
+        CaptchaChallengeKind::ImageGridSelection => {
+            let parsed: Choices = serde_json::from_str(text)
+                .map_err(|_| CaptchaSolveFailure::InvalidProviderResponse)?;
+            let valid_ids: std::collections::HashSet<&str> = request
+                .challenge
+                .visuals
+                .iter()
+                .filter_map(CaptchaVisualInput::id)
+                .collect();
+            let mut observed = std::collections::HashSet::new();
+            if parsed
+                .selected_ids
+                .iter()
+                .any(|id| !valid_ids.contains(id.as_str()) || !observed.insert(id.as_str()))
+            {
+                return Err(CaptchaSolveFailure::InvalidProviderResponse);
+            }
+            Ok(CaptchaSolution::SelectedChoices(parsed.selected_ids))
+        }
+        CaptchaChallengeKind::HorizontalOffset => {
+            let parsed: Offset = serde_json::from_str(text)
+                .map_err(|_| CaptchaSolveFailure::InvalidProviderResponse)?;
+            if !parsed.x.is_finite() {
+                return Err(CaptchaSolveFailure::InvalidProviderResponse);
+            }
+            Ok(CaptchaSolution::HorizontalOffset(parsed.x))
+        }
+        CaptchaChallengeKind::PointSelection => {
+            let parsed: Point = serde_json::from_str(text)
+                .map_err(|_| CaptchaSolveFailure::InvalidProviderResponse)?;
+            if !parsed.x.is_finite() || !parsed.y.is_finite() {
+                return Err(CaptchaSolveFailure::InvalidProviderResponse);
+            }
+            Ok(CaptchaSolution::Point {
+                x: parsed.x,
+                y: parsed.y,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "openai")]
+fn openai_instruction(request: &CaptchaSolveRequest) -> String {
+    match request.challenge.kind {
+        CaptchaChallengeKind::ImageGridSelection => format!(
+            "Select images matching this instruction: {}. Return only strict JSON {{\"selected_ids\":[\"id\"]}} using supplied IDs; an empty array is valid.",
+            request.challenge.instruction
+        ),
+        CaptchaChallengeKind::HorizontalOffset => format!(
+            "{}. Return only strict JSON {{\"x\":number}}.",
+            request.challenge.instruction
+        ),
+        CaptchaChallengeKind::PointSelection => format!(
+            "{}. Return only strict JSON {{\"x\":number,\"y\":number}}.",
+            request.challenge.instruction
+        ),
+    }
+}
+
+#[cfg(feature = "openai")]
+fn openai_payload(
+    request: &CaptchaSolveRequest,
+    model: &str,
+) -> Result<serde_json::Value, CaptchaSolveFailure> {
+    let mut content = vec![serde_json::json!({
+        "type": "input_text",
+        "text": openai_instruction(request),
+    })];
+    for visual in &request.challenge.visuals {
+        if let Some(id) = visual.id() {
+            content
+                .push(serde_json::json!({"type": "input_text", "text": format!("Image ID: {id}")}));
+        }
+        content.push(serde_json::json!({
+            "type": "input_image",
+            "image_url": visual_as_data_url(visual)?,
+        }));
+    }
+    Ok(serde_json::json!({
+        "model": model,
+        "input": [{"role": "user", "content": content}],
+        "temperature": 0,
+        "max_output_tokens": 128,
+    }))
+}
+
+#[cfg(feature = "openai")]
+async fn solve_openai_vision_request(
+    request: &CaptchaSolveRequest,
+    model: &str,
+    api_key: &str,
+) -> CaptchaSolveOutcome {
+    let payload = match openai_payload(request, model) {
+        Ok(payload) => payload,
+        Err(failure) => return openai_failure(failure, None, None),
+    };
+    let body = match serde_json::to_vec(&payload) {
+        Ok(body) => body,
+        Err(_) => return openai_failure(CaptchaSolveFailure::InvalidChallenge, None, None),
+    };
+    let crawler_request = match openai_request(api_key, body) {
+        Ok(request) => request,
+        Err(failure) => return openai_failure(failure, None, None),
+    };
+    let response = match tokio::time::timeout(
+        request.deadline,
+        OPENAI_VISION_EXECUTOR.execute(crawler_request),
+    )
+    .await
+    {
+        Err(_) => return openai_failure(CaptchaSolveFailure::DeadlineExceeded, None, None),
+        Ok(Err(failure)) => {
+            let backend = failure.backend();
+            return openai_failure(CaptchaSolveFailure::Transport(failure), Some(backend), None);
+        }
+        Ok(Ok(response)) => response,
+    };
+    let backend = response.backend;
+    let origin = response.origin;
+    if !response.status.is_success() {
+        return openai_failure(
+            CaptchaSolveFailure::ProviderRejected,
+            Some(backend),
+            Some(origin),
+        );
+    }
+    let bytes = match collect_captcha_body(response.body).await {
+        Ok(bytes) => bytes,
+        Err(failure) => {
+            return openai_failure(
+                CaptchaSolveFailure::Transport(failure),
+                Some(backend),
+                Some(origin),
+            )
+        }
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            return openai_failure(
+                CaptchaSolveFailure::InvalidProviderResponse,
+                Some(backend),
+                Some(origin),
+            )
+        }
+    };
+    let solution = match openai_output_text(&value)
+        .ok_or(CaptchaSolveFailure::InvalidProviderResponse)
+        .and_then(|text| openai_prompt_and_solution(request, text))
+    {
+        Ok(solution) => solution,
+        Err(failure) => return openai_failure(failure, Some(backend), Some(origin)),
+    };
+    CaptchaSolveOutcome::Solved {
+        solution,
+        provenance: CaptchaSolveProvenance::external(
+            CaptchaProviderId::OPENAI_VISION,
+            backend,
+            origin,
+        ),
+    }
 }
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
@@ -469,7 +962,7 @@ async fn execute_external_gemini_json(
     if !response.status.is_success() {
         return Err(CaptchaSolveFailure::ProviderRejected);
     }
-    let body = collect_gemini_body(response.body)
+    let body = collect_captcha_body(response.body)
         .await
         .map_err(CaptchaSolveFailure::Transport)?;
     let value =
@@ -693,7 +1186,7 @@ async fn materialize_remote_challenge(
                             .with_status(response.status),
                     ));
                 }
-                let bytes = collect_gemini_body(response.body)
+                let bytes = collect_captcha_body(response.body)
                     .await
                     .map_err(CaptchaSolveFailure::Transport)?;
                 visuals.push(CaptchaVisualInput::materialized(id, media_type, bytes));

@@ -102,6 +102,8 @@ impl CaptchaProviderId {
     pub const LOCAL_LANGUAGE_MODEL: Self = Self("local-language-model");
     /// External Gemini provider reached through canonical transport.
     pub const EXTERNAL_GEMINI: Self = Self("external-gemini");
+    /// OpenAI vision provider reached through canonical transport.
+    pub const OPENAI_VISION: Self = Self("openai-vision");
 
     /// Return the stable provider label.
     pub const fn as_str(self) -> &'static str {

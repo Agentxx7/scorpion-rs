@@ -1579,6 +1579,7 @@ fn captcha_provider_authority_violation(source: &str) -> bool {
     [
         "impl CaptchaProvider for RawProvider { reqwest::Client",
         "impl CaptchaProvider for RawProvider { wreq::Client",
+        "impl CaptchaProvider for OpenAiVisionCaptchaProvider { async_openai::Client",
         "CaptchaSolveRequest { client:",
         "provider.solve(request).or_else(fallback_provider)",
         "provider_id = BackendProvenance::Reqwest",
@@ -1608,6 +1609,20 @@ fn canonical_captcha_capability_separates_provider_transport_and_browser_authori
     assert!(!core.contains("CdpError"));
     assert!(solvers.contains("impl CaptchaProvider for LocalLanguageModelProvider"));
     assert!(solvers.contains("impl CaptchaProvider for ExternalGeminiProvider"));
+    assert!(solvers.contains("impl CaptchaProvider for OpenAiVisionCaptchaProvider"));
+    assert!(solvers.contains("OPENAI_VISION_EXECUTOR.execute(crawler_request)"));
+    let openai_adapter = solvers
+        .split("pub struct OpenAiVisionCaptchaProvider")
+        .nth(1)
+        .expect("OpenAI vision provider exists");
+    for forbidden in [
+        "async_openai::Client",
+        "reqwest::Client::new()",
+        "wreq::Client::new()",
+        "OPENAI_API_KEY",
+    ] {
+        assert!(!openai_adapter.contains(forbidden));
+    }
 }
 
 #[test]
@@ -1615,6 +1630,7 @@ fn scanner_rejects_synthetic_captcha_provider_authority_leaks() {
     for fixture in [
         "impl CaptchaProvider for RawProvider { reqwest::Client",
         "impl CaptchaProvider for RawProvider { wreq::Client",
+        "impl CaptchaProvider for OpenAiVisionCaptchaProvider { async_openai::Client",
         "CaptchaSolveRequest { client: raw_client }",
         "provider.solve(request).or_else(fallback_provider)",
         "provider_id = BackendProvenance::Reqwest",

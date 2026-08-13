@@ -45,6 +45,9 @@ sitemap = { version = "0.4", optional = true }
 chrono = { version = "0.4", optional = true }
 cron = { version = "0.16", optional = true }
 sha2 = "0.10"
+candle = { package = "candle-core", version = "0.11.0", optional = true }
+candle-nn = { version = "0.11.0", optional = true }
+candle-transformers = { version = "0.11.0", optional = true }
 infer = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
 async-trait = { version = "0.1" }
 strum = { version = "0.28", features = ["derive"] }
@@ -301,6 +304,7 @@ news_sitemap = ["dep:chrono"]
 robots_sitemap = []
 feed = ["dep:feed-rs"]
 evidence = ["dep:infer", "serde"]
+local_qwen3_vl = ["dep:candle", "dep:candle-nn", "dep:candle-transformers", "tokio/sync"]
 # Enables TransportPolicy::Tor (fail-closed SOCKS5h). Distinct from the
 # legacy `socks` feature, which only affects the unrelated multi-proxy
 # rotation list (`configuration.proxies`) and carries no Tor-specific

@@ -97,6 +97,11 @@ pub mod news_sitemap;
 /// unconditionally, independent of the `transport_tor` feature: this is
 /// URL classification, not Tor networking.
 pub mod onion_seed;
+/// Request-isolated generation sessions for the native Candle Qwen3-VL
+/// runtime. Every session owns fresh KV state while immutable weight backend
+/// resources remain factory-owned.
+#[cfg(feature = "local_qwen3_vl")]
+pub mod qwen3_vl_generation;
 /// `ResearchScope`: the smallest canonical declarative discovery-scope
 /// boundary (onion seeds / already-produced candidates only — never
 /// fetched document bytes), plus the `discover` orchestration seam that

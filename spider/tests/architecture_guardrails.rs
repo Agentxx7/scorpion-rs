@@ -1699,3 +1699,47 @@ fn scanner_rejects_synthetic_local_model_contract_violations() {
         "manifest.activate(staging, active)?"
     ));
 }
+
+fn qwen_generation_state_violation(source: &str) -> bool {
+    [
+        "model: Mutex<Qwen3VLModel>",
+        "Arc<Qwen3VLModel>",
+        "recycle_session",
+        "session_pool",
+        "return_model",
+        "hf_hub",
+        "reqwest::Client",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn qwen_generation_state_is_request_local_and_transport_free() {
+    let root = workspace_root();
+    let source =
+        fs::read_to_string(root.join("spider/src/features/qwen3_vl_generation.rs")).unwrap();
+    assert!(source.contains("weights: VarBuilder<'static>"));
+    assert!(source.contains("Qwen3VLModel::new(&self.config, self.weights.clone())"));
+    assert!(source.contains("_serialized_permit: tokio::sync::OwnedMutexGuard<()>"));
+    assert!(source.contains("lock_owned().await"));
+    assert!(!qwen_generation_state_violation(&source));
+}
+
+#[test]
+fn scanner_rejects_synthetic_qwen_generation_state_leaks() {
+    for fixture in [
+        "model: Mutex<Qwen3VLModel>",
+        "Arc<Qwen3VLModel>",
+        "recycle_session(session)",
+        "session_pool.push(model)",
+        "return_model(model)",
+        "hf_hub::api::Api::new()",
+        "reqwest::Client::new()",
+    ] {
+        assert!(qwen_generation_state_violation(fixture));
+    }
+    assert!(!qwen_generation_state_violation(
+        "factory.begin_request().await?"
+    ));
+}

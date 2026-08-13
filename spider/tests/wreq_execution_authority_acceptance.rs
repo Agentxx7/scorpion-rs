@@ -19,17 +19,19 @@ fn website_resolves_wreq_before_execution() {
     let website = read("spider/src/website.rs");
     let transport = read("spider_transport/src/transport.rs");
     assert!(transport.contains("NoncanonicalWreq"));
-    assert!(website.contains("ExecutionMode::NoncanonicalWreq"));
+    assert!(transport.contains("CanonicalWreq"));
+    assert!(website.contains("ExecutionMode::CanonicalWreq"));
     assert!(website.contains("fn prepare_execution"));
     assert!(website.contains("crawl_sitemap_chrome"));
 }
 
 #[test]
-fn wreq_never_receives_canonical_executor_identity() {
+fn wreq_canonical_identity_is_distinct_from_raw_compatibility() {
     let website = read("spider/src/website.rs");
     assert!(website.contains("#[cfg(feature = \"wreq\")]"));
-    assert!(!website.contains("ExecutionMode::CanonicalWreq"));
-    assert!(website.contains("mode != ExecutionMode::Canonical"));
+    assert!(website.contains("ExecutionMode::CanonicalWreq"));
+    assert!(website.contains("resolve_wreq_executor"));
+    assert!(website.contains("UPSTREAM_COMPATIBILITY_BOUNDARY"));
 }
 
 #[test]
@@ -101,23 +103,23 @@ fn gemini_is_separately_noncanonical() {
 fn negative_scanner_detects_wreq_authority_violations() {
     fn violation(source: &str) -> bool {
         [
-            "ExecutionMode::CanonicalWreq",
-            "canonical_wreq_client",
-            "ResolvedExecutor::from_wreq",
-            "canonical_secret_headers.apply_to(wreq_request)",
+            "Website { wreq_client:",
+            "ClientBuilder::new().send()",
+            "canonical_page.error = wreq_error",
+            "if let Ok(proxy) { direct() }",
         ]
         .iter()
         .any(|pattern| source.contains(pattern))
     }
     for fixture in [
-        "ExecutionMode::CanonicalWreq",
-        "let client = canonical_wreq_client();",
-        "ResolvedExecutor::from_wreq(client)",
-        "canonical_secret_headers.apply_to(wreq_request)",
+        "Website { wreq_client: client }",
+        "ClientBuilder::new().send()",
+        "canonical_page.error = wreq_error",
+        "if let Ok(proxy) { direct() }",
     ] {
         assert!(violation(fixture), "negative fixture escaped: {fixture}");
     }
-    assert!(!violation("ExecutionMode::NoncanonicalWreq"));
+    assert!(!violation("ResolvedWreqExecutor::execute(request).await"));
 }
 
 #[cfg(feature = "wreq")]

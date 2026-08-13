@@ -388,7 +388,7 @@ mod cache_request;
 pub mod client;
 
 #[cfg(all(feature = "cache_request", feature = "wreq"))]
-compile_error!("cache_request + wreq is explicitly rejected: cache_request requires canonical ResolvedExecutor execution; wreq convergence is a separate frontier");
+compile_error!("cache_request + wreq is explicitly rejected: canonical Wreq cache integration has not been approved");
 /// Configuration structure for `Website`.
 pub mod configuration;
 /// Optional features to use.

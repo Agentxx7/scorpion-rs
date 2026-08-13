@@ -7463,10 +7463,9 @@ pub async fn fetch_page_html_raw(target_url: &str, client: &Client) -> PageRespo
 
 /// Canonical crawler acquisition through the leaf-owned executor. This
 /// consumes the backend-neutral stream and never borrows a raw client.
-#[cfg(not(feature = "wreq"))]
 pub async fn fetch_page_html_with_executor(
     target_url: &str,
-    executor: &spider_transport::ResolvedExecutor,
+    executor: &spider_transport::CanonicalExecutor,
 ) -> PageResponse {
     let url = match Url::parse(target_url) {
         Ok(url) => url,
@@ -7514,7 +7513,6 @@ pub async fn fetch_page_html_with_executor(
     page_response_from_crawler_response(target_url, response).await
 }
 
-#[cfg(not(feature = "wreq"))]
 pub(crate) async fn page_response_from_crawler_response(
     target_url: &str,
     mut response: spider_transport::CrawlerResponse,
@@ -7569,10 +7567,10 @@ pub(crate) async fn page_response_from_crawler_response(
 /// Fetch a bounded byte representation through a pre-resolved mode. Canonical
 /// callers use the neutral executor stream; raw-client execution is retained
 /// here only for explicitly noncanonical/compatibility modes.
-#[cfg(all(feature = "sitemap", not(feature = "wreq")))]
+#[cfg(feature = "sitemap")]
 pub(crate) async fn fetch_bytes_for_mode(
     target_url: &str,
-    executor: Option<&spider_transport::ResolvedExecutor>,
+    executor: Option<&spider_transport::CanonicalExecutor>,
     compatibility_client: &Client,
     limit: usize,
 ) -> Result<(StatusCode, bytes::Bytes), spider_transport::CrawlerFailure> {
@@ -7594,7 +7592,7 @@ pub(crate) async fn fetch_bytes_for_mode(
             if limit > 0 && bytes.len().saturating_add(chunk.len()) > limit {
                 return Err(spider_transport::CrawlerFailure::new(
                     spider_transport::CrawlerFailureKind::BodyStream,
-                    spider_transport::BackendProvenance::Reqwest,
+                    response.backend,
                 ));
             }
             bytes.extend_from_slice(&chunk);
@@ -7605,7 +7603,7 @@ pub(crate) async fn fetch_bytes_for_mode(
         .get(target_url)
         .send()
         .await
-        .map_err(spider_transport::crawler_outcome::from_reqwest_error)?;
+        .map_err(crate::page::request_error_to_failure)?;
     let status = response.status();
     if limit > 0
         && response
@@ -7620,44 +7618,7 @@ pub(crate) async fn fetch_bytes_for_mode(
     let bytes = response
         .bytes()
         .await
-        .map_err(spider_transport::crawler_outcome::from_reqwest_error)?;
-    Ok((status, bytes))
-}
-
-#[cfg(all(feature = "sitemap", feature = "wreq"))]
-pub(crate) async fn fetch_bytes_for_mode(
-    target_url: &str,
-    _executor: Option<&spider_transport::ResolvedExecutor>,
-    compatibility_client: &Client,
-    limit: usize,
-) -> Result<(StatusCode, bytes::Bytes), spider_transport::CrawlerFailure> {
-    let response = compatibility_client
-        .get(target_url)
-        .send()
-        .await
-        .map_err(|_| {
-            spider_transport::CrawlerFailure::new(
-                spider_transport::CrawlerFailureKind::Request,
-                spider_transport::BackendProvenance::Wreq,
-            )
-        })?;
-    let status = response.status();
-    if limit > 0
-        && response
-            .content_length()
-            .is_some_and(|length| length >= limit as u64)
-    {
-        return Err(spider_transport::CrawlerFailure::new(
-            spider_transport::CrawlerFailureKind::BodyStream,
-            spider_transport::BackendProvenance::Wreq,
-        ));
-    }
-    let bytes = response.bytes().await.map_err(|_| {
-        spider_transport::CrawlerFailure::new(
-            spider_transport::CrawlerFailureKind::BodyStream,
-            spider_transport::BackendProvenance::Wreq,
-        )
-    })?;
+        .map_err(crate::page::request_error_to_failure)?;
     Ok((status, bytes))
 }
 
@@ -7754,11 +7715,11 @@ pub async fn fetch_page_html_raw_conditional(
     page_response
 }
 
-#[cfg(all(feature = "etag_cache", not(feature = "wreq")))]
+#[cfg(feature = "etag_cache")]
 /// Execute an ETag/Last-Modified request through the pre-resolved crawl mode.
 pub async fn fetch_page_html_conditional_for_mode(
     target_url: &str,
-    executor: Option<&spider_transport::ResolvedExecutor>,
+    executor: Option<&spider_transport::CanonicalExecutor>,
     compatibility_client: &Client,
     etag_cache: &crate::utils::etag_cache::ETagCache,
 ) -> PageResponse {
@@ -7810,17 +7771,6 @@ pub async fn fetch_page_html_conditional_for_mode(
             ..Default::default()
         },
     }
-}
-
-#[cfg(all(feature = "etag_cache", feature = "wreq"))]
-/// Explicitly noncanonical conditional-request fallback for alternate backends.
-pub async fn fetch_page_html_conditional_for_mode(
-    target_url: &str,
-    _executor: Option<&spider_transport::ResolvedExecutor>,
-    compatibility_client: &Client,
-    etag_cache: &crate::utils::etag_cache::ETagCache,
-) -> PageResponse {
-    fetch_page_html_raw_conditional(target_url, compatibility_client, etag_cache).await
 }
 
 /// Perform a network request to a resource and return a cached response immediately when available.

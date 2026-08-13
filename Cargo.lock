@@ -9645,6 +9645,8 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "url",
+ "wreq",
+ "wreq-util",
 ]
 
 [[package]]

@@ -23,7 +23,7 @@ use crate::utils::{
     get_path_from_url, get_semaphore, networking_capable, prepare_url, setup_website_selectors,
     spawn_set, AllowedDomainTypes,
 };
-use spider_transport::{ExecutionMode, ResolvedExecutor};
+use spider_transport::{CanonicalExecutor, ExecutionMode};
 
 /// Run a future with an optional hard wall-clock timeout.
 /// When `timeout` is `None`, the future runs without any timer overhead.
@@ -1413,7 +1413,7 @@ pub struct Website {
     /// Execution authority resolved once before crawl execution.
     execution_mode: Option<ExecutionMode>,
     /// Persistent canonical transport executor. Raw clients never leave it.
-    resolved_executor: Option<Arc<ResolvedExecutor>>,
+    resolved_executor: Option<Arc<CanonicalExecutor>>,
     /// Optional per-request proxy routing strategy.
     ///
     /// When set together with [`crate::configuration::Configuration::proxies_by_kind`],
@@ -1645,7 +1645,7 @@ impl Website {
         } else if self.fetch_engine.is_some() {
             ExecutionMode::NoncanonicalHttpFetchEngine
         } else if cfg!(feature = "wreq") {
-            ExecutionMode::NoncanonicalWreq
+            ExecutionMode::CanonicalWreq
         } else {
             ExecutionMode::Canonical
         };
@@ -1655,7 +1655,10 @@ impl Website {
 
     fn prepare_execution(&mut self) -> bool {
         let mode = self.resolve_execution_mode();
-        if mode != ExecutionMode::Canonical {
+        if !matches!(
+            mode,
+            ExecutionMode::Canonical | ExecutionMode::CanonicalWreq
+        ) {
             return true;
         }
         match self.resolve_canonical_executor() {
@@ -1670,7 +1673,10 @@ impl Website {
 
     pub(crate) fn rebuild_execution_resources(&mut self) {
         self.resolved_executor = None;
-        if self.execution_mode == Some(ExecutionMode::Canonical) {
+        if matches!(
+            self.execution_mode,
+            Some(ExecutionMode::Canonical | ExecutionMode::CanonicalWreq)
+        ) {
             if let Err(error) = self.resolve_canonical_executor() {
                 self.last_transport_error = Some(error);
                 self.status = CrawlStatus::Invalid;
@@ -1683,7 +1689,7 @@ impl Website {
     #[cfg(all(not(feature = "decentralized"), not(feature = "wreq")))]
     fn resolve_canonical_executor(
         &mut self,
-    ) -> Result<Arc<ResolvedExecutor>, spider_transport::TransportError> {
+    ) -> Result<Arc<CanonicalExecutor>, spider_transport::TransportError> {
         if let Some(executor) = &self.resolved_executor {
             return Ok(executor.clone());
         }
@@ -1722,7 +1728,7 @@ impl Website {
         let cookie_jar = Some(self.cookie_jar.clone());
         #[cfg(not(feature = "cookies"))]
         let cookie_jar = None;
-        let executor = Arc::new(ResolvedExecutor::resolve(
+        let executor = Arc::new(CanonicalExecutor::resolve(
             spider_transport::CrawlerTransportConfiguration {
                 policy: self.configuration.transport_policy.clone(),
                 user_agent,
@@ -1751,10 +1757,103 @@ impl Website {
         Ok(executor)
     }
 
-    #[cfg(any(feature = "decentralized", feature = "wreq"))]
+    #[cfg(all(feature = "wreq", not(feature = "decentralized")))]
+    fn resolve_wreq_executor(
+        &mut self,
+    ) -> Result<Arc<CanonicalExecutor>, spider_transport::TransportError> {
+        if let Some(executor) = &self.resolved_executor {
+            return Ok(executor.clone());
+        }
+        if matches!(
+            self.configuration.transport_policy,
+            spider_transport::TransportPolicy::Tor(_)
+        ) {
+            return Err(spider_transport::TransportError::IncompatibleConfiguration(
+                "transport_tor + wreq is explicitly unsupported".into(),
+            ));
+        }
+        let timeout_mult = if self.configuration.proxies.is_some() {
+            2
+        } else {
+            1
+        };
+        let proxies = self
+            .configuration
+            .proxies
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|proxy| proxy.ignore != crate::configuration::ProxyIgnore::Http)
+            .map(|proxy| proxy.addr.clone())
+            .collect();
+        let user_agent = self
+            .configuration
+            .user_agent
+            .as_deref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| get_ua(self.configuration.only_chrome_agent()).to_string());
+        let default_headers = self
+            .configuration
+            .headers
+            .as_deref()
+            .map(|headers| headers.inner().clone())
+            .unwrap_or_default();
+        #[cfg(feature = "dns_cache")]
+        let dns_resolver =
+            Some(crate::utils::dns_cache::shared_dns_cache() as Arc<dyn wreq::dns::Resolve>);
+        #[cfg(not(feature = "dns_cache"))]
+        let dns_resolver = None;
+        #[cfg(feature = "cookies")]
+        let cookie_jar = Some(self.cookie_jar.clone());
+        #[cfg(not(feature = "cookies"))]
+        let cookie_jar = None;
+        let executor = Arc::new(CanonicalExecutor::resolve(
+            spider_transport::WreqTransportConfiguration {
+                policy: self.configuration.transport_policy.clone(),
+                user_agent,
+                default_headers,
+                proxies,
+                request_timeout: self
+                    .configuration
+                    .request_timeout
+                    .unwrap_or(Duration::from_secs(30 * timeout_mult)),
+                connect_timeout: self
+                    .configuration
+                    .default_http_connect_timeout
+                    .unwrap_or(Duration::from_secs(24 * timeout_mult)),
+                read_timeout: self
+                    .configuration
+                    .default_http_read_timeout
+                    .unwrap_or(Duration::from_secs(42 * timeout_mult)),
+                accept_invalid_certs: self.configuration.accept_invalid_certs,
+                local_address: self.configuration.local_address,
+                network_interface: self.configuration.network_interface.clone(),
+                dns_resolver,
+                cookie_jar,
+                emulation: self.configuration.emulation,
+                redirect_limit: self.configuration.redirect_limit,
+                redirect_mode: match self.configuration.redirect_policy {
+                    RedirectPolicy::Loose => spider_transport::WreqRedirectMode::Follow,
+                    RedirectPolicy::None => spider_transport::WreqRedirectMode::None,
+                    RedirectPolicy::Strict => spider_transport::WreqRedirectMode::SameHost,
+                },
+            },
+        )?);
+        self.resolved_executor = Some(executor.clone());
+        Ok(executor)
+    }
+
+    #[cfg(all(feature = "wreq", not(feature = "decentralized")))]
     fn resolve_canonical_executor(
         &mut self,
-    ) -> Result<Arc<ResolvedExecutor>, spider_transport::TransportError> {
+    ) -> Result<Arc<CanonicalExecutor>, spider_transport::TransportError> {
+        self.resolve_wreq_executor()
+    }
+
+    #[cfg(feature = "decentralized")]
+    fn resolve_canonical_executor(
+        &mut self,
+    ) -> Result<Arc<CanonicalExecutor>, spider_transport::TransportError> {
         Err(spider_transport::TransportError::IncompatibleConfiguration(
             "canonical ResolvedExecutor requires the reqwest crawler backend; wreq and decentralized modes are explicitly noncanonical".into(),
         ))
@@ -3196,16 +3295,16 @@ impl Website {
                     } else {
                         string_concat!(host_str, "/")
                     };
-                    #[cfg(not(feature = "wreq"))]
-                    if self.execution_mode == Some(ExecutionMode::Canonical) {
+                    if matches!(
+                        self.execution_mode,
+                        Some(ExecutionMode::Canonical | ExecutionMode::CanonicalWreq)
+                    ) {
                         if let Some(executor) = self.resolved_executor.as_deref() {
                             robot_file_parser.read_with_executor(executor, &base).await;
                         }
                     } else {
                         robot_file_parser.read(client, &base).await;
                     }
-                    #[cfg(feature = "wreq")]
-                    robot_file_parser.read(client, &base).await;
                 }
                 if let Some(delay) =
                     robot_file_parser.get_crawl_delay(&self.configuration.user_agent)
@@ -4084,7 +4183,10 @@ impl Website {
 
         crate::utils::connect::init_background_runtime();
 
-        let client = if self.execution_mode == Some(ExecutionMode::Canonical) {
+        let client = if matches!(
+            self.execution_mode,
+            Some(ExecutionMode::Canonical | ExecutionMode::CanonicalWreq)
+        ) {
             // Compatibility placeholder for browser/noncanonical helper
             // signatures. Canonical Page execution never consults it.
             self.configure_http_client()
@@ -4097,12 +4199,14 @@ impl Website {
 
         #[cfg(not(feature = "decentralized"))]
         {
-            self.noncanonical_client_rotator =
-                if self.execution_mode == Some(ExecutionMode::Canonical) {
-                    None
-                } else {
-                    self.build_rotated_clients()
-                };
+            self.noncanonical_client_rotator = if matches!(
+                self.execution_mode,
+                Some(ExecutionMode::Canonical | ExecutionMode::CanonicalWreq)
+            ) {
+                None
+            } else {
+                self.build_rotated_clients()
+            };
         }
 
         // Prefetch proxy hostnames + start adaptive background refresh.
@@ -8306,7 +8410,10 @@ impl Website {
     #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     async fn crawl_concurrent_raw(&mut self, client: &Client, handle: &Option<Arc<AtomicI8>>) {
         let execution_mode = self.resolve_execution_mode();
-        let resolved_executor = if execution_mode == ExecutionMode::Canonical {
+        let resolved_executor = if matches!(
+            execution_mode,
+            ExecutionMode::Canonical | ExecutionMode::CanonicalWreq
+        ) {
             match self.resolve_canonical_executor() {
                 Ok(executor) => Some(executor),
                 Err(error) => {
@@ -8352,7 +8459,10 @@ impl Website {
                 seed,
             )
         });
-        let noncanonical_rotator = if execution_mode == ExecutionMode::Canonical {
+        let noncanonical_rotator = if matches!(
+            execution_mode,
+            ExecutionMode::Canonical | ExecutionMode::CanonicalWreq
+        ) {
             None
         } else {
             self.noncanonical_client_rotator.clone()
@@ -10277,7 +10387,10 @@ impl Website {
             website.subscription_guard().await;
             website
         } else {
-            let noncanonical_rotator = if website.execution_mode == Some(ExecutionMode::Canonical) {
+            let noncanonical_rotator = if matches!(
+                website.execution_mode,
+                Some(ExecutionMode::Canonical | ExecutionMode::CanonicalWreq)
+            ) {
                 None
             } else {
                 self.noncanonical_client_rotator.clone()

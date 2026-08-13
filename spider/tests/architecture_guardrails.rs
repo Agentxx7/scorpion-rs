@@ -1345,7 +1345,7 @@ fn canonical_crawler_transport_execution_is_executor_owned() {
     let website = fs::read_to_string(root.join("spider/src/website.rs")).unwrap();
     let page = fs::read_to_string(root.join("spider/src/page.rs")).unwrap();
     let transport = fs::read_to_string(root.join("spider_transport/src/transport.rs")).unwrap();
-    assert!(website.contains("resolved_executor: Option<Arc<ResolvedExecutor>>"));
+    assert!(website.contains("resolved_executor: Option<Arc<CanonicalExecutor>>"));
     assert!(website.contains("prepare_execution"));
     assert!(!website.contains("Page::new_page_streaming("));
     assert!(!website.contains("Page::new_page_with_cache("));
@@ -1463,17 +1463,17 @@ fn cache_transport_negative_fixtures_are_rejected() {
 
 fn wreq_authority_violation(source: &str) -> bool {
     [
-        "ExecutionMode::CanonicalWreq",
-        "ResolvedExecutor::from_wreq",
-        "canonical_wreq_client",
-        "canonical_secret_headers.apply_to(wreq_request)",
+        "Website { wreq_client:",
+        "ClientBuilder::new().send()",
+        "canonical_page.error = wreq_error",
+        "if let Ok(proxy) { direct() }",
     ]
     .iter()
     .any(|pattern| source.contains(pattern))
 }
 
 #[test]
-fn wreq_execution_authority_is_explicit_and_noncanonical() {
+fn wreq_execution_authority_is_canonical_and_compatibility_isolated() {
     let root = workspace_root();
     let transport = fs::read_to_string(root.join("spider_transport/src/transport.rs")).unwrap();
     let website = fs::read_to_string(root.join("spider/src/website.rs")).unwrap();
@@ -1482,8 +1482,23 @@ fn wreq_execution_authority_is_explicit_and_noncanonical() {
     let cache = fs::read_to_string(root.join("spider/src/cache_request.rs")).unwrap();
     let solvers = fs::read_to_string(root.join("spider/src/features/solvers.rs")).unwrap();
     assert!(transport.contains("NoncanonicalWreq"));
-    assert!(website.contains("ExecutionMode::NoncanonicalWreq"));
-    assert!(!website.contains("ExecutionMode::CanonicalWreq"));
+    assert!(transport.contains("CanonicalWreq"));
+    assert!(website.contains("ExecutionMode::CanonicalWreq"));
+    assert!(transport.contains("ResolvedWreqExecutor"));
+    assert!(transport.contains("canonical_redirect_decision"));
+    assert!(transport.contains("validate_target(&request.url"));
+    assert!(transport.contains("request.secret_headers.apply_to"));
+    assert!(transport.contains("wreq::Proxy::all(endpoint)"));
+    let resolution = website
+        .split("fn resolve_wreq_executor")
+        .nth(1)
+        .expect("canonical Wreq resolver")
+        .split("pub fn configure_base_client")
+        .next()
+        .expect("resolver boundary");
+    assert!(!resolution.contains("ClientBuilder::new"));
+    assert!(!resolution.contains(".send()"));
+    assert!(!resolution.contains("if let Ok(proxy)"));
     assert!(page.contains("UPSTREAM_COMPATIBILITY_BOUNDARY"));
     assert!(evidence.contains("canonical evidence acquisition is unavailable under wreq"));
     assert!(!evidence.contains("wreq::Client"));
@@ -1506,15 +1521,17 @@ fn wreq_execution_authority_is_explicit_and_noncanonical() {
 #[test]
 fn scanner_rejects_synthetic_canonical_wreq_claims() {
     for fixture in [
-        "ExecutionMode::CanonicalWreq",
-        "ResolvedExecutor::from_wreq(client)",
-        "let client = canonical_wreq_client();",
-        "canonical_secret_headers.apply_to(wreq_request)",
+        "Website { wreq_client: client }",
+        "ClientBuilder::new().send()",
+        "canonical_page.error = wreq_error",
+        "if let Ok(proxy) { direct() }",
     ] {
         assert!(
             wreq_authority_violation(fixture),
             "wreq fixture escaped: {fixture}"
         );
     }
-    assert!(!wreq_authority_violation("ExecutionMode::NoncanonicalWreq"));
+    assert!(!wreq_authority_violation(
+        "ResolvedWreqExecutor::execute(request).await"
+    ));
 }

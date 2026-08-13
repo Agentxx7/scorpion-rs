@@ -35,11 +35,11 @@ fn leaf_owns_the_persistent_request_only_executor() {
 #[test]
 fn website_state_and_execution_are_executor_owned() {
     let website = read("spider/src/website.rs");
-    assert!(website.contains("resolved_executor: Option<Arc<ResolvedExecutor>>"));
+    assert!(website.contains("resolved_executor: Option<Arc<CanonicalExecutor>>"));
     assert!(website.contains("resolve_execution_mode"));
     assert!(!website.contains("struct ClientRotator"));
     assert!(website.contains("struct NoncanonicalClientRotator"));
-    assert!(website.contains("execution_mode == ExecutionMode::Canonical"));
+    assert!(website.contains("ExecutionMode::Canonical | ExecutionMode::CanonicalWreq"));
     assert!(!website.contains("self.client.take()"));
     assert!(website.contains("EXPLICIT_UPSTREAM_COMPATIBILITY_BOUNDARY"));
 }

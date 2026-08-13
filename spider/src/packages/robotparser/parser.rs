@@ -380,10 +380,9 @@ impl RobotFileParser {
     }
 
     /// Read through the canonical request-only executor.
-    #[cfg(not(feature = "wreq"))]
     pub async fn read_with_executor(
         &mut self,
-        executor: &spider_transport::ResolvedExecutor,
+        executor: &spider_transport::CanonicalExecutor,
         url: &str,
     ) {
         use crate::tokio_stream::StreamExt;

@@ -42,6 +42,11 @@ reqwest = { version = "0.13", features = [
     "query",
     "cookies"
 ] }
+wreq = { version = "5", optional = true, features = [
+    "stream", "socks", "gzip", "brotli", "zstd", "deflate", "cookies",
+    "apple-network-device-binding"
+] }
+wreq-util = { version = "2", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1", default-features = false, features = [
@@ -74,3 +79,4 @@ tor = ["reqwest/socks"]
 # serde support for transport vocabulary types (Serialize everywhere;
 # TorTransportConfig deserializes through its validating constructor).
 serde = ["dep:serde"]
+wreq = ["dep:wreq", "dep:wreq-util"]

@@ -257,12 +257,55 @@ impl std::error::Error for TransportError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionMode {
     Canonical,
-    /// Compile-time selected wreq Website execution. Wreq owns the network
-    /// round trip and is not a backend of the canonical ResolvedExecutor.
+    /// Preserved identity for explicitly noncanonical/raw Wreq compatibility
+    /// execution. Canonical Website Wreq uses `CanonicalWreq` instead.
     NoncanonicalWreq,
+    /// Canonical policy and security ownership realized by the Wreq backend.
+    CanonicalWreq,
     NoncanonicalHttpFetchEngine,
     NoncanonicalRemoteFetcher,
     UpstreamCompatibility,
+}
+
+/// One backend-neutral redirect decision shared by every canonical HTTP
+/// backend. Backend callbacks only translate this decision into their action
+/// type; they do not own redirect security policy.
+pub fn canonical_redirect_decision(
+    next: &url::Url,
+    previous: &[url::Url],
+    policy: &TransportPolicy,
+    limit: usize,
+) -> Result<(), TransportError> {
+    if is_ssrf_redirect(next) {
+        return Err(TransportError::RedirectTransportViolation(
+            "SSRF blocked: redirect to internal address".into(),
+        ));
+    }
+    if previous.len() > limit {
+        return Err(TransportError::RedirectTransportViolation(
+            "too many redirects".into(),
+        ));
+    }
+    let next_onion = is_onion_url(next);
+    match policy {
+        TransportPolicy::Default if next_onion => Err(TransportError::OnionRequiresTor),
+        TransportPolicy::Tor(_) => {
+            let original = previous.first().unwrap_or(next);
+            let original_onion = is_onion_url(original);
+            if original_onion != next_onion {
+                Err(TransportError::RedirectTransportViolation(
+                    "cross onion/clearnet redirect rejected".into(),
+                ))
+            } else if original_onion && original.host_str() != next.host_str() {
+                Err(TransportError::RedirectTransportViolation(
+                    "redirect to a different onion service rejected".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Inputs resolved once into a persistent canonical executor.
@@ -442,6 +485,200 @@ impl ResolvedExecutor {
             response,
             acquisition_transport_for(&self.policy),
         ))
+    }
+}
+
+#[cfg(feature = "wreq")]
+#[derive(Clone)]
+struct ErasedWreqResolver(Arc<dyn wreq::dns::Resolve>);
+
+#[cfg(feature = "wreq")]
+impl wreq::dns::Resolve for ErasedWreqResolver {
+    fn resolve(&self, name: wreq::dns::Name) -> wreq::dns::Resolving {
+        self.0.resolve(name)
+    }
+}
+
+/// Wreq-specific realization inputs resolved once by the canonical transport
+/// leaf. Policy fields mirror `CrawlerTransportConfiguration`; backend-only
+/// emulation remains realization data rather than security authority.
+#[cfg(feature = "wreq")]
+#[derive(Clone)]
+pub enum WreqRedirectMode {
+    Follow,
+    None,
+    SameHost,
+}
+
+#[cfg(feature = "wreq")]
+#[derive(Clone)]
+pub struct WreqTransportConfiguration {
+    pub policy: TransportPolicy,
+    pub user_agent: String,
+    pub default_headers: http::HeaderMap,
+    pub proxies: Vec<String>,
+    pub request_timeout: std::time::Duration,
+    pub connect_timeout: std::time::Duration,
+    pub read_timeout: std::time::Duration,
+    pub accept_invalid_certs: bool,
+    pub local_address: Option<std::net::IpAddr>,
+    pub network_interface: Option<String>,
+    pub dns_resolver: Option<Arc<dyn wreq::dns::Resolve>>,
+    pub cookie_jar: Option<Arc<wreq::cookie::Jar>>,
+    pub emulation: Option<wreq_util::Emulation>,
+    pub redirect_limit: usize,
+    pub redirect_mode: WreqRedirectMode,
+}
+
+/// Persistent leaf-owned Wreq executor. Its client/session pool is private and
+/// callers can only submit the canonical request model.
+#[cfg(feature = "wreq")]
+pub struct ResolvedWreqExecutor {
+    policy: TransportPolicy,
+    clients: Arc<[wreq::Client]>,
+    next_client: AtomicUsize,
+}
+
+#[cfg(feature = "wreq")]
+impl fmt::Debug for ResolvedWreqExecutor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedWreqExecutor")
+            .field("policy", &self.policy)
+            .field("client_count", &self.clients.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "wreq")]
+impl ResolvedWreqExecutor {
+    pub fn resolve(config: WreqTransportConfiguration) -> Result<Self, TransportError> {
+        if matches!(config.policy, TransportPolicy::Tor(_)) {
+            return Err(TransportError::IncompatibleConfiguration(
+                "transport_tor + wreq is explicitly unsupported".into(),
+            ));
+        }
+        #[cfg(not(any(
+            target_os = "ios",
+            target_os = "macos",
+            target_os = "watchos",
+            target_os = "tvos"
+        )))]
+        if config.network_interface.is_some() {
+            return Err(TransportError::IncompatibleConfiguration(
+                "wreq interface binding is unsupported on this target".into(),
+            ));
+        }
+        let endpoints: Vec<Option<&str>> = if config.proxies.is_empty() {
+            vec![None]
+        } else {
+            config
+                .proxies
+                .iter()
+                .map(|proxy| Some(proxy.as_str()))
+                .collect()
+        };
+        let mut clients = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            let redirect_policy = config.policy.clone();
+            let redirect_limit = config.redirect_limit;
+            let redirect_mode = config.redirect_mode.clone();
+            let mut builder = wreq::Client::builder()
+                .connect_timeout(config.connect_timeout)
+                .read_timeout(config.read_timeout)
+                .timeout(config.request_timeout)
+                .user_agent(&config.user_agent)
+                .default_headers(config.default_headers.clone())
+                .redirect(wreq::redirect::Policy::custom(move |attempt| {
+                    if matches!(redirect_mode, WreqRedirectMode::None) {
+                        return attempt.stop();
+                    }
+                    if matches!(redirect_mode, WreqRedirectMode::SameHost)
+                        && attempt.previous().first().and_then(url::Url::host_str)
+                            != attempt.url().host_str()
+                    {
+                        return attempt.error("strict redirect policy rejected cross-host hop");
+                    }
+                    match canonical_redirect_decision(
+                        attempt.url(),
+                        attempt.previous(),
+                        &redirect_policy,
+                        redirect_limit,
+                    ) {
+                        Ok(()) => attempt.follow(),
+                        Err(error) => attempt.error(error.to_string()),
+                    }
+                }));
+            if let Some(emulation) = config.emulation {
+                builder = builder.emulation(emulation);
+            }
+            // Apply canonical verification policy after emulation because an
+            // emulation profile may replace Wreq's backend TLS configuration.
+            builder = builder
+                .cert_verification(!config.accept_invalid_certs)
+                .verify_hostname(!config.accept_invalid_certs);
+            if let Some(address) = config.local_address {
+                builder = builder.local_address(address);
+            }
+            #[cfg(any(
+                target_os = "ios",
+                target_os = "macos",
+                target_os = "watchos",
+                target_os = "tvos"
+            ))]
+            if let Some(interface) = &config.network_interface {
+                builder = builder.interface(interface.clone());
+            }
+            if let Some(resolver) = &config.dns_resolver {
+                builder = builder.dns_resolver(Arc::new(ErasedWreqResolver(resolver.clone())));
+            }
+            if let Some(jar) = &config.cookie_jar {
+                builder = builder.cookie_provider(jar.clone());
+            }
+            if let Some(endpoint) = endpoint {
+                let proxy = wreq::Proxy::all(endpoint)
+                    .map_err(|_| TransportError::InvalidProxy("proxy URL rejected".into()))?;
+                builder = builder.proxy(proxy);
+            }
+            let client = builder
+                .build()
+                .map_err(|error| TransportError::RequestExecutionFailed(error.to_string()))?;
+            clients.push(client);
+        }
+        Ok(Self {
+            policy: config.policy,
+            clients: clients.into(),
+            next_client: AtomicUsize::new(0),
+        })
+    }
+
+    pub async fn execute(
+        &self,
+        request: CrawlerRequest,
+    ) -> Result<crate::CrawlerResponse, crate::CrawlerFailure> {
+        validate_target(&request.url, &self.policy).map_err(|error| {
+            crate::CrawlerFailure::with_source(
+                crate::CrawlerFailureKind::Request,
+                crate::BackendProvenance::Wreq,
+                error,
+            )
+        })?;
+        let index = self.next_client.fetch_add(1, Ordering::Relaxed) % self.clients.len();
+        let mut headers = request.headers;
+        request.secret_headers.apply_to(&mut headers);
+        let mut builder = self.clients[index]
+            .request(request.method, request.url)
+            .headers(headers);
+        if let Some(content_type) = request.content_type {
+            builder = builder.header(http::header::CONTENT_TYPE, content_type);
+        }
+        if let Some(body) = request.body {
+            builder = builder.body(body);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(crate::crawler_outcome::from_wreq_error)?;
+        Ok(crate::crawler_outcome::from_wreq_response(response))
     }
 }
 
@@ -691,12 +928,14 @@ pub fn is_ssrf_redirect(url: &url::Url) -> bool {
 /// `reqwest` client stack is in use, Tor-capable build or not.
 pub(crate) fn ssrf_screened_base_policy(limit: usize) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
-        if is_ssrf_redirect(attempt.url()) {
-            attempt.error("SSRF blocked: redirect to internal address")
-        } else if attempt.previous().len() > limit {
-            attempt.error("too many redirects")
-        } else {
-            attempt.follow()
+        match canonical_redirect_decision(
+            attempt.url(),
+            attempt.previous(),
+            &TransportPolicy::Default,
+            limit,
+        ) {
+            Ok(()) => attempt.follow(),
+            Err(error) => attempt.error(error.to_string()),
         }
     })
 }
@@ -727,37 +966,21 @@ pub(crate) fn pin_redirect_policy(
     policy: TransportPolicy,
 ) -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(move |attempt| {
-        let next_onion = is_onion_url(attempt.url());
-
-        match &policy {
-            TransportPolicy::Default => {
-                if next_onion {
-                    return attempt.error(TransportError::OnionRequiresTor.to_string());
-                }
-                base.redirect(attempt)
-            }
-            TransportPolicy::Tor(_) => {
-                let original = attempt.previous().first().unwrap_or_else(|| attempt.url());
-                let original_onion = is_onion_url(original);
-
-                if original_onion != next_onion {
-                    return attempt.error(
-                        TransportError::RedirectTransportViolation(
-                            "cross onion/clearnet redirect rejected".to_string(),
-                        )
-                        .to_string(),
-                    );
-                }
-                if original_onion && original.host_str() != attempt.url().host_str() {
-                    return attempt.error(
-                        TransportError::RedirectTransportViolation(
-                            "redirect to a different onion service rejected".to_string(),
-                        )
-                        .to_string(),
-                    );
-                }
-                base.redirect(attempt)
-            }
+        if let Err(error) = canonical_redirect_decision(
+            attempt.url(),
+            attempt.previous(),
+            &policy,
+            TOR_REDIRECT_LIMIT,
+        ) {
+            return attempt.error(error.to_string());
+        }
+        // The Default base policy intentionally rejects onion hops. A valid
+        // same-service onion redirect under Tor has already passed the shared
+        // canonical decision and must not be reclassified as Default here.
+        if matches!(policy, TransportPolicy::Tor(_)) && is_onion_url(attempt.url()) {
+            attempt.follow()
+        } else {
+            base.redirect(attempt)
         }
     })
 }

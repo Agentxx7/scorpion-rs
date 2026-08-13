@@ -51,3 +51,11 @@ pub use transport::{execute_request, execute_streaming_request};
 pub use transport::{
     CrawlerRequest, CrawlerTransportConfiguration, ExecutionMode, ResolvedExecutor,
 };
+
+#[cfg(not(feature = "wreq"))]
+pub type CanonicalExecutor = ResolvedExecutor;
+
+#[cfg(feature = "wreq")]
+pub use transport::{ResolvedWreqExecutor, WreqRedirectMode, WreqTransportConfiguration};
+#[cfg(feature = "wreq")]
+pub type CanonicalExecutor = ResolvedWreqExecutor;

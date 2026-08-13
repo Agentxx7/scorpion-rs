@@ -259,6 +259,50 @@ pub fn from_reqwest_response(
     }
 }
 
+#[cfg(feature = "wreq")]
+pub fn from_wreq_error(error: wreq::Error) -> CrawlerFailure {
+    let status = error.status();
+    let kind = if error.is_timeout() {
+        CrawlerFailureKind::Timeout
+    } else if error.is_decode() {
+        CrawlerFailureKind::Decode
+    } else if error.is_body() {
+        CrawlerFailureKind::BodyStream
+    } else if error.is_connect() {
+        CrawlerFailureKind::Connection
+    } else if error.is_request() {
+        CrawlerFailureKind::Request
+    } else if status.is_some() {
+        CrawlerFailureKind::HttpStatus
+    } else {
+        CrawlerFailureKind::Other
+    };
+    let mut failure = CrawlerFailure::with_source(kind, BackendProvenance::Wreq, error);
+    if let Some(status) = status {
+        failure = failure.with_status(status);
+    }
+    failure
+}
+
+#[cfg(feature = "wreq")]
+pub fn from_wreq_response(response: wreq::Response) -> CrawlerResponse {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let final_url = response.url().clone();
+    let body = response
+        .bytes_stream()
+        .map(|item| item.map_err(from_wreq_error));
+    CrawlerResponse {
+        status,
+        headers,
+        final_url,
+        origin: ResponseOrigin::Network,
+        backend: BackendProvenance::Wreq,
+        transport: AcquisitionTransport::Default,
+        body: Box::pin(body),
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;

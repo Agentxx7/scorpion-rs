@@ -4327,10 +4327,9 @@ where
 impl Page {
     /// Canonical request-only acquisition. Raw-client constructors below are
     /// retained solely as the explicit UPSTREAM_COMPATIBILITY_BOUNDARY.
-    #[cfg(not(feature = "wreq"))]
     pub async fn new_page_with_executor(
         url: &str,
-        executor: &spider_transport::ResolvedExecutor,
+        executor: &spider_transport::CanonicalExecutor,
     ) -> Self {
         build(
             url,
@@ -4342,15 +4341,14 @@ impl Page {
     /// execution cannot borrow `compatibility_client`.
     pub async fn new_page_for_mode(
         url: &str,
-        _executor: Option<&spider_transport::ResolvedExecutor>,
+        _executor: Option<&spider_transport::CanonicalExecutor>,
         compatibility_client: &Client,
         cache_options: Option<CacheOptions>,
         cache_policy: &Option<BasicCachePolicy>,
         cache_namespace: Option<&str>,
     ) -> Self {
-        #[cfg(not(feature = "wreq"))]
         if let Some(executor) = _executor {
-            #[cfg(feature = "cache_request")]
+            #[cfg(all(feature = "cache_request", not(feature = "wreq")))]
             return build(
                 url,
                 crate::cache_request::fetch_page_html_with_cache_executor(
@@ -4361,7 +4359,7 @@ impl Page {
                 )
                 .await,
             );
-            #[cfg(not(feature = "cache_request"))]
+            #[cfg(any(not(feature = "cache_request"), feature = "wreq"))]
             return Self::new_page_with_executor(url, executor).await;
         }
         Self::new_page_with_cache(
@@ -4376,7 +4374,6 @@ impl Page {
 
     /// Canonical streaming-crawl entry point. Network execution is delegated
     /// to `ResolvedExecutor`; Spider retains link extraction policy.
-    #[cfg(not(feature = "wreq"))]
     #[allow(clippy::too_many_arguments)]
     pub async fn new_page_streaming_with_executor<
         A: PartialEq
@@ -4390,7 +4387,7 @@ impl Page {
             + for<'a> From<&'a str>,
     >(
         url: &str,
-        executor: &spider_transport::ResolvedExecutor,
+        executor: &spider_transport::CanonicalExecutor,
         only_html: bool,
         selectors: &mut RelativeSelectors,
         external_domains_caseless: &Arc<HashSet<CaseInsensitiveString>>,
@@ -4403,9 +4400,9 @@ impl Page {
         cache_options: Option<CacheOptions>,
         cache_namespace: Option<&str>,
     ) -> Self {
-        #[cfg(not(feature = "cache_request"))]
+        #[cfg(any(not(feature = "cache_request"), feature = "wreq"))]
         let _ = (&cache_options, cache_namespace);
-        #[cfg(feature = "cache_request")]
+        #[cfg(all(feature = "cache_request", not(feature = "wreq")))]
         let mut page = build(
             url,
             crate::cache_request::fetch_page_html_with_cache_executor(
@@ -4416,7 +4413,7 @@ impl Page {
             )
             .await,
         );
-        #[cfg(not(feature = "cache_request"))]
+        #[cfg(any(not(feature = "cache_request"), feature = "wreq"))]
         let mut page = Self::new_page_with_executor(url, executor).await;
         if !external_domains_caseless.is_empty() {
             page.set_external(external_domains_caseless.clone());
@@ -4456,7 +4453,7 @@ impl Page {
             + for<'a> From<&'a str>,
     >(
         url: &str,
-        _executor: Option<&spider_transport::ResolvedExecutor>,
+        _executor: Option<&spider_transport::CanonicalExecutor>,
         compatibility_client: &Client,
         only_html: bool,
         selectors: &mut RelativeSelectors,
@@ -4472,9 +4469,6 @@ impl Page {
         http_first_byte_args: (Option<std::time::Duration>, Option<std::time::Duration>),
         engine: Option<crate::fetch_engine::EngineFetchCtx<'_>>,
     ) -> Self {
-        #[cfg(feature = "wreq")]
-        let _ = (cache_options, cache_namespace);
-        #[cfg(not(feature = "wreq"))]
         if engine.is_none() {
             if let Some(executor) = _executor {
                 return Self::new_page_streaming_with_executor(

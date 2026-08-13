@@ -93,7 +93,8 @@ fn compatibility_tor_cache_and_gemini_boundaries_remain() {
     assert!(website.contains("UPSTREAM_COMPATIBILITY_BOUNDARY"));
     assert!(lib.contains("cache_request + wreq is explicitly rejected"));
     assert!(evidence.contains("requires a build without the wreq feature"));
-    assert!(gemini.contains("CAPABILITY_LOCAL_NONCANONICAL_WREQ"));
+    assert!(gemini.contains("static ref GEMINI_EXECUTOR: CanonicalExecutor"));
+    assert!(!gemini.contains("CAPABILITY_LOCAL_NONCANONICAL_WREQ"));
 }
 
 #[test]

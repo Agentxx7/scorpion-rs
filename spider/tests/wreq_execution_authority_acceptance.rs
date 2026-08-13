@@ -94,9 +94,11 @@ fn canonical_products_do_not_select_wreq() {
 }
 
 #[test]
-fn gemini_is_separately_noncanonical() {
+fn gemini_successor_frontier_uses_canonical_executor() {
     let solvers = read("spider/src/features/solvers.rs");
-    assert!(solvers.contains("CAPABILITY_LOCAL_NONCANONICAL_WREQ"));
+    assert!(solvers.contains("static ref GEMINI_EXECUTOR: CanonicalExecutor"));
+    assert!(!solvers.contains("CAPABILITY_LOCAL_NONCANONICAL_WREQ"));
+    assert!(!solvers.contains("GEMINI_CLIENT"));
 }
 
 #[test]

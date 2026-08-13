@@ -1503,7 +1503,9 @@ fn wreq_execution_authority_is_canonical_and_compatibility_isolated() {
     assert!(evidence.contains("canonical evidence acquisition is unavailable under wreq"));
     assert!(!evidence.contains("wreq::Client"));
     assert!(!cache.contains("wreq::Client"));
-    assert!(solvers.contains("CAPABILITY_LOCAL_NONCANONICAL_WREQ"));
+    assert!(solvers.contains("static ref GEMINI_EXECUTOR: CanonicalExecutor"));
+    assert!(!solvers.contains("GEMINI_CLIENT"));
+    assert!(!solvers.contains("generateContent?key="));
     for manifest in [
         "spider_cli/Cargo.toml",
         "spider_mcp/Cargo.toml",
@@ -1533,5 +1535,42 @@ fn scanner_rejects_synthetic_canonical_wreq_claims() {
     }
     assert!(!wreq_authority_violation(
         "ResolvedWreqExecutor::execute(request).await"
+    ));
+}
+
+fn gemini_solver_transport_violation(source: &str) -> bool {
+    [
+        "GEMINI_CLIENT",
+        "reqwest::ClientBuilder::new()",
+        "wreq::ClientBuilder::new()",
+        "generateContent?key=",
+        ".get(tile.img_src).send()",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn gemini_solver_uses_only_canonical_transport_authority() {
+    let root = workspace_root();
+    let solvers = fs::read_to_string(root.join("spider/src/features/solvers.rs")).unwrap();
+    assert!(solvers.contains("static ref GEMINI_EXECUTOR: CanonicalExecutor"));
+    assert!(solvers.contains("SecretRequestHeaders::new()"));
+    assert!(solvers.contains("CrawlerRequest::get"));
+    assert!(!gemini_solver_transport_violation(&solvers));
+}
+
+#[test]
+fn scanner_rejects_synthetic_raw_gemini_transport() {
+    for fixture in [
+        "static GEMINI_CLIENT: reqwest::Client",
+        "wreq::ClientBuilder::new()",
+        "generateContent?key=secret",
+        ".get(tile.img_src).send()",
+    ] {
+        assert!(gemini_solver_transport_violation(fixture));
+    }
+    assert!(!gemini_solver_transport_violation(
+        "GEMINI_EXECUTOR.execute(request).await"
     ));
 }

@@ -7,12 +7,20 @@ use chromiumoxide::{
     layout::Point,
     Page,
 };
+#[cfg(feature = "chrome")]
 use std::time::Duration;
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
-use crate::utils::{page_wait, perform_smart_mouse_movement, RequestError, CF_WAIT_FOR};
+use crate::utils::{page_wait, perform_smart_mouse_movement, CF_WAIT_FOR};
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use base64::prelude::*;
+#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+use spider_transport::{
+    BackendProvenance, CanonicalExecutor, CrawlerBodyStream, CrawlerFailure, CrawlerFailureKind,
+    CrawlerRequest, SecretRequestHeaders,
+};
+#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+use tokio_stream::StreamExt;
 
 static VERIFY_PATTERNS: &[&[u8]] = &[
     b"verifying you are human",
@@ -132,26 +140,140 @@ lazy_static! {
         .expect("valid tile‑class pattern");
 }
 
-#[cfg(not(feature = "wreq"))]
-lazy_static! {
-    /// Gemini client – plain reqwest client (no middleware).
-    static ref GEMINI_CLIENT: reqwest::Client = {
-        reqwest::ClientBuilder::new()
-            .timeout(Duration::from_millis(20_000))
-            .build()
-            .expect("failed to build Gemini client")
-    };
+#[cfg(all(test, feature = "gemini"))]
+mod gemini_transport_tests {
+    use super::*;
+
+    #[test]
+    fn provider_key_is_secret_header_not_url_material() {
+        const SENTINEL: &str = "solver-secret-sentinel";
+        let request = gemini_post_request(
+            "https://generativelanguage.googleapis.com/v1beta/models/test:generateContent",
+            SENTINEL,
+            b"{}".to_vec(),
+        )
+        .unwrap();
+        assert!(request.url.query().is_none());
+        assert_eq!(request.secret_headers.len(), 1);
+        let debug = format!("{:?}", request.secret_headers);
+        assert!(!debug.contains(SENTINEL));
+    }
+
+    #[test]
+    fn configured_endpoint_cannot_smuggle_key_query_parameter() {
+        let endpoint = format!(
+            "https://generativelanguage.googleapis.com/model?{}=forbidden",
+            "key"
+        );
+        let result = gemini_post_request(&endpoint, "header-secret", b"{}".to_vec());
+        assert!(result.is_err());
+    }
 }
-#[cfg(feature = "wreq")]
+
+#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
 lazy_static! {
-    /// CAPABILITY_LOCAL_NONCANONICAL_WREQ: Gemini's direct alternate client
-    /// is independent of Website execution and claims no canonical authority.
-    static ref GEMINI_CLIENT: wreq::Client = {
-        wreq::ClientBuilder::new()
-            .timeout(Duration::from_millis(20_000))
-            .build()
-            .expect("failed to build Gemini client")
-    };
+    /// One persistent, feature-selected canonical executor for all external
+    /// Gemini solver traffic. Backend clients and session state never leave it.
+    static ref GEMINI_EXECUTOR: CanonicalExecutor = resolve_gemini_executor();
+}
+
+#[cfg(all(
+    not(feature = "wreq"),
+    any(feature = "gemini", all(feature = "chrome", feature = "real_browser"))
+))]
+fn resolve_gemini_executor() -> CanonicalExecutor {
+    let mut config = spider_transport::CrawlerTransportConfiguration::default();
+    config.user_agent = "spider-gemini-solver".into();
+    config.request_timeout = Duration::from_secs(20);
+    CanonicalExecutor::resolve(config).expect("failed to resolve canonical Gemini executor")
+}
+
+#[cfg(all(
+    feature = "wreq",
+    any(feature = "gemini", all(feature = "chrome", feature = "real_browser"))
+))]
+fn resolve_gemini_executor() -> CanonicalExecutor {
+    CanonicalExecutor::resolve(spider_transport::WreqTransportConfiguration {
+        policy: spider_transport::TransportPolicy::Default,
+        user_agent: "spider-gemini-solver".into(),
+        default_headers: reqwest::header::HeaderMap::new(),
+        proxies: Vec::new(),
+        request_timeout: Duration::from_secs(20),
+        connect_timeout: Duration::from_secs(20),
+        read_timeout: Duration::from_secs(20),
+        accept_invalid_certs: false,
+        local_address: None,
+        network_interface: None,
+        dns_resolver: None,
+        cookie_jar: None,
+        emulation: None,
+        redirect_limit: 10,
+        redirect_mode: spider_transport::WreqRedirectMode::Follow,
+    })
+    .expect("failed to resolve canonical Gemini executor")
+}
+
+#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+async fn collect_gemini_body(mut body: CrawlerBodyStream) -> Result<Vec<u8>, CrawlerFailure> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        bytes.extend_from_slice(&chunk?);
+    }
+    Ok(bytes)
+}
+
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn gemini_get_request(endpoint: &str) -> Result<CrawlerRequest, url::ParseError> {
+    Ok(CrawlerRequest::get(url::Url::parse(endpoint)?))
+}
+
+#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+fn gemini_post_request(
+    endpoint: &str,
+    api_key: &str,
+    body: Vec<u8>,
+) -> Result<CrawlerRequest, Box<dyn std::error::Error>> {
+    let url = url::Url::parse(endpoint)?;
+    if url
+        .query_pairs()
+        .any(|(name, _)| name.eq_ignore_ascii_case("key"))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Gemini endpoint must not contain an API key query parameter",
+        )
+        .into());
+    }
+    let mut secret_headers = SecretRequestHeaders::new();
+    secret_headers.try_insert("x-goog-api-key", api_key)?;
+    Ok(CrawlerRequest {
+        url,
+        method: reqwest::Method::POST,
+        headers: reqwest::header::HeaderMap::new(),
+        secret_headers,
+        body: Some(body),
+        content_type: Some("application/json".into()),
+    })
+}
+
+#[cfg(any(feature = "gemini", all(feature = "chrome", feature = "real_browser")))]
+fn gemini_http_status_failure(
+    status: reqwest::StatusCode,
+    backend: BackendProvenance,
+) -> CrawlerFailure {
+    CrawlerFailure::new(CrawlerFailureKind::HttpStatus, backend).with_status(status)
+}
+
+/// Translate a neutral transport failure into the solver's established
+/// skip/retry decision while retaining its structured facts in diagnostics.
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn record_gemini_transport_skip(failure: &CrawlerFailure) {
+    log::debug!(
+        "Gemini solver skipped an operation after canonical transport failure: kind={:?} backend={:?} status={:?}",
+        failure.kind(),
+        failure.backend(),
+        failure.observed_status()
+    );
 }
 
 lazy_static! {
@@ -1120,7 +1242,7 @@ fn is_missing_helper_error(err: &CdpError) -> bool {
 async fn solve_with_external_gemini(
     challenge: &RcEnterpriseChallenge<'_>,
     timeout_ms: u64,
-) -> Result<Vec<u8>, RequestError> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if let Ok(api_key) = std::env::var("GEMINI_API_KEY") {
         // Clamp to the semaphore's total permits: `acquire_many(n)` with `n`
         // greater than the total never resolves (permits are never added), which
@@ -1135,8 +1257,6 @@ async fn solve_with_external_gemini(
             .try_into()
             .unwrap_or(1);
         if let Ok(_sem) = crate::utils::GEMINI_SEM.acquire_many(want).await {
-            let endpoint = format!("{}?key={}", *GEMINI_VISION_ENDPOINT, api_key);
-
             let target = challenge.target.unwrap_or("target object").to_string();
 
             let mut yes_ids = Vec::with_capacity(challenge.tiles.len().min(64));
@@ -1145,9 +1265,28 @@ async fn solve_with_external_gemini(
                 // -------------------------------------------------------------
                 // a) Download the image bytes.
                 // -------------------------------------------------------------
-                let img_bytes = match GEMINI_CLIENT.get(tile.img_src).send().await {
-                    Ok(resp) if resp.status().is_success() => resp.bytes().await?,
-                    _ => continue, // if we cannot fetch the image we just skip it
+                let image_request = match gemini_get_request(tile.img_src) {
+                    Ok(request) => request,
+                    Err(_) => continue,
+                };
+                let image_response = match GEMINI_EXECUTOR.execute(image_request).await {
+                    Ok(response) if response.status.is_success() => response,
+                    Ok(response) => {
+                        let failure = gemini_http_status_failure(response.status, response.backend);
+                        record_gemini_transport_skip(&failure);
+                        continue;
+                    }
+                    Err(failure) => {
+                        record_gemini_transport_skip(&failure);
+                        continue;
+                    }
+                };
+                let img_bytes = match collect_gemini_body(image_response.body).await {
+                    Ok(bytes) => bytes,
+                    Err(failure) => {
+                        record_gemini_transport_skip(&failure);
+                        continue;
+                    }
                 };
 
                 // -------------------------------------------------------------
@@ -1184,22 +1323,29 @@ async fn solve_with_external_gemini(
                 // -------------------------------------------------------------
                 let per_tile_timeout =
                     Duration::from_millis(timeout_ms / (challenge.tiles.len() as u64 + 1));
-                let resp = tokio::time::timeout(
-                    per_tile_timeout,
-                    GEMINI_CLIENT.post(&endpoint).json(&request_body).send(),
-                )
-                .await;
+                let request = gemini_post_request(
+                    &GEMINI_VISION_ENDPOINT,
+                    &api_key,
+                    serde_json::to_vec(&request_body)?,
+                )?;
+                let resp =
+                    tokio::time::timeout(per_tile_timeout, GEMINI_EXECUTOR.execute(request)).await;
 
                 let resp = match resp {
                     Ok(Ok(r)) => r,
-                    // Either the HTTP request timed out or returned an error – skip.
-                    _ => continue,
+                    Ok(Err(failure)) => {
+                        record_gemini_transport_skip(&failure);
+                        continue;
+                    }
+                    // The solver-owned per-operation deadline elapsed.
+                    Err(_) => continue,
                 };
 
                 // -------------------------------------------------------------
                 // d) Parse the Gemini answer.
                 // -------------------------------------------------------------
-                let resp_json: serde_json::Value = resp.json().await?;
+                let resp_json: serde_json::Value =
+                    serde_json::from_slice(&collect_gemini_body(resp.body).await?)?;
                 // The answer text lives in `candidates[0].content.parts[0].text`.
                 let answer_text = resp_json
                     .get("candidates")
@@ -1607,32 +1753,43 @@ pub async fn solve_lemin_with_external_gemini(image_dataurl: &str, timeout_ms: u
      * 5️⃣  Perform the HTTP request, respecting a per‑tile timeout.
      * ----------------------------------------------------------------- */
     let per_tile = Duration::from_millis(timeout_ms / 2);
-    let resp = match tokio::time::timeout(
-        per_tile,
-        GEMINI_CLIENT
-            .post(&*GEMINI_VISION_ENDPOINT)
-            .header("x-goog-api-key", api_key)
-            .json(&request_body)
-            .send(),
-    )
-    .await
+    let request = match serde_json::to_vec(&request_body)
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)
+        .and_then(|body| gemini_post_request(&GEMINI_VISION_ENDPOINT, &api_key, body))
     {
+        Ok(request) => request,
+        Err(_) => return (0.0, 0.0),
+    };
+    let resp = match tokio::time::timeout(per_tile, GEMINI_EXECUTOR.execute(request)).await {
         Ok(Ok(r)) => r,
-        _ => return (0.0, 0.0), // timeout or transport error
+        Ok(Err(failure)) => {
+            record_gemini_transport_skip(&failure);
+            return (0.0, 0.0);
+        }
+        Err(_) => return (0.0, 0.0),
     };
 
     /* ----------------------------------------------------------------- *
      * 6️⃣  Verify we received a 200 OK.
      * ----------------------------------------------------------------- */
-    if !resp.status().is_success() {
+    if !resp.status.is_success() {
+        let failure = gemini_http_status_failure(resp.status, resp.backend);
+        record_gemini_transport_skip(&failure);
         return (0.0, 0.0);
     }
 
     /* ----------------------------------------------------------------- *
      * 7️⃣  Pull the textual answer out of Gemini’s JSON envelope.
      * ----------------------------------------------------------------- */
-    let json: serde_json::Value = match resp.json().await {
-        Ok(j) => j,
+    let body = match collect_gemini_body(resp.body).await {
+        Ok(body) => body,
+        Err(failure) => {
+            record_gemini_transport_skip(&failure);
+            return (0.0, 0.0);
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(json) => json,
         Err(_) => return (0.0, 0.0),
     };
 
@@ -2207,9 +2364,8 @@ mod gemini {
 
     /// Calls Gemini‑Pro‑Vision and returns the x‑coordinate of the gap.
     ///
-    /// The function now returns a plain `Result<f64, Box<dyn std::error::Error>>`,
-    /// which works with the `?` operator for every error type that `reqwest`
-    /// (and `serde_json`) may produce.
+    /// Transport failures remain canonical neutral facts until this domain
+    /// boundary converts them into the solver's public boxed error contract.
     pub async fn solve_with_gemini(
         api_key: &str,
         image_dataurl: &str,
@@ -2228,22 +2384,21 @@ Do NOT return any extra text, JSON keys, or explanations.
             prompt: PROMPT,
         };
 
-        let url = format!(
-            "{}:generateContent?key={}",
-            *GEMINI_VISION_ENDPOINT, api_key
-        );
-
-        // All intermediate errors (`reqwest::Error`, `serde_json::Error`, …)
-        // are automatically converted into `Box<dyn Error>` via the `From`
-        // implementations that the standard library provides.
-        let resp = GEMINI_CLIENT
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<GeminiResponse>()
-            .await?;
+        let endpoint = format!("{}:generateContent", *GEMINI_VISION_ENDPOINT);
+        let request = gemini_post_request(
+            &endpoint,
+            api_key,
+            crate::features::serde_json::to_vec(&payload)?,
+        )?;
+        let response = GEMINI_EXECUTOR.execute(request).await?;
+        if !response.status.is_success() {
+            return Err(Box::new(gemini_http_status_failure(
+                response.status,
+                response.backend,
+            )));
+        }
+        let body = collect_gemini_body(response.body).await?;
+        let resp: GeminiResponse = crate::features::serde_json::from_slice(&body)?;
 
         Ok(resp.x)
     }

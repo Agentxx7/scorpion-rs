@@ -1646,3 +1646,56 @@ fn scanner_rejects_synthetic_captcha_provider_authority_leaks() {
         "solve_captcha(&selected_provider, &request).await"
     ));
 }
+
+fn local_model_contract_violation(source: &str) -> bool {
+    [
+        "impl LocalModelRuntime { reqwest::Client",
+        "impl LocalModelRuntime { wreq::Client",
+        "LocalModelRuntime::download(",
+        "revision: \"latest\"",
+        "unwrap_or(LocalModelDevice::Cpu)",
+        "activate_without_integrity_check",
+        "LocalModelArtifact { sha256: None",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn canonical_local_model_contract_is_transport_and_runtime_neutral() {
+    let root = workspace_root();
+    let model = fs::read_to_string(root.join("spider/src/features/local_model.rs")).unwrap();
+    assert!(model.contains("pub struct LocalModelManifest"));
+    assert!(model.contains("pub struct LocalModelInstallation"));
+    assert!(model.contains("pub struct InstalledModelIdentity"));
+    assert!(model.contains("pub fn activate("));
+    assert!(model.contains("verify_file(staging, artifact)?"));
+    assert!(model.contains("std::fs::rename(staging, active)"));
+    assert!(model.contains("pub fn preflight_device("));
+    assert!(model.contains("pub fn require_qualification("));
+    assert!(!local_model_contract_violation(&model));
+    for forbidden in ["reqwest::", "wreq::", "ClientBuilder", "candle_"] {
+        assert!(!model.contains(forbidden), "local model owns {forbidden}");
+    }
+}
+
+#[test]
+fn scanner_rejects_synthetic_local_model_contract_violations() {
+    for fixture in [
+        "impl LocalModelRuntime { reqwest::Client",
+        "impl LocalModelRuntime { wreq::Client",
+        "LocalModelRuntime::download(model)",
+        "revision: \"latest\"",
+        "device.unwrap_or(LocalModelDevice::Cpu)",
+        "activate_without_integrity_check(staging)",
+        "LocalModelArtifact { sha256: None }",
+    ] {
+        assert!(
+            local_model_contract_violation(fixture),
+            "fixture escaped: {fixture}"
+        );
+    }
+    assert!(!local_model_contract_violation(
+        "manifest.activate(staging, active)?"
+    ));
+}

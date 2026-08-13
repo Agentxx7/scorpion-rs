@@ -86,6 +86,9 @@ pub mod github_source_provider;
 /// Provider-native Hugging Face model discovery through the official Hub API.
 #[cfg(feature = "source_hugging_face")]
 pub mod hugging_face_source_provider;
+/// Provider-neutral immutable local multi-file model installation, identity,
+/// qualification and offline runtime lifecycle contract.
+pub mod local_model;
 /// Google News Sitemap parsing and normalization.
 #[cfg(feature = "news_sitemap")]
 pub mod news_sitemap;

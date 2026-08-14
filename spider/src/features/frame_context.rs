@@ -21,7 +21,7 @@ use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, GetFrameOwnerParams,
 };
 use chromiumoxide::cdp::browser_protocol::network::LoaderId;
-use chromiumoxide::cdp::browser_protocol::page::{FrameId, GetFrameTreeParams};
+use chromiumoxide::cdp::browser_protocol::page::{FrameId, FrameTree, GetFrameTreeParams};
 use chromiumoxide::cdp::browser_protocol::target::{SessionId, TargetId, TargetInfo};
 use chromiumoxide::cdp::js_protocol::runtime::{
     DisableParams as RuntimeDisableParams, EnableParams as RuntimeEnableParams, EvaluateParams,
@@ -125,14 +125,21 @@ fn map_attached_session_error(error: AttachedSessionError) -> FrameContextFailur
     }
 }
 
-/// Whether a resolved [`FrameContext`] denotes the top-level Chromium frame
-/// or a genuine out-of-process (OOPIF) child frame.
+/// Whether a resolved [`FrameContext`] denotes the top-level Chromium frame,
+/// a genuine out-of-process (OOPIF) child frame, or a same-origin child that
+/// shares its parent's exact target and session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameClassification {
     /// The main, top-level frame of a page target.
     TopLevel,
     /// A genuine out-of-process child frame with its own target and session.
     Oopif,
+    /// A child frame that never got its own CDP target at all — confirmed
+    /// live: a genuinely same-origin iframe under `--site-per-process`
+    /// still renders in-process, so no `Target.attachedToTarget` ever fires
+    /// for it. It shares its parent's exact `TargetId`/`SessionId`; only its
+    /// `FrameId`/loader/execution-context/frame-owner identity are its own.
+    SameSessionChild,
 }
 
 /// Authoritative identity of the parent-context element that owns a child
@@ -224,6 +231,92 @@ impl FrameContext {
         target_info: &TargetInfo,
     ) -> Result<Self, FrameContextFailure> {
         Self::resolve(browser, target_info, Some(parent)).await
+    }
+
+    /// Resolve the canonical context for a genuinely same-origin child frame
+    /// that shares `parent`'s exact target and session — confirmed live: a
+    /// same-origin iframe under `--site-per-process` never gets its own
+    /// `Target.attachedToTarget` event at all, so [`FrameContext::resolve_child`]
+    /// cannot represent it (there is no candidate `TargetInfo` to observe).
+    ///
+    /// `frame_id` must be a genuine child frame id the caller observed in
+    /// `parent`'s own local frame tree (e.g. via a fresh `Page.getFrameTree`
+    /// through [`FrameContext::execute`], or `Page.frameAttached`).
+    pub async fn resolve_same_session_child(
+        browser: &Browser,
+        parent: &FrameContext,
+        frame_id: FrameId,
+    ) -> Result<Self, FrameContextFailure> {
+        // A fresh handle to the exact same target chromey already has
+        // attached — not a new attachment, not a second CDP stack; chromey's
+        // own `attached_session` is keyed by TargetId and returns whatever
+        // session it already knows about for it.
+        let session = browser
+            .attached_session(parent.target_id.clone())
+            .await
+            .map_err(map_attached_session_error)?;
+        if session.session_id() != &parent.session_id {
+            return Err(FrameContextFailure::SessionChanged);
+        }
+
+        let (loader_id, backend_node_id) =
+            Self::wait_for_same_session_frame_and_owner(&session, parent, &frame_id).await?;
+        let frame_owner = FrameOwnerIdentity {
+            backend_node_id,
+            owner_target_id: parent.target_id.clone(),
+            owner_session_id: parent.session_id.clone(),
+        };
+
+        let (execution_context_id, execution_context_unique_id) =
+            resolve_default_execution_context(&session, &frame_id).await?;
+
+        Ok(Self {
+            frame_id,
+            target_id: session.target_id().clone(),
+            session_id: session.session_id().clone(),
+            execution_context_id,
+            loader_id,
+            parent_frame_id: Some(parent.frame_id.clone()),
+            frame_owner: Some(frame_owner),
+            classification: FrameClassification::SameSessionChild,
+            execution_context_unique_id,
+            session,
+        })
+    }
+
+    /// Poll the shared session's own local frame tree (searched recursively
+    /// for `frame_id`, since it is a descendant rather than the tree root)
+    /// together with `parent`'s `DOM.getFrameOwner(frame_id)`, for a bounded
+    /// window. Mirrors [`FrameContext::wait_for_frame_and_owner`]'s
+    /// same-transient-placeholder reasoning for the OOPIF case.
+    async fn wait_for_same_session_frame_and_owner(
+        session: &AttachedTargetSession,
+        parent: &FrameContext,
+        frame_id: &FrameId,
+    ) -> Result<(LoaderId, BackendNodeId), FrameContextFailure> {
+        let deadline = tokio::time::Instant::now() + FRAME_OWNER_DISCOVERY_TIMEOUT;
+        loop {
+            let tree = with_session_timeout(session.execute(GetFrameTreeParams::default()))
+                .await?
+                .result
+                .frame_tree;
+            let loader_id = find_loader_id_in_tree(&tree, frame_id).cloned();
+            let owner = with_session_timeout(
+                parent
+                    .session
+                    .execute(GetFrameOwnerParams::new(frame_id.clone())),
+            )
+            .await;
+            match (loader_id, owner) {
+                (Some(loader_id), Ok(response)) => {
+                    return Ok((loader_id, response.result.backend_node_id))
+                }
+                _ if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(FRAME_OWNER_DISCOVERY_INTERVAL).await;
+                }
+                _ => return Err(FrameContextFailure::FrameTargetAssociationUnavailable),
+            }
+        }
     }
 
     async fn resolve(
@@ -354,14 +447,24 @@ impl FrameContext {
             .await?
             .result
             .frame_tree;
-        if tree.frame.id != self.frame_id {
-            return Err(FrameContextFailure::FrameNavigated);
-        }
-        if tree.frame.loader_id != self.loader_id {
+        // For a same-session child, `self.frame_id` is a descendant of this
+        // session's own root frame, not the root itself — search for it
+        // rather than comparing the root directly.
+        let current_loader_id = if self.classification == FrameClassification::SameSessionChild {
+            find_loader_id_in_tree(&tree, &self.frame_id)
+                .cloned()
+                .ok_or(FrameContextFailure::FrameDetached)?
+        } else {
+            if tree.frame.id != self.frame_id {
+                return Err(FrameContextFailure::FrameNavigated);
+            }
+            tree.frame.loader_id
+        };
+        if current_loader_id != self.loader_id {
             return Err(FrameContextFailure::FrameNavigated);
         }
 
-        if self.classification == FrameClassification::Oopif {
+        if self.classification != FrameClassification::TopLevel {
             let owner = self
                 .frame_owner
                 .as_ref()
@@ -468,6 +571,20 @@ pub fn select_unique_child_target(
         return Err(FrameContextFailure::FrameTargetAssociationAmbiguous);
     }
     Ok(first.target_id.clone())
+}
+
+/// Search a frame tree (depth-first) for `frame_id`, returning its exact
+/// loader id. Used only for the same-session-child case, where the target
+/// frame is a descendant of the session's own root frame rather than the
+/// root itself.
+fn find_loader_id_in_tree<'a>(tree: &'a FrameTree, frame_id: &FrameId) -> Option<&'a LoaderId> {
+    if &tree.frame.id == frame_id {
+        return Some(&tree.frame.loader_id);
+    }
+    tree.child_frames
+        .iter()
+        .flatten()
+        .find_map(|child| find_loader_id_in_tree(child, frame_id))
 }
 
 /// Resolve the exact authoritative default execution context for `frame_id`

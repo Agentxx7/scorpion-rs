@@ -2179,3 +2179,125 @@ fn captcha_and_browser_challenge_cannot_reconstruct_frame_identity() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// FRAME-AWARE BROWSER CHALLENGE SNAPSHOT/ACTION SEAM
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_BROWSER_FRAME_CONTEXT_SNAPSHOT_AND_ACTION_001
+//
+// Composes the existing canonical browser-challenge snapshot/action
+// primitive with the existing canonical FrameContext identity seam — never
+// a second snapshot/action stack, never a second frame-identity
+// reconstruction, never a CAPTCHA/provider path that reaches a browser or
+// frame handle directly.
+
+#[test]
+fn frame_aware_browser_challenge_seam_composes_canonical_frame_context() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/browser_challenge.rs"))
+            .unwrap();
+    assert!(source.contains("pub async fn capture_in_frame"));
+    assert!(source.contains("pub async fn revalidate_in_frame"));
+    assert!(source.contains("pub async fn apply_in_frame"));
+    assert!(source.contains("use crate::features::frame_context::"));
+    assert!(source.contains("FrameContext"));
+    assert!(source.contains("BrowserChallengeFailure::FrameDetached"));
+    assert!(source.contains("BrowserChallengeFailure::FrameNavigated"));
+    assert!(source.contains("BrowserChallengeFailure::TargetReplaced"));
+    assert!(source.contains("BrowserChallengeFailure::SessionChanged"));
+    assert!(source.contains("BrowserChallengeFailure::ExecutionContextChanged"));
+    assert!(source.contains("BrowserChallengeFailure::FrameOwnerChanged"));
+    assert!(source.contains("BrowserChallengeFailure::FrameGeometryUnavailable"));
+    assert!(source.contains("BrowserChallengeFailure::FrameTransformAmbiguous"));
+    assert!(!browser_challenge_authority_violation(&source));
+}
+
+#[test]
+fn frame_aware_browser_challenge_actions_are_the_only_frame_aware_action_stack() {
+    // The frontier's core "never a second snapshot/action stack" guarantee:
+    // these three entry points may only be defined where the canonical
+    // browser-challenge primitive already lives.
+    assert_pattern_only_in_files(
+        "pub async fn capture_in_frame",
+        &["features/browser_challenge.rs"],
+        "capture_in_frame must only be defined in the canonical browser-challenge module",
+    );
+    assert_pattern_only_in_files(
+        "pub async fn revalidate_in_frame",
+        &["features/browser_challenge.rs"],
+        "revalidate_in_frame must only be defined in the canonical browser-challenge module",
+    );
+    assert_pattern_only_in_files(
+        "pub async fn apply_in_frame",
+        &["features/browser_challenge.rs"],
+        "apply_in_frame must only be defined in the canonical browser-challenge module",
+    );
+}
+
+#[test]
+fn captcha_layers_cannot_own_frame_transforms_or_reach_browser_frame_handles() {
+    // Scoped to the canonical CaptchaProvider seam only (`captcha.rs`'s
+    // trait/request/outcome vocabulary, its corpus, and the local Qwen
+    // provider): `solvers.rs` is the separate, pre-existing legacy solving
+    // pipeline (out of scope for this frontier — see
+    // SCORPION_CANONICAL_BROWSER_FRAME_CONTEXT_SNAPSHOT_AND_ACTION_001's
+    // OUT OF SCOPE list) that already holds a direct `Page` reference for
+    // its own, unrelated token-injection flow; this guardrail only proves
+    // the *canonical provider* contract stays image-in/outcome-out.
+    let root = workspace_root();
+    for relative in [
+        "spider/src/features/captcha.rs",
+        "spider/src/features/captcha",
+        "spider/src/features/captcha_evaluation_corpus.rs",
+        "spider/src/features/qwen3_vl_captcha.rs",
+    ] {
+        let path = root.join(relative);
+        let mut files = Vec::new();
+        if path.is_file() {
+            let contents = fs::read_to_string(&path).unwrap();
+            files.push(SourceFile {
+                relative_path: relative.to_string(),
+                contents,
+            });
+        } else if path.is_dir() {
+            collect_rust_files(&path, &path, &mut files);
+        }
+        for file in files {
+            for forbidden in [
+                // No provider/CAPTCHA code may hold a browser or frame
+                // handle directly.
+                "chromiumoxide::Page",
+                "chromiumoxide::browser::Browser",
+                "frame_context::FrameContext",
+                // No provider/CAPTCHA code may reimplement the frame-owner
+                // transform composition the browser-challenge seam owns.
+                "FrameOwnerOffset",
+                "resolve_frame_owner_offset",
+                "capture_in_frame",
+                "apply_in_frame",
+            ] {
+                assert!(
+                    !file.contents.contains(forbidden),
+                    "{relative}/{} must not own frame transforms or reach a browser/frame handle via {forbidden:?}; CAPTCHA reasoning stays image-in/outcome-out",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scanner_rejects_synthetic_frame_aware_browser_challenge_bypasses() {
+    for fixture in [
+        "page.find_element(selector).await?.click_in_frame(point).await?",
+        "document.query_selector(selector)",
+        "x.clamp(0.0, frame_width)",
+        "nearest_element(point)",
+        "fallback_click(target)",
+        "retry_action(action)",
+        "let _ = page.click(point).await",
+        "provider.solve(CaptchaSolveRequest::new(challenge))",
+    ] {
+        assert!(browser_challenge_authority_violation(fixture));
+    }
+}

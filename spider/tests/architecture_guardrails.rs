@@ -1976,6 +1976,41 @@ fn canonical_browser_challenge_seam_owns_only_snapshot_and_exact_action() {
 }
 
 #[test]
+fn vendored_chromey_exposes_one_session_routed_oopif_handle() {
+    let root = workspace_root();
+    let browser = fs::read_to_string(root.join("vendor/chromey/src/browser.rs")).unwrap();
+    let handler = fs::read_to_string(root.join("vendor/chromey/src/handler/mod.rs")).unwrap();
+    let target = fs::read_to_string(root.join("vendor/chromey/src/handler/target.rs")).unwrap();
+
+    assert!(browser.contains("pub struct AttachedTargetSession"));
+    assert!(browser.contains("pub async fn attached_session"));
+    assert!(browser.contains("CommandMessage::with_session"));
+    assert!(handler.contains("AttachedSessionState"));
+    assert!(target.contains("TargetEvent::AttachedToTarget"));
+    assert!(!browser.contains("WebSocketStream"));
+    assert!(!browser.contains("selector"));
+}
+
+#[test]
+fn captcha_layers_do_not_own_chromium_target_session_lifecycle() {
+    let root = workspace_root();
+    for relative in [
+        "spider/src/features/captcha.rs",
+        "spider/src/features/captcha",
+        "spider/src/features/solvers.rs",
+        "spider/src/features/solvers",
+    ] {
+        let path = root.join(relative);
+        if path.is_file() {
+            let source = fs::read_to_string(path).unwrap();
+            assert!(!source.contains("AttachedTargetSession"));
+            assert!(!source.contains("attached_session("));
+            assert!(!source.contains("Target.attachedToTarget"));
+        }
+    }
+}
+
+#[test]
 fn scanner_rejects_synthetic_browser_challenge_identity_and_action_bypasses() {
     for fixture in [
         "page.find_element(selector).await?.click().await?",

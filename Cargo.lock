@@ -1891,8 +1891,6 @@ dependencies = [
 [[package]]
 name = "chromey"
 version = "2.54.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6772c5d361271f52cdf86cfb67b3473650a746d076cbe4a9dc44cc04880c12a3"
 dependencies = [
  "adblock",
  "aho-corasick",

@@ -41,7 +41,7 @@ fn canonical_cache_graph_has_one_network_executor() {
 fn canonical_website_remains_executor_based_with_cache_request() {
     let website = read("spider/src/website.rs");
     let page = read("spider/src/page.rs");
-    assert!(website.contains("resolved_executor: Option<Arc<ResolvedExecutor>>"));
+    assert!(website.contains("resolved_executor: Option<Arc<CanonicalExecutor>>"));
     for forbidden in [
         "reqwest_middleware",
         "ClientWithMiddleware",

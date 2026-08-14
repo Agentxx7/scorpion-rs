@@ -39,7 +39,7 @@ fn collect_rust_files(dir: &Path, base: &Path, out: &mut Vec<SourceFile>) {
         let path = entry.path();
         if path.is_dir() {
             collect_rust_files(&path, base, out);
-        } else if path.extension().map_or(false, |ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
             let contents = fs::read_to_string(&path).expect("failed to read source file");
             let relative_path = path
                 .strip_prefix(base)
@@ -2025,5 +2025,157 @@ fn scanner_rejects_synthetic_browser_challenge_identity_and_action_bypasses() {
         "provider.solve(CaptchaSolveRequest::new(challenge))",
     ] {
         assert!(browser_challenge_authority_violation(fixture));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CANONICAL FRAME-CONTEXT IDENTITY SEAM
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_CHROMIUM_OOPIF_TARGET_SESSION_AND_FRAME_CONTEXT_001
+//
+// FrameId -> TargetId -> SessionId -> ExecutionContextId -> frame DOM
+// identity -> frame owner -> lifecycle -> revalidation.
+
+#[test]
+fn canonical_frame_context_module_exists() {
+    assert_feature_module_declared("frame_context");
+}
+
+#[test]
+fn frame_context_struct_and_failure_enum_are_unique() {
+    assert_pattern_only_in_files(
+        "pub struct FrameContext {",
+        &["features/frame_context.rs"],
+        "FrameContext must only be defined in the canonical frame_context module",
+    );
+    assert_pattern_only_in_files(
+        "pub enum FrameContextFailure",
+        &["features/frame_context.rs"],
+        "FrameContextFailure must only be defined in the canonical frame_context module",
+    );
+}
+
+#[test]
+fn canonical_frame_context_seam_owns_identity_chain_and_revalidation() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/frame_context.rs")).unwrap();
+    assert!(source.contains("pub struct FrameContext"));
+    assert!(source.contains("pub async fn resolve_top_level"));
+    assert!(source.contains("pub async fn resolve_child"));
+    assert!(source.contains("pub async fn revalidate"));
+    assert!(source.contains("pub async fn resolve_dom_identity"));
+    assert!(source.contains("pub async fn revalidate_dom_identity"));
+    assert!(source.contains("GetFrameOwnerParams"));
+    assert!(source.contains("FrameContextFailure::FrameTargetAssociationAmbiguous"));
+    assert!(source.contains("FrameContextFailure::FrameOwnerChanged"));
+    assert!(source.contains("FrameContextFailure::ExecutionContextChanged"));
+}
+
+#[test]
+fn only_frame_context_calls_raw_attached_session_api() {
+    // This is the frontier's core seam guarantee: chromey owns raw
+    // TargetId<->SessionId attachment; this module owns turning that into
+    // canonical frame identity. Nothing else in the crate may reach past it.
+    assert_pattern_only_in_files(
+        "browser.attached_session(",
+        &["features/frame_context.rs"],
+        "raw chromey Browser::attached_session must only be called from the canonical frame-context seam",
+    );
+    assert_pattern_only_in_files(
+        "AttachedTargetSession",
+        &["features/frame_context.rs"],
+        "the raw chromey attached-session handle must not be named or stored outside the canonical frame-context seam",
+    );
+}
+
+#[test]
+fn frame_context_has_no_second_cdp_transport_stack() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/frame_context.rs")).unwrap();
+    for forbidden in [
+        "WebSocketStream",
+        "tokio_tungstenite",
+        "Connection::connect",
+        "Browser::launch",
+        "Browser::connect",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "frame_context.rs must not implement or open a second CDP transport stack: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn frame_context_never_resolves_identity_by_selector() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/frame_context.rs")).unwrap();
+    for forbidden in ["QuerySelectorParams", "find_element("] {
+        assert!(
+            !source.contains(forbidden),
+            "frame_context.rs must never resolve canonical identity via a selector: found {forbidden:?}"
+        );
+    }
+    assert!(source.contains("nothing is inferred from a selector"));
+}
+
+#[test]
+fn frame_context_owns_no_captcha_or_provider_vocabulary() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/frame_context.rs")).unwrap();
+    for forbidden in [
+        "CaptchaSolveRequest",
+        "provider.solve(",
+        "Turnstile",
+        "SpiderCloudMode",
+        "Qwen3",
+        "GeminiConfig",
+        "GPTConfigs",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "frame_context.rs must not own CAPTCHA/provider vocabulary: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn captcha_and_browser_challenge_cannot_reconstruct_frame_identity() {
+    let root = workspace_root();
+    for relative in [
+        "spider/src/features/captcha.rs",
+        "spider/src/features/captcha",
+        "spider/src/features/captcha_evaluation_corpus.rs",
+        "spider/src/features/solvers.rs",
+        "spider/src/features/solvers",
+        "spider/src/features/browser_challenge.rs",
+        "spider/src/features/qwen3_vl_captcha.rs",
+    ] {
+        let path = root.join(relative);
+        let mut files = Vec::new();
+        if path.is_file() {
+            let contents = fs::read_to_string(&path).unwrap();
+            files.push(SourceFile {
+                relative_path: relative.to_string(),
+                contents,
+            });
+        } else if path.is_dir() {
+            collect_rust_files(&path, &path, &mut files);
+        }
+        for file in files {
+            for forbidden in [
+                "AttachedTargetSession",
+                "attached_session(",
+                "GetFrameOwnerParams",
+                "GetFrameTreeParams",
+                "Target.attachedToTarget",
+            ] {
+                assert!(
+                    !file.contents.contains(forbidden),
+                    "{relative}/{} must not reconstruct frame identity via {forbidden:?}; it must consume the canonical FrameContext seam instead",
+                    file.relative_path
+                );
+            }
+        }
     }
 }

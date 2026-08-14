@@ -288,7 +288,7 @@ async fn crawl_with_retry_budget_chrome(url: &str) -> (Website, Vec<Page>, Durat
 async fn fetch_page_direct_terminal(url: &str) -> Page {
     let mut website = Website::new(url);
     website.with_request_timeout(Some(Duration::from_secs(10)));
-    let (client, _handle) = website.setup().await;
+    let client = website.configure_http_client();
     Page::new_page(url, &client).await
 }
 

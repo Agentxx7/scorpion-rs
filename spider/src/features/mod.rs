@@ -47,6 +47,10 @@ pub mod captcha;
 /// Provider-neutral governance contract for acquiring, independently
 /// annotating, splitting and immutably freezing CAPTCHA evaluation corpora.
 pub mod captcha_evaluation_corpus;
+/// Canonical Chromium frame-context identity seam: `FrameId -> TargetId ->
+/// SessionId -> ExecutionContextId -> frame DOM identity -> frame owner`.
+#[cfg(feature = "chrome")]
+pub mod frame_context;
 
 /// Solve all.
 pub mod solvers;

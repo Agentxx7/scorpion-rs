@@ -62,7 +62,7 @@ fn neutral_response_and_failure_seam_is_consumed() {
         "CrawlerFailure",
         "CrawlerFailureKind::HttpStatus",
         "response.backend",
-        "collect_gemini_body",
+        "collect_captcha_body",
         "CaptchaSolveFailure::Transport",
     ] {
         assert!(

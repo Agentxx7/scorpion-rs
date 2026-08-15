@@ -123,12 +123,23 @@ impl Model {
 
     pub fn setup(&mut self, pixel_values: &Tensor, input_ids: &Tensor) -> Result<Tensor> {
         self.clear_kv_cache();
+        // The reference `PaliGemmaModel.get_image_features` (HF
+        // `modeling_paligemma.py`) uses the projector's raw output directly
+        // via `masked_scatter` — no L2 normalization step exists anywhere
+        // in the real architecture. The projector is a bare `nn.Linear`
+        // with no normalizing activation, so an unconditional
+        // `div_l2_norm` here silently rescaled every image embedding to
+        // unit length before it ever reached the language model, which is
+        // not what the pinned weights were trained to expect.
         let image_features = self
             .vision_tower
             .forward(pixel_values)?
             .apply(&self.multi_modal_projector)?;
-        let image_features = crate::models::clip::div_l2_norm(&image_features)?;
-        let text_features = self.language_model.embed_tokens().forward(input_ids)?;
+        // Text embeddings alone carry the reference `GemmaTextScaledWordEmbedding`
+        // scale, applied before merging with genuinely-unscaled image
+        // features — see `gemma::Model::embed_scale`'s doc comment.
+        let text_features = (self.language_model.embed_tokens().forward(input_ids)?
+            * self.language_model.embed_scale())?;
         let input_embeds = Tensor::cat(&[image_features, text_features], 1)?;
         self.pos = input_embeds.dim(1)?;
         self.language_model.forward_embeds(&input_embeds, None, 0)
@@ -143,7 +154,10 @@ impl Model {
 
     pub fn forward_without_projection(&mut self, input_ids: &Tensor) -> Result<Tensor> {
         self.clear_kv_cache();
-        let input_embeds = self.language_model.embed_tokens().forward(input_ids)?;
+        // 100% text here, so the whole tensor carries the embedding scale
+        // (see `setup`'s identical fix and its doc comment above).
+        let input_embeds = (self.language_model.embed_tokens().forward(input_ids)?
+            * self.language_model.embed_scale())?;
         self.language_model
             .forward_embeds_without_projection(&input_embeds, None, 0)
     }
@@ -153,12 +167,13 @@ impl Model {
         input_ids: &Tensor,
     ) -> Result<Tensor> {
         self.clear_kv_cache();
+        // See `setup`'s identical fix and doc comment above.
         let image_features = self
             .vision_tower
             .forward(pixel_values)?
             .apply(&self.multi_modal_projector)?;
-        let image_features = crate::models::clip::div_l2_norm(&image_features)?;
-        let text_features = self.language_model.embed_tokens().forward(input_ids)?;
+        let text_features = (self.language_model.embed_tokens().forward(input_ids)?
+            * self.language_model.embed_scale())?;
         let input_embeds = Tensor::cat(&[image_features, text_features], 1)?;
         self.language_model
             .forward_embeds_without_projection(&input_embeds, None, 0)

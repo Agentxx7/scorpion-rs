@@ -108,6 +108,19 @@ pub mod news_sitemap;
 /// URL classification, not Tor networking.
 pub mod onion_seed;
 /// Canonical provider adapter for executable, empirically unqualified local
+/// PaliGemma CAPTCHA requests — a genuinely different model family from
+/// Qwen3-VL (SigLIP + Gemma), sharing the same canonical CAPTCHA contract.
+#[cfg(feature = "local_paligemma")]
+pub mod paligemma_captcha;
+/// Request-isolated generation sessions for the native Candle PaliGemma
+/// runtime, mirroring `qwen3_vl_generation`'s own design.
+#[cfg(feature = "local_paligemma")]
+pub mod paligemma_generation;
+/// Offline CPU/F32 production runtime for the pinned PaliGemma-3b-mix-224
+/// model.
+#[cfg(feature = "local_paligemma")]
+pub mod paligemma_runtime;
+/// Canonical provider adapter for executable, empirically unqualified local
 /// Qwen3-VL CAPTCHA requests.
 #[cfg(feature = "local_qwen3_vl")]
 pub mod qwen3_vl_captcha;

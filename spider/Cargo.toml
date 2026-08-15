@@ -318,6 +318,20 @@ local_qwen3_vl = [
     "dep:tempfile",
     "tokio/sync",
 ]
+# Canonical local PaliGemma CAPTCHA provider — a genuinely different model
+# family (SigLIP + Gemma) from local_qwen3_vl, independently enableable.
+local_paligemma = [
+    "dep:candle",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:image",
+    "dep:tokenizers",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sysinfo",
+    "dep:tempfile",
+    "tokio/sync",
+]
 # Enables TransportPolicy::Tor (fail-closed SOCKS5h). Distinct from the
 # legacy `socks` feature, which only affects the unrelated multi-proxy
 # rotation list (`configuration.proxies`) and carries no Tor-specific

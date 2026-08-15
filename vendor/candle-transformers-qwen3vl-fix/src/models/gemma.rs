@@ -416,7 +416,34 @@ impl Model {
         seqlen_offset: usize,
     ) -> Result<Tensor> {
         let (_, seq_len, _) = xs.dims3()?;
-        let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
+        // Deliberately no causal mask is built here when the caller passes
+        // `None`: PaliGemma's own real architecture (`modeling_paligemma.py`
+        // — "Can attend bidirectionally in prefix and only causally in
+        // suffix") gives the *entire* image+prompt prefill full bidirectional
+        // attention, driven by `token_type_ids`/`block_sequence_ids`, not a
+        // plain decoder-only causal mask; only tokens generated *after* this
+        // prefill (this struct's own `forward`, below, used for each
+        // incremental decode step) are causal. An earlier attempt to build a
+        // causal mask here unconditionally (reasoning by false analogy from
+        // an unrelated, genuinely-causal-decoder-only model) was itself a
+        // regression, confirmed empirically: real per-layer hidden-state
+        // statistics only matched the reference exactly with bidirectional
+        // prefill attention restored, and diverged (compounding to a ~2x
+        // final-layer difference) under an incorrectly-applied causal mask.
+        // No embedding scale here either: the reference `GemmaModel.forward`
+        // only multiplies by `sqrt(hidden_size)` inside its own
+        // `embed_tokens` call, which happens exclusively when it computes
+        // embeddings itself from `input_ids` (mirrored by this struct's own
+        // `forward`, below). When a caller instead supplies pre-composed
+        // `inputs_embeds` directly (PaliGemma's real
+        // `GemmaModel.forward(inputs_embeds=...)` call, after its own
+        // `GemmaTextScaledWordEmbedding` has already scaled the text portion
+        // and merged it with genuinely-unscaled vision-tower image features
+        // via `masked_scatter`), the reference applies no further scaling at
+        // all — the caller is responsible for scaling exactly the spans that
+        // are genuinely fresh text embeddings, matching where the
+        // reference's own scale factor actually lives.
+        let mut xs = xs.clone();
         for layer in self.layers.iter_mut() {
             xs = layer.forward(&xs, attn_mask, seqlen_offset)?
         }
@@ -432,12 +459,22 @@ impl Model {
         attn_mask: Option<&Tensor>,
         seqlen_offset: usize,
     ) -> Result<Tensor> {
-        let (_, _, _) = xs.dims3()?;
-        let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
+        // See `forward_embeds`'s identical doc comment above.
+        let mut xs = xs.clone();
         for layer in self.layers.iter_mut() {
             xs = layer.forward(&xs, attn_mask, seqlen_offset)?
         }
         Ok(xs)
+    }
+
+    /// The reference `GemmaTextScaledWordEmbedding`'s embedding scale
+    /// (`sqrt(hidden_size)`), exposed so a multimodal caller composing its
+    /// own `inputs_embeds` (e.g. PaliGemma) can apply it to exactly the
+    /// text-embedding span before merging with unscaled vision features and
+    /// calling `forward_embeds`/`forward_embeds_without_projection`, which
+    /// apply no scaling of their own.
+    pub fn embed_scale(&self) -> f64 {
+        (self.hidden_size as f64).sqrt()
     }
 
     pub fn clear_kv_cache(&mut self) {

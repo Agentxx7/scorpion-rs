@@ -351,6 +351,10 @@ impl CaptchaProviderId {
     pub const OPENAI_VISION: Self = Self("openai-vision");
     /// Embedded Qwen3-VL runtime using the canonical local-model contract.
     pub const QWEN3_VL_LOCAL: Self = Self("qwen3-vl-local");
+    /// Embedded PaliGemma runtime using the canonical local-model contract —
+    /// a genuinely different model family (SigLIP + Gemma), not a Qwen3-VL
+    /// checkpoint variant.
+    pub const PALIGEMMA_LOCAL: Self = Self("paligemma-local");
 
     /// Return the stable provider label.
     pub const fn as_str(self) -> &'static str {

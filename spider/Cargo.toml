@@ -48,6 +48,16 @@ sha2 = "0.10"
 candle = { package = "candle-core", version = "0.11.0", optional = true }
 candle-nn = { version = "0.11.0", optional = true }
 candle-transformers = { version = "0.11.0", optional = true }
+# Pinned to the exact version candle-core 0.11.0 itself depends on for its
+# own `cuda` feature. Used directly, only under `local_paligemma_cuda`, for
+# a real `cuMemGetInfo` free-VRAM preflight query that candle-core does not
+# expose on `Device`/`CudaDevice` itself.
+cudarc = { version = "=0.19.8", optional = true, default-features = false, features = [
+    "std",
+    "driver",
+    "cuda-version-from-build-system",
+    "dynamic-linking",
+] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 tokenizers = { version = "0.22.2", default-features = false, features = ["onig"], optional = true }
 infer = { version = "0.22", default-features = false, features = ["alloc"], optional = true }
@@ -331,6 +341,20 @@ local_paligemma = [
     "dep:sysinfo",
     "dep:tempfile",
     "tokio/sync",
+]
+# Accelerated (CUDA/F16) execution for the same pinned paligemma-local
+# CAPTCHA runtime — SCORPION_PALIGEMMA_LOCAL_INFERENCE_LATENCY_QUALIFICATION_001.
+# Additive to `local_paligemma`: the CPU/F32 path is unchanged and
+# unaffected. Requires a real CUDA toolchain (nvcc) to build; there is no
+# silent CPU fallback baked into this feature, only an explicit, separate
+# accelerated initializer that fails closed at runtime when CUDA/VRAM is
+# unavailable.
+local_paligemma_cuda = [
+    "local_paligemma",
+    "candle/cuda",
+    "candle-nn/cuda",
+    "candle-transformers/cuda",
+    "dep:cudarc",
 ]
 # Enables TransportPolicy::Tor (fail-closed SOCKS5h). Distinct from the
 # legacy `socks` feature, which only affects the unrelated multi-proxy

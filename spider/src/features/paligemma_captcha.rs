@@ -24,12 +24,11 @@ use crate::features::captcha::{
 use crate::features::local_model::LocalModelInstallation;
 use crate::features::paligemma_runtime::{
     PaligemmaCpuRuntime, PaligemmaDetectionBox, PaligemmaRuntimeFailure,
-    PaligemmaStringIdArraySchema, PALIGEMMA_MODEL_REVISION, PALIGEMMA_PROCESSOR_ID,
+    PaligemmaStringIdArraySchema, PALIGEMMA_MODEL_REVISION,
 };
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-const RUNTIME_IDENTITY: &str = "candle-0.11.0-cpu-f32";
 const DETECT_GRAMMAR: &str = "paligemma-captcha-detect-loc4-v1";
 const IMAGE_GRID_GRAMMAR: &str = "paligemma-captcha-image-grid-json-v1";
 /// This provider's own documented convention for `HorizontalOffset`: the
@@ -80,6 +79,22 @@ impl PaligemmaLocalCaptchaProvider {
         })
     }
 
+    /// Initialize the accelerated CUDA/F16 backend using current available
+    /// host RAM and current free device VRAM. Same provider
+    /// (`CaptchaProviderId::PALIGEMMA_LOCAL`), same pinned model/revision,
+    /// same processor pipeline, same `CaptchaSolveOutcome` semantics — only
+    /// the executing device/dtype differs, and provenance reports it
+    /// truthfully. No CPU fallback: see
+    /// `PaligemmaCpuRuntime::initialize_cuda_f16_from_host`.
+    #[cfg(feature = "local_paligemma_cuda")]
+    pub fn initialize_cuda_f16_from_host(
+        installation: &LocalModelInstallation,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
+        Ok(Self {
+            runtime: PaligemmaCpuRuntime::initialize_cuda_f16_from_host(installation)?,
+        })
+    }
+
     /// Consume the provider and release runtime-owned model resources.
     pub fn unload(self) {
         self.runtime.unload();
@@ -108,11 +123,15 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
 
     async fn solve(&self, request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
         let started = Instant::now();
+        let runtime_identity = self.runtime.runtime_identity();
+        let processor_identity = self.runtime.processor_identity();
         if request.challenge.visuals.len() != 1 {
             return failed(
                 request,
                 CaptchaSolveFailure::InvalidChallenge,
                 started.elapsed(),
+                runtime_identity,
+                processor_identity,
             );
         }
         let visual = &request.challenge.visuals[0];
@@ -121,6 +140,8 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                 request,
                 CaptchaSolveFailure::InvalidChallenge,
                 started.elapsed(),
+                runtime_identity,
+                processor_identity,
             );
         };
         let metadata = match self.runtime.image_metadata(bytes) {
@@ -130,6 +151,8 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                     request,
                     CaptchaSolveFailure::InvalidChallenge,
                     started.elapsed(),
+                    runtime_identity,
+                    processor_identity,
                 )
             }
         };
@@ -150,11 +173,25 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                 request,
                 CaptchaSolveFailure::DeadlineExceeded,
                 started.elapsed(),
+                runtime_identity,
+                processor_identity,
             ),
-            Ok(Err(failure)) => failed(request, failure, started.elapsed()),
+            Ok(Err(failure)) => failed(
+                request,
+                failure,
+                started.elapsed(),
+                runtime_identity,
+                processor_identity,
+            ),
             Ok(Ok((solution, elapsed))) => CaptchaSolveOutcome::Solved {
                 solution,
-                provenance: provenance(request, elapsed, true),
+                provenance: provenance(
+                    request,
+                    elapsed,
+                    true,
+                    runtime_identity,
+                    processor_identity,
+                ),
             },
         }
     }
@@ -310,13 +347,15 @@ fn provenance(
     request: &CaptchaSolveRequest,
     elapsed: Duration,
     succeeded: bool,
+    runtime_identity: &'static str,
+    processor_identity: &'static str,
 ) -> CaptchaSolveProvenance {
     CaptchaSolveProvenance::local_runtime(
         CaptchaProviderId::PALIGEMMA_LOCAL,
         CaptchaLocalRuntimeProvenance {
             model_revision: PALIGEMMA_MODEL_REVISION.into(),
-            runtime_identity: RUNTIME_IDENTITY.into(),
-            processor_identity: PALIGEMMA_PROCESSOR_ID.into(),
+            runtime_identity: runtime_identity.into(),
+            processor_identity: processor_identity.into(),
             challenge_kind: request.challenge.kind,
             prompt_grammar_identity: grammar(request.challenge.kind).into(),
             elapsed,
@@ -329,10 +368,18 @@ fn failed(
     request: &CaptchaSolveRequest,
     failure: CaptchaSolveFailure,
     elapsed: Duration,
+    runtime_identity: &'static str,
+    processor_identity: &'static str,
 ) -> CaptchaSolveOutcome {
     CaptchaSolveOutcome::Failed {
         failure,
-        provenance: Some(provenance(request, elapsed, false)),
+        provenance: Some(provenance(
+            request,
+            elapsed,
+            false,
+            runtime_identity,
+            processor_identity,
+        )),
     }
 }
 
@@ -343,7 +390,7 @@ mod tests {
         solve_captcha, CaptchaChallenge, CaptchaImageGridCell, CaptchaProviderRegistry,
         CaptchaVisualInput,
     };
-    use crate::features::paligemma_runtime::paligemma_cpu_f32_manifest;
+    use crate::features::paligemma_runtime::{paligemma_cpu_f32_manifest, PALIGEMMA_PROCESSOR_ID};
     use image::{DynamicImage, ImageBuffer, Rgb};
     use std::io::Cursor;
     use std::path::PathBuf;
@@ -510,6 +557,175 @@ mod tests {
             } => assert!(value.is_finite()),
             other => {
                 panic!("real provider did not produce a strict solved offset outcome: {other:?}")
+            }
+        }
+
+        provider.unload();
+    }
+
+    /// Reference-parity mirror of `real_provider_registry_runtime_and_strict_outcome`
+    /// through the accelerated CUDA/F16 backend instead of CPU/F32 — same
+    /// provider (`CaptchaProviderId::PALIGEMMA_LOCAL`), same registry
+    /// resolution, same three challenge kinds, same strict-outcome
+    /// assertions, only the constructed runtime differs. Required by
+    /// `SCORPION_PALIGEMMA_LOCAL_INFERENCE_LATENCY_QUALIFICATION_001`'s own
+    /// regression gates (ImageGridSelection PASS, HorizontalOffset PASS,
+    /// provider registry PASS, truthful provenance PASS) for the
+    /// accelerated path specifically, not only the CPU/F32 baseline.
+    #[cfg(feature = "local_paligemma_cuda")]
+    #[tokio::test]
+    #[ignore = "requires the pinned ~11.7 GB offline PaliGemma installation and a qualified CUDA/F16 host"]
+    async fn real_cuda_provider_registry_runtime_and_strict_outcome() {
+        use crate::features::paligemma_runtime::paligemma_cuda_f16_manifest;
+
+        let source = PathBuf::from(
+            std::env::var("SCORPION_PALIGEMMA_PINNED_ARTIFACTS")
+                .expect("set pinned offline artifact directory"),
+        );
+        let parent = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
+        let staging = parent.path().join("staging");
+        let active = parent.path().join("active");
+        std::fs::create_dir(&staging).unwrap();
+        for name in [
+            "model-00001-of-00003.safetensors",
+            "model-00002-of-00003.safetensors",
+            "model-00003-of-00003.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "preprocessor_config.json",
+        ] {
+            std::fs::hard_link(source.join(name), staging.join(name)).unwrap();
+        }
+        let installation = paligemma_cuda_f16_manifest()
+            .activate(&staging, &active)
+            .unwrap();
+        let provider =
+            PaligemmaLocalCaptchaProvider::initialize_cuda_f16_from_host(&installation).unwrap();
+        let mut registry = CaptchaProviderRegistry::new();
+        registry.register(&provider).unwrap();
+        assert!(std::ptr::eq(
+            registry
+                .resolve(CaptchaProviderId::PALIGEMMA_LOCAL)
+                .unwrap(),
+            &provider as &dyn CaptchaProvider,
+        ));
+        assert_eq!(
+            registry.qualification_state(
+                CaptchaProviderId::PALIGEMMA_LOCAL,
+                CaptchaChallengeKind::PointSelection,
+            ),
+            Some(CaptchaCapabilityQualification::ExecutableUnqualified)
+        );
+
+        // PointSelection, through the real `detect` grounding task.
+        let point_bytes = square_fixture(320, 224, 160, 112, 44);
+        let point_request = CaptchaSolveRequest {
+            correlation_id: "real-offline-provider-cuda-point".into(),
+            selected_provider: CaptchaProviderId::PALIGEMMA_LOCAL,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::PointSelection,
+                instruction: "red square".into(),
+                visuals: vec![CaptchaVisualInput::materialized(
+                    None,
+                    "image/png",
+                    point_bytes,
+                )],
+            },
+            deadline: Duration::from_secs(1_800),
+        };
+        match solve_captcha(&provider, &point_request).await {
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::Point { .. },
+                provenance,
+            } => {
+                assert_eq!(provenance.provider, CaptchaProviderId::PALIGEMMA_LOCAL);
+                let facts = provenance.local_runtime.unwrap();
+                assert!(facts.succeeded);
+                assert_eq!(facts.model_revision, PALIGEMMA_MODEL_REVISION);
+                assert_eq!(
+                    facts.runtime_identity,
+                    crate::features::paligemma_runtime::PALIGEMMA_CUDA_RUNTIME_IDENTITY
+                );
+                assert_eq!(
+                    facts.processor_identity,
+                    crate::features::paligemma_runtime::PALIGEMMA_CUDA_PROCESSOR_ID
+                );
+                assert_eq!(facts.challenge_kind, CaptchaChallengeKind::PointSelection);
+            }
+            other => {
+                panic!(
+                    "real CUDA provider did not produce a strict solved point outcome: {other:?}"
+                )
+            }
+        }
+
+        // ImageGridSelection, through the shared JSON structured contract.
+        let grid_bytes = square_fixture(224, 224, 112, 112, 40);
+        let grid = crate::features::captcha::CaptchaImageGridInput::new(
+            CaptchaVisualInput::materialized(None, "image/png", grid_bytes),
+            (224, 224),
+            1,
+            1,
+            vec![CaptchaImageGridCell::new("cell-1", 0, 0, 0, 0, 224, 224)],
+            false,
+        )
+        .unwrap();
+        let grid_request = CaptchaSolveRequest {
+            correlation_id: "real-offline-provider-cuda-grid".into(),
+            selected_provider: CaptchaProviderId::PALIGEMMA_LOCAL,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::ImageGridSelection,
+                instruction: "Select the only cell. Its stable ID is cell-1.".into(),
+                visuals: vec![CaptchaVisualInput::materialized_full_grid(grid)],
+            },
+            deadline: Duration::from_secs(1_800),
+        };
+        match solve_captcha(&provider, &grid_request).await {
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::SelectedChoices(ids),
+                ..
+            } => assert_eq!(ids, ["cell-1"]),
+            other => {
+                panic!("real CUDA provider did not produce a strict solved grid outcome: {other:?}")
+            }
+        }
+
+        // HorizontalOffset, through the two-detect convention.
+        let mut bar_canvas = ImageBuffer::from_pixel(224u32, 224u32, Rgb([40u8, 40, 40]));
+        for y in 0..224u32 {
+            for dx in 0..6u32 {
+                bar_canvas.put_pixel((40 + dx).min(223), y, Rgb([220, 40, 40]));
+                bar_canvas.put_pixel((150 + dx).min(223), y, Rgb([40, 90, 220]));
+            }
+        }
+        let mut bar_bytes = Vec::new();
+        DynamicImage::ImageRgb8(bar_canvas)
+            .write_to(&mut Cursor::new(&mut bar_bytes), image::ImageFormat::Png)
+            .unwrap();
+        let offset_request = CaptchaSolveRequest {
+            correlation_id: "real-offline-provider-cuda-offset".into(),
+            selected_provider: CaptchaProviderId::PALIGEMMA_LOCAL,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::HorizontalOffset,
+                instruction: "red bar -> blue bar".into(),
+                visuals: vec![CaptchaVisualInput::materialized(
+                    None,
+                    "image/png",
+                    bar_bytes,
+                )],
+            },
+            deadline: Duration::from_secs(1_800),
+        };
+        match solve_captcha(&provider, &offset_request).await {
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::HorizontalOffset(value),
+                ..
+            } => assert!(value.is_finite()),
+            other => {
+                panic!(
+                    "real CUDA provider did not produce a strict solved offset outcome: {other:?}"
+                )
             }
         }
 

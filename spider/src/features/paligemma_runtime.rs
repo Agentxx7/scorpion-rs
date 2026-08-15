@@ -50,6 +50,37 @@ pub const PALIGEMMA_MINIMUM_RAM_BYTES: u64 = 25_500_000_000;
 /// Stable implementation identity for the pinned processor/template contract.
 pub const PALIGEMMA_PROCESSOR_ID: &str =
     "paligemma-3b-mix-224@d1d8734c-candle-0.11.0-cpu-f32-processor-v1-224x224";
+/// Immutable accelerated-runtime identity: the same pinned model/revision
+/// and the same 224x224 processor pipeline as the CPU/F32 path, executed on
+/// CUDA with F16 weights instead — see
+/// `SCORPION_PALIGEMMA_LOCAL_INFERENCE_LATENCY_QUALIFICATION_001`. A
+/// distinct identity string (never reused across dtype/device) keeps
+/// provenance truthful about which backend actually produced a result.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_CUDA_RUNTIME_IDENTITY: &str = "candle-0.11.0-cuda-f16";
+/// Stable implementation identity for the CUDA/F16 processor contract. The
+/// image pipeline itself (resize/normalize) is identical to
+/// `PALIGEMMA_PROCESSOR_ID`; only the executing backend differs.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_CUDA_PROCESSOR_ID: &str =
+    "paligemma-3b-mix-224@d1d8734c-candle-0.11.0-cuda-f16-processor-v1-224x224";
+/// Minimum available host RAM required before CUDA/F16 initialization.
+/// Real measured peak RSS during a real load-and-detect cycle was
+/// 12,338,528,256 bytes (~11.49 GB) — far below `PALIGEMMA_MINIMUM_RAM_BYTES`
+/// because weights do not remain host-resident once uploaded to VRAM — with
+/// this floor rounded up with the same ~8% safety margin used for the
+/// CPU/F32 floor, not a formula-only estimate. See the frontier SDD for the
+/// full measurement.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_CUDA_MINIMUM_RAM_BYTES: u64 = 13_500_000_000;
+/// Minimum available device (VRAM) memory required before CUDA/F16
+/// initialization. Real measured peak VRAM during a real load-and-detect
+/// cycle was 7,098,646,528 bytes (6,769 MiB) — F16-native ~5.85 GB weight
+/// shards plus vision-tower activations, KV cache, and CUDA
+/// context/cuBLAS/cuRAND overhead — rounded up with a safety margin, not a
+/// formula-only estimate. See the frontier SDD for the full measurement.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_CUDA_MINIMUM_VRAM_BYTES: u64 = 8_000_000_000;
 
 const REQUIRED_ARTIFACTS: [&str; 7] = [
     "model-00001-of-00003.safetensors",
@@ -115,7 +146,56 @@ const PINNED_ARTIFACTS: [(&str, u64, &str); 7] = [
 /// Exact immutable manifest for the qualified image-only production runtime.
 /// It contains no mutable URL identity and advertises no CAPTCHA qualification.
 pub fn paligemma_cpu_f32_manifest() -> LocalModelManifest {
-    let artifacts = PINNED_ARTIFACTS
+    LocalModelManifest {
+        identity: pinned_model_identity(),
+        artifacts: pinned_artifacts(),
+        runtime_requirements: LocalModelRuntimeRequirements {
+            runtime: "candle-0.11.0-cpu-f32".into(),
+            preprocessing: PALIGEMMA_PROCESSOR_ID.into(),
+            minimum_ram_bytes: PALIGEMMA_MINIMUM_RAM_BYTES,
+            devices: vec![LocalModelDeviceRequirement {
+                device: LocalModelDevice::Cpu,
+                minimum_device_memory_bytes: None,
+            }],
+        },
+        qualifications: Vec::new(),
+    }
+}
+
+/// Exact immutable manifest for the accelerated CUDA/F16 runtime — the same
+/// pinned model/revision and pinned artifact bytes as
+/// [`paligemma_cpu_f32_manifest`], loaded through a different backend.
+/// `devices` declares CUDA only, with no CPU entry: this manifest itself
+/// carries no fallback, matching the runtime's own fail-closed construction.
+#[cfg(feature = "local_paligemma_cuda")]
+pub fn paligemma_cuda_f16_manifest() -> LocalModelManifest {
+    LocalModelManifest {
+        identity: pinned_model_identity(),
+        artifacts: pinned_artifacts(),
+        runtime_requirements: LocalModelRuntimeRequirements {
+            runtime: PALIGEMMA_CUDA_RUNTIME_IDENTITY.into(),
+            preprocessing: PALIGEMMA_CUDA_PROCESSOR_ID.into(),
+            minimum_ram_bytes: PALIGEMMA_CUDA_MINIMUM_RAM_BYTES,
+            devices: vec![LocalModelDeviceRequirement {
+                device: LocalModelDevice::Cuda,
+                minimum_device_memory_bytes: Some(PALIGEMMA_CUDA_MINIMUM_VRAM_BYTES),
+            }],
+        },
+        qualifications: Vec::new(),
+    }
+}
+
+fn pinned_model_identity() -> LocalModelIdentity {
+    LocalModelIdentity {
+        provider: "huggingface".into(),
+        repository: "google/paligemma-3b-mix-224".into(),
+        model: "paligemma-3b-mix-224".into(),
+        revision: PALIGEMMA_MODEL_REVISION.into(),
+    }
+}
+
+fn pinned_artifacts() -> Vec<LocalModelArtifact> {
+    PINNED_ARTIFACTS
         .iter()
         .map(|(path, size, sha256)| LocalModelArtifact {
             reference: ArtifactReference {
@@ -133,26 +213,7 @@ pub fn paligemma_cpu_f32_manifest() -> LocalModelManifest {
             size_bytes: *size,
             sha256: (*sha256).into(),
         })
-        .collect();
-    LocalModelManifest {
-        identity: LocalModelIdentity {
-            provider: "huggingface".into(),
-            repository: "google/paligemma-3b-mix-224".into(),
-            model: "paligemma-3b-mix-224".into(),
-            revision: PALIGEMMA_MODEL_REVISION.into(),
-        },
-        artifacts,
-        runtime_requirements: LocalModelRuntimeRequirements {
-            runtime: "candle-0.11.0-cpu-f32".into(),
-            preprocessing: PALIGEMMA_PROCESSOR_ID.into(),
-            minimum_ram_bytes: PALIGEMMA_MINIMUM_RAM_BYTES,
-            devices: vec![LocalModelDeviceRequirement {
-                device: LocalModelDevice::Cpu,
-                minimum_device_memory_bytes: None,
-            }],
-        },
-        qualifications: Vec::new(),
-    }
+        .collect()
 }
 
 /// Fail-closed runtime construction or inference error.
@@ -169,6 +230,19 @@ pub enum PaligemmaRuntimeFailure {
         /// Qualified minimum host RAM.
         required: u64,
     },
+    /// Available device (GPU) memory is below the qualified floor. Distinct
+    /// from `ResourceLimitExceeded` (host RAM) so the two resource classes
+    /// are never conflated in a failure report.
+    DeviceMemoryLimitExceeded {
+        /// Available device memory observed during preflight.
+        available: u64,
+        /// Qualified minimum device memory.
+        required: u64,
+    },
+    /// The accelerated device could not be initialized. No CPU fallback is
+    /// attempted: this is a fail-closed terminal error for the accelerated
+    /// initializer, never a silent downgrade.
+    DeviceUnavailable(String),
     /// The input cannot be represented by the qualified processor envelope.
     InvalidInput(&'static str),
     /// Offline model initialization failed.
@@ -195,6 +269,16 @@ impl std::fmt::Display for PaligemmaRuntimeFailure {
                 f,
                 "insufficient available RAM ({available} bytes; {required} required)"
             ),
+            Self::DeviceMemoryLimitExceeded {
+                available,
+                required,
+            } => write!(
+                f,
+                "insufficient available device memory ({available} bytes; {required} required)"
+            ),
+            Self::DeviceUnavailable(reason) => {
+                write!(f, "PaliGemma accelerated device unavailable: {reason}")
+            }
             Self::InvalidInput(reason) => write!(f, "invalid PaliGemma input: {reason}"),
             Self::Initialization(reason) => write!(f, "PaliGemma initialization failed: {reason}"),
             Self::Processing(reason) => write!(f, "PaliGemma processing failed: {reason}"),
@@ -292,11 +376,21 @@ pub struct PaligemmaImageMetadata {
 
 /// Persistent offline construction resources. Mutable model/KV state is
 /// request-local inside `PaligemmaGenerationFactory::begin_request`.
+///
+/// Despite the historical name, execution device/dtype are held generically
+/// (`device`, plus the runtime/processor identity strings) rather than
+/// hardcoded — `initialize` (CPU/F32) and, under `local_paligemma_cuda`,
+/// `initialize_cuda_f16` are two explicit constructors over the same type,
+/// never two providers. See
+/// `SCORPION_PALIGEMMA_LOCAL_INFERENCE_LATENCY_QUALIFICATION_001`.
 pub struct PaligemmaCpuRuntime {
     installation_identity: crate::features::local_model::InstalledModelIdentity,
     factory: PaligemmaGenerationFactory,
     tokenizer: Tokenizer,
     device: Device,
+    dtype: DType,
+    runtime_identity: &'static str,
+    processor_identity: &'static str,
 }
 
 impl PaligemmaCpuRuntime {
@@ -306,8 +400,42 @@ impl PaligemmaCpuRuntime {
         available_ram_bytes: u64,
     ) -> Result<Self, PaligemmaRuntimeFailure> {
         preflight_cpu_resources(available_ram_bytes)?;
+        Self::initialize_on_device(
+            installation,
+            Device::Cpu,
+            DType::F32,
+            "candle-0.11.0-cpu-f32",
+            PALIGEMMA_PROCESSOR_ID,
+        )
+    }
+
+    /// Truthful identity of the backend that actually executed this
+    /// instance — `"candle-0.11.0-cpu-f32"` or, under `local_paligemma_cuda`,
+    /// `PALIGEMMA_CUDA_RUNTIME_IDENTITY`.
+    pub fn runtime_identity(&self) -> &'static str {
+        self.runtime_identity
+    }
+
+    /// Truthful processor identity of the backend that actually executed
+    /// this instance.
+    pub fn processor_identity(&self) -> &'static str {
+        self.processor_identity
+    }
+
+    /// Shared construction path for every device/dtype combination this
+    /// runtime supports. `runtime_identity`/`processor_identity` must match
+    /// the installation's own declared identity (`validate_installation_identity`)
+    /// so an installation built for one backend can never silently execute
+    /// on another.
+    fn initialize_on_device(
+        installation: &LocalModelInstallation,
+        device: Device,
+        dtype: DType,
+        runtime_identity: &'static str,
+        processor_identity: &'static str,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
         installation.reverify()?;
-        validate_installation_identity(installation)?;
+        validate_installation_identity(installation, runtime_identity, processor_identity)?;
         let paths = required_paths(installation)?;
         validate_pinned_json(&paths)?;
         validate_safetensors(&paths[0..3])?;
@@ -322,16 +450,15 @@ impl PaligemmaCpuRuntime {
         // architecture; the full `Config` is the same one
         // `candle-transformers` itself ships for this checkpoint.
         let config = Config::paligemma_3b_224();
-        let device = Device::Cpu;
         // SAFETY: `LocalModelInstallation::reverify` has just checked the full
         // file digest and immutable membership. The installation cannot be
         // activated partially, and this runtime retains no mutable file API.
+        // The pinned shards are F32 on disk (`validate_safetensors` enforces
+        // this regardless of `dtype`); candle converts per-tensor from that
+        // source dtype to `dtype` directly during `VarBuilder::get`, without
+        // an intermediate full-precision copy of the whole model.
         let weights = unsafe {
-            VarBuilder::from_mmaped_safetensors(
-                &[&paths[0], &paths[1], &paths[2]],
-                DType::F32,
-                &device,
-            )
+            VarBuilder::from_mmaped_safetensors(&[&paths[0], &paths[1], &paths[2]], dtype, &device)
         }
         .map_err(|e| PaligemmaRuntimeFailure::Initialization(e.to_string()))?;
         let factory = PaligemmaGenerationFactory::new(config, weights);
@@ -342,6 +469,9 @@ impl PaligemmaCpuRuntime {
             factory,
             tokenizer,
             device,
+            dtype,
+            runtime_identity,
+            processor_identity,
         })
     }
 
@@ -355,6 +485,58 @@ impl PaligemmaCpuRuntime {
         Self::initialize(installation, system.available_memory())
     }
 
+    /// Initialize the accelerated CUDA/F16 backend from an explicit host RAM
+    /// reading and an already-established CUDA device. Fails closed — no
+    /// CPU fallback is ever attempted here: a caller that gets `Err` has an
+    /// unstarted runtime, never a silently downgraded one.
+    #[cfg(feature = "local_paligemma_cuda")]
+    pub fn initialize_cuda_f16(
+        installation: &LocalModelInstallation,
+        available_ram_bytes: u64,
+        device: Device,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
+        if !device.is_cuda() {
+            return Err(PaligemmaRuntimeFailure::DeviceUnavailable(
+                "initialize_cuda_f16 requires a CUDA device".into(),
+            ));
+        }
+        preflight_cpu_resources_cuda(available_ram_bytes)?;
+        Self::initialize_on_device(
+            installation,
+            device,
+            DType::F16,
+            PALIGEMMA_CUDA_RUNTIME_IDENTITY,
+            PALIGEMMA_CUDA_PROCESSOR_ID,
+        )
+    }
+
+    /// Initialize the accelerated CUDA/F16 backend using current available
+    /// host RAM and current free device VRAM. No CPU fallback: a host
+    /// without a working CUDA device, or one without the qualified free
+    /// VRAM floor, fails closed with `PaligemmaRuntimeFailure`, never a
+    /// silent downgrade to the CPU/F32 path.
+    #[cfg(feature = "local_paligemma_cuda")]
+    pub fn initialize_cuda_f16_from_host(
+        installation: &LocalModelInstallation,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
+        let mut system = System::new();
+        system.refresh_memory();
+        let available_ram_bytes = system.available_memory();
+        // `Device::new_cuda` establishes (and binds to this thread) the CUDA
+        // context that `cuMemGetInfo` reads; candle-core exposes no
+        // higher-level free-VRAM query, so this one raw driver call is made
+        // directly against the same `cudarc` version candle-core itself
+        // depends on for its `cuda` feature. The device is queried for VRAM
+        // *before* any weight is loaded onto it, then reused (not
+        // recreated) for the real load — never a second, separate context.
+        let device = Device::new_cuda(0)
+            .map_err(|e| PaligemmaRuntimeFailure::DeviceUnavailable(e.to_string()))?;
+        let (available_vram_bytes, _total) = cudarc::driver::result::mem_get_info()
+            .map_err(|e| PaligemmaRuntimeFailure::DeviceUnavailable(e.to_string()))?;
+        preflight_cuda_resources(available_vram_bytes as u64)?;
+        Self::initialize_cuda_f16(installation, available_ram_bytes, device)
+    }
+
     /// Verified installation identity used by this initialized runtime.
     pub fn installation_identity(&self) -> &crate::features::local_model::InstalledModelIdentity {
         &self.installation_identity
@@ -366,7 +548,7 @@ impl PaligemmaCpuRuntime {
         &self,
         image_bytes: &[u8],
     ) -> Result<PaligemmaImageMetadata, PaligemmaRuntimeFailure> {
-        let processed = process_image(image_bytes, &self.device)?;
+        let processed = process_image(image_bytes, &self.device, self.dtype)?;
         Ok(PaligemmaImageMetadata {
             original_dimensions: processed.original_dimensions,
             processed_dimensions: (IMAGE_SIZE, IMAGE_SIZE),
@@ -382,7 +564,7 @@ impl PaligemmaCpuRuntime {
         image_bytes: &[u8],
         label: &str,
     ) -> Result<PaligemmaDetectionBox, PaligemmaRuntimeFailure> {
-        let processed = process_image(image_bytes, &self.device)?;
+        let processed = process_image(image_bytes, &self.device, self.dtype)?;
         let prompt_ids = build_prompt_tokens(&self.tokenizer, &format!("detect {label}"))?;
         let started = Instant::now();
         let mut session = self
@@ -442,7 +624,7 @@ impl PaligemmaCpuRuntime {
         } else {
             "{\"selected_ids\":[\"".to_string()
         };
-        let processed = process_image(image_bytes, &self.device)?;
+        let processed = process_image(image_bytes, &self.device, self.dtype)?;
         let prompt_ids = build_prompt_tokens(
             &self.tokenizer,
             &format!("{prompt} Return JSON only: {{\"selected_ids\":[\"id\"]}}."),
@@ -514,7 +696,7 @@ impl PaligemmaCpuRuntime {
             text,
             token_ids: generated,
             elapsed: started.elapsed(),
-            processor_identity: PALIGEMMA_PROCESSOR_ID,
+            processor_identity: self.processor_identity,
         })
     }
 
@@ -535,14 +717,45 @@ pub fn preflight_cpu_resources(available_ram_bytes: u64) -> Result<(), Paligemma
     Ok(())
 }
 
+/// Fail-closed host-RAM preflight for the CUDA/F16 backend. Distinct floor
+/// from `preflight_cpu_resources`: weights do not remain resident in host
+/// RAM once uploaded, so the qualified floor is real-measured, not the same
+/// constant as the CPU/F32 path.
+#[cfg(feature = "local_paligemma_cuda")]
+pub fn preflight_cpu_resources_cuda(
+    available_ram_bytes: u64,
+) -> Result<(), PaligemmaRuntimeFailure> {
+    if available_ram_bytes < PALIGEMMA_CUDA_MINIMUM_RAM_BYTES {
+        return Err(PaligemmaRuntimeFailure::ResourceLimitExceeded {
+            available: available_ram_bytes,
+            required: PALIGEMMA_CUDA_MINIMUM_RAM_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// Fail-closed device (VRAM) preflight for the CUDA/F16 backend.
+#[cfg(feature = "local_paligemma_cuda")]
+pub fn preflight_cuda_resources(available_vram_bytes: u64) -> Result<(), PaligemmaRuntimeFailure> {
+    if available_vram_bytes < PALIGEMMA_CUDA_MINIMUM_VRAM_BYTES {
+        return Err(PaligemmaRuntimeFailure::DeviceMemoryLimitExceeded {
+            available: available_vram_bytes,
+            required: PALIGEMMA_CUDA_MINIMUM_VRAM_BYTES,
+        });
+    }
+    Ok(())
+}
+
 fn validate_installation_identity(
     installation: &LocalModelInstallation,
+    expected_runtime_identity: &str,
+    expected_processor_identity: &str,
 ) -> Result<(), PaligemmaRuntimeFailure> {
     let identity = installation.identity();
     if identity.model.repository != "google/paligemma-3b-mix-224"
         || identity.model.revision != PALIGEMMA_MODEL_REVISION
-        || identity.runtime != "candle-0.11.0-cpu-f32"
-        || identity.preprocessing != PALIGEMMA_PROCESSOR_ID
+        || identity.runtime != expected_runtime_identity
+        || identity.preprocessing != expected_processor_identity
     {
         return Err(PaligemmaRuntimeFailure::InvalidArtifact(
             "installed identity",
@@ -625,10 +838,15 @@ struct ProcessedImage {
 /// direct (non-aspect-preserving) resize to the fixed 224x224 envelope —
 /// `SiglipImageProcessor`'s own real behavior, not a Scorpion approximation
 /// — then `(pixel/255 - 0.5) / 0.5` normalization (identical formula to the
-/// pinned Qwen3-VL processor).
+/// pinned Qwen3-VL processor). Normalization itself always happens in F32
+/// (matching the reference processor's own arithmetic); the result is then
+/// cast to the runtime's own weight dtype so the vision tower's first
+/// `conv2d` never sees a dtype mismatch against F16 (or any future
+/// non-F32) weights.
 fn process_image(
     encoded: &[u8],
     device: &Device,
+    dtype: DType,
 ) -> Result<ProcessedImage, PaligemmaRuntimeFailure> {
     let image = image::load_from_memory(encoded)
         .map_err(|e| PaligemmaRuntimeFailure::Processing(e.to_string()))?;
@@ -650,6 +868,7 @@ fn process_image(
         (1, 3, IMAGE_SIZE as usize, IMAGE_SIZE as usize),
         device,
     )
+    .and_then(|t| t.to_dtype(dtype))
     .map_err(|e| PaligemmaRuntimeFailure::Processing(e.to_string()))?;
     Ok(ProcessedImage {
         original_dimensions,
@@ -706,12 +925,17 @@ fn build_prompt_tokens(
     Ok(ids[IMAGE_SEQ_LEN..].to_vec())
 }
 
+/// The final position's logits, always as F32 — greedy argmax/ranking
+/// downstream is done in F32 regardless of the runtime's own compute dtype
+/// (mirroring the model's own internal norm upcast pattern), so an F16/BF16
+/// runtime never has to special-case its own token-selection code.
 fn last_logits(logits: &Tensor) -> Result<Tensor, PaligemmaRuntimeFailure> {
     match logits.dims() {
         [_, sequence, _] => logits.i((0, sequence - 1)),
         [sequence, _] => logits.i(sequence - 1),
         _ => Err(candle::Error::Msg("unexpected logits shape".into())),
     }
+    .and_then(|t| t.to_dtype(DType::F32))
     .map_err(|e| PaligemmaRuntimeFailure::Inference(e.to_string()))
 }
 
@@ -870,7 +1094,7 @@ mod tests {
 
     #[test]
     fn pinned_processor_shape_matches_reference_fixture() {
-        let output = process_image(&fixture_png(), &Device::Cpu).unwrap();
+        let output = process_image(&fixture_png(), &Device::Cpu, DType::F32).unwrap();
         assert_eq!(output.original_dimensions, (224, 224));
         assert_eq!(output.pixel_values.dims(), &[1, 3, 224, 224]);
     }

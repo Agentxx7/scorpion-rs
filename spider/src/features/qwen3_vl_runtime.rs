@@ -29,33 +29,6 @@ pub const QWEN3_VL_MINIMUM_RAM_BYTES: u64 = 13_253_615_616;
 pub const QWEN3_VL_PROCESSOR_ID: &str =
     "qwen3-vl-2b@89644892-candle-0.11.0-cpu-f32-processor-v1-320x224";
 
-/// Immutable upstream revision of the higher-capacity 4B checkpoint accepted
-/// by this runtime (`SCORPION_QWEN3_VL_LOCAL_CAPTCHA_HIGHER_CAPACITY_MODEL_QUALIFICATION_001`).
-/// Same architecture family, config-compatible vision tower and MRoPE
-/// section, and byte-identical tokenizer/chat-template/preprocessor
-/// artifacts to the 2B checkpoint above — only the text-decoder width/depth
-/// and weight tensor count differ.
-pub const QWEN3_VL_4B_MODEL_REVISION: &str = "ebb281ec70b05090aa6165b016eac8ec08e71b17";
-/// Minimum available host memory required before initializing the 4B
-/// checkpoint. Derived from a real measured peak RSS of ~27.0 GB (F32
-/// weight materialization from the 8.28 GB BF16 shard pair, plus
-/// activations/KV-cache/tokenizer) during a real load-and-generate cycle,
-/// rounded up with a safety margin — not a formula-only estimate. See the
-/// frontier's resource-envelope evidence for the full measurement.
-pub const QWEN3_VL_4B_MINIMUM_RAM_BYTES: u64 = 28_000_000_000;
-/// Stable implementation identity for the 4B checkpoint's pinned
-/// processor/template contract. The processor contract itself (patch size,
-/// merge size, smart-resize pixel budget, qualified 320x224 envelope) is
-/// unchanged — only the model identity component differs from
-/// [`QWEN3_VL_PROCESSOR_ID`].
-pub const QWEN3_VL_4B_PROCESSOR_ID: &str =
-    "qwen3-vl-4b@ebb281ec-candle-0.11.0-cpu-f32-processor-v1-320x224";
-
-/// The 2B checkpoint's pinned artifact filenames, in acquisition order.
-/// Test-only now: production path resolution goes through
-/// [`resolve_checkpoint_spec`]/[`required_paths`], but real-model tests
-/// still stage exactly these six files from a pinned host directory.
-#[cfg(test)]
 const REQUIRED_ARTIFACTS: [&str; 6] = [
     "model.safetensors",
     "config.json",
@@ -64,29 +37,7 @@ const REQUIRED_ARTIFACTS: [&str; 6] = [
     "chat_template.json",
     "preprocessor_config.json",
 ];
-/// The 4B checkpoint's weights are published pre-sharded (two safetensors
-/// files); every other pinned artifact is byte-identical to the 2B
-/// checkpoint's own (see `qwen3_vl_cpu_f32_manifest_4b`'s hashes).
-const REQUIRED_ARTIFACTS_4B: [&str; 7] = [
-    "model-00001-of-00002.safetensors",
-    "model-00002-of-00002.safetensors",
-    "config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "chat_template.json",
-    "preprocessor_config.json",
-];
-const NON_WEIGHT_ARTIFACTS: [&str; 5] = [
-    "config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "chat_template.json",
-    "preprocessor_config.json",
-];
 const EXPECTED_TENSORS: usize = 625;
-/// Real tensor count of the 4B checkpoint's `model.safetensors.index.json`
-/// (36 decoder layers vs. the 2B checkpoint's 28; identical vision tower).
-const EXPECTED_TENSORS_4B: usize = 713;
 const PATCH_SIZE: usize = 16;
 const TEMPORAL_PATCH_SIZE: usize = 2;
 const MERGE_SIZE: usize = 2;
@@ -164,93 +115,6 @@ pub fn qwen3_vl_cpu_f32_manifest() -> LocalModelManifest {
             runtime: "candle-0.11.0-cpu-f32".into(),
             preprocessing: QWEN3_VL_PROCESSOR_ID.into(),
             minimum_ram_bytes: QWEN3_VL_MINIMUM_RAM_BYTES,
-            devices: vec![LocalModelDeviceRequirement {
-                device: LocalModelDevice::Cpu,
-                minimum_device_memory_bytes: None,
-            }],
-        },
-        qualifications: Vec::new(),
-    }
-}
-
-/// The 4B checkpoint's pinned artifact set: two weight shards plus the same
-/// five byte-identical (verified) tokenizer/template/processor files the 2B
-/// checkpoint uses.
-const PINNED_ARTIFACTS_4B: [(&str, u64, &str); 7] = [
-    (
-        "model-00001-of-00002.safetensors",
-        4_967_229_296,
-        "30a01a0556622645a3cce87b655bbbbbc1f170c196099f1b666c93202c3339a9",
-    ),
-    (
-        "model-00002-of-00002.safetensors",
-        3_908_490_048,
-        "046296a2a387efb43b0c997d5833c789604d168834f6e0d3064bf7bb13d002a6",
-    ),
-    (
-        "config.json",
-        1_505,
-        "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d",
-    ),
-    (
-        "tokenizer.json",
-        7_032_403,
-        "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
-    ),
-    (
-        "tokenizer_config.json",
-        10_868,
-        "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399",
-    ),
-    (
-        "chat_template.json",
-        5_502,
-        "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4",
-    ),
-    (
-        "preprocessor_config.json",
-        390,
-        "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
-    ),
-];
-
-/// Exact immutable manifest for the higher-capacity 4B checkpoint
-/// (`SCORPION_QWEN3_VL_LOCAL_CAPTCHA_HIGHER_CAPACITY_MODEL_QUALIFICATION_001`).
-/// Same repository family, same canonical `qwen3-vl-local` provider and CPU/F32
-/// runtime contract as [`qwen3_vl_cpu_f32_manifest`] — only the pinned model
-/// identity, weight shard set and resource requirement differ.
-pub fn qwen3_vl_cpu_f32_manifest_4b() -> LocalModelManifest {
-    let artifacts = PINNED_ARTIFACTS_4B
-        .iter()
-        .map(|(path, size, sha256)| LocalModelArtifact {
-            reference: ArtifactReference {
-                provider_id: ProviderId::from("huggingface"),
-                repository_id: "Qwen/Qwen3-VL-4B-Instruct".into(),
-                path: (*path).into(),
-                requested_revision: Some(QWEN3_VL_4B_MODEL_REVISION.into()),
-                resolved_revision: Some(QWEN3_VL_4B_MODEL_REVISION.into()),
-                size_bytes: Some(*size),
-                identities: Vec::new(),
-                download_url: None,
-                discovered_via: None,
-            },
-            relative_path: PathBuf::from(path),
-            size_bytes: *size,
-            sha256: (*sha256).into(),
-        })
-        .collect();
-    LocalModelManifest {
-        identity: LocalModelIdentity {
-            provider: "huggingface".into(),
-            repository: "Qwen/Qwen3-VL-4B-Instruct".into(),
-            model: "Qwen3-VL-4B-Instruct".into(),
-            revision: QWEN3_VL_4B_MODEL_REVISION.into(),
-        },
-        artifacts,
-        runtime_requirements: LocalModelRuntimeRequirements {
-            runtime: "candle-0.11.0-cpu-f32".into(),
-            preprocessing: QWEN3_VL_4B_PROCESSOR_ID.into(),
-            minimum_ram_bytes: QWEN3_VL_4B_MINIMUM_RAM_BYTES,
             devices: vec![LocalModelDeviceRequirement {
                 device: LocalModelDevice::Cpu,
                 minimum_device_memory_bytes: None,
@@ -410,40 +274,23 @@ pub struct Qwen3VlCpuRuntime {
     factory: Qwen3VlGenerationFactory,
     tokenizer: Tokenizer,
     device: Device,
-    /// Resolved pinned processor identity for whichever checkpoint spec
-    /// matched at initialization ([`QWEN3_VL_PROCESSOR_ID`] or
-    /// [`QWEN3_VL_4B_PROCESSOR_ID`]).
-    processor_identity: &'static str,
-    /// Resolved pinned model revision for whichever checkpoint spec matched
-    /// at initialization ([`QWEN3_VL_MODEL_REVISION`] or
-    /// [`QWEN3_VL_4B_MODEL_REVISION`]).
-    model_revision: &'static str,
 }
 
 impl Qwen3VlCpuRuntime {
     /// Initialize exclusively from an already verified canonical installation.
-    /// Accepts either of the two explicitly pinned checkpoint specs (2B or
-    /// 4B) — resolved from the installation's own verified identity, never
-    /// inferred or auto-discovered. Any other identity fails closed exactly
-    /// as before this runtime supported a second checkpoint.
     pub fn initialize(
         installation: &LocalModelInstallation,
         available_ram_bytes: u64,
     ) -> Result<Self, Qwen3VlRuntimeFailure> {
+        preflight_cpu_resources(available_ram_bytes)?;
         installation.reverify()?;
-        let checkpoint = resolve_checkpoint_spec(installation.identity())?;
-        if available_ram_bytes < checkpoint.minimum_ram_bytes {
-            return Err(Qwen3VlRuntimeFailure::ResourceLimitExceeded {
-                available: available_ram_bytes,
-                required: checkpoint.minimum_ram_bytes,
-            });
-        }
-        let paths = required_paths(installation, &checkpoint)?;
+        validate_installation_identity(installation)?;
+        let paths = required_paths(installation)?;
         validate_pinned_json(&paths)?;
-        validate_safetensors(&paths.weights, checkpoint.expected_tensors)?;
+        validate_safetensors(&paths[0])?;
 
         let config: Config = serde_json::from_slice(
-            &std::fs::read(&paths.config)
+            &std::fs::read(&paths[1])
                 .map_err(|e| Qwen3VlRuntimeFailure::Initialization(e.to_string()))?,
         )
         .map_err(|e| Qwen3VlRuntimeFailure::Initialization(e.to_string()))?;
@@ -451,20 +298,17 @@ impl Qwen3VlCpuRuntime {
         // SAFETY: `LocalModelInstallation::reverify` has just checked the full
         // file digest and immutable membership. The installation cannot be
         // activated partially, and this runtime retains no mutable file API.
-        let weight_paths: Vec<&Path> = paths.weights.iter().map(PathBuf::as_path).collect();
         let weights =
-            unsafe { VarBuilder::from_mmaped_safetensors(&weight_paths, DType::F32, &device) }
+            unsafe { VarBuilder::from_mmaped_safetensors(&[&paths[0]], DType::F32, &device) }
                 .map_err(|e| Qwen3VlRuntimeFailure::Initialization(e.to_string()))?;
         let factory = Qwen3VlGenerationFactory::new(config, weights);
-        let tokenizer = Tokenizer::from_file(&paths.tokenizer)
+        let tokenizer = Tokenizer::from_file(&paths[2])
             .map_err(|e| Qwen3VlRuntimeFailure::Tokenization(e.to_string()))?;
         Ok(Self {
             installation_identity: installation.identity().clone(),
             factory,
             tokenizer,
             device,
-            processor_identity: checkpoint.processor_identity,
-            model_revision: checkpoint.model_revision,
         })
     }
 
@@ -481,19 +325,6 @@ impl Qwen3VlCpuRuntime {
     /// Verified installation identity used by this initialized runtime.
     pub fn installation_identity(&self) -> &crate::features::local_model::InstalledModelIdentity {
         &self.installation_identity
-    }
-
-    /// Resolved pinned processor identity for whichever checkpoint this
-    /// runtime actually loaded. Truthful, per-instance provenance — not a
-    /// fixed constant, since more than one checkpoint spec is now accepted.
-    pub fn processor_identity(&self) -> &'static str {
-        self.processor_identity
-    }
-
-    /// Resolved pinned model revision for whichever checkpoint this runtime
-    /// actually loaded.
-    pub fn model_revision(&self) -> &'static str {
-        self.model_revision
     }
 
     /// Validate an encoded image through the canonical processor and expose
@@ -669,7 +500,7 @@ impl Qwen3VlCpuRuntime {
             text,
             token_ids: generated,
             elapsed: started.elapsed(),
-            processor_identity: self.processor_identity,
+            processor_identity: QWEN3_VL_PROCESSOR_ID,
         })
     }
 
@@ -679,10 +510,7 @@ impl Qwen3VlCpuRuntime {
     }
 }
 
-/// Fail-closed CPU resource preflight for the 2B checkpoint specifically.
-/// Retained for its own direct regression proof; general initialization
-/// preflights against whichever checkpoint's own resolved minimum applies
-/// (see [`Qwen3VlCpuRuntime::initialize`]).
+/// Fail-closed CPU resource preflight.
 pub fn preflight_cpu_resources(available_ram_bytes: u64) -> Result<(), Qwen3VlRuntimeFailure> {
     if available_ram_bytes < QWEN3_VL_MINIMUM_RAM_BYTES {
         return Err(Qwen3VlRuntimeFailure::ResourceLimitExceeded {
@@ -693,102 +521,38 @@ pub fn preflight_cpu_resources(available_ram_bytes: u64) -> Result<(), Qwen3VlRu
     Ok(())
 }
 
-/// One explicitly pinned checkpoint's resolved runtime parameters. Never
-/// constructed from anything but an exact identity match in
-/// [`resolve_checkpoint_spec`] — there is no dynamic/inferred checkpoint
-/// selection.
-struct Qwen3VlCheckpointSpec {
-    weight_artifacts: &'static [&'static str],
-    expected_tensors: usize,
-    minimum_ram_bytes: u64,
-    processor_identity: &'static str,
-    model_revision: &'static str,
-}
-
-/// Resolve which of the two explicitly pinned checkpoints (2B or 4B) an
-/// installation's own verified identity names. Any other identity — a
-/// typo, a tampered record, or a genuinely different checkpoint this
-/// runtime was never audited against — fails closed exactly as the
-/// single-checkpoint check did before this runtime accepted a second one.
-fn resolve_checkpoint_spec(
-    identity: &crate::features::local_model::InstalledModelIdentity,
-) -> Result<Qwen3VlCheckpointSpec, Qwen3VlRuntimeFailure> {
-    if identity.runtime != "candle-0.11.0-cpu-f32" {
+fn validate_installation_identity(
+    installation: &LocalModelInstallation,
+) -> Result<(), Qwen3VlRuntimeFailure> {
+    let identity = installation.identity();
+    if identity.model.repository != "Qwen/Qwen3-VL-2B-Instruct"
+        || identity.model.revision != QWEN3_VL_MODEL_REVISION
+        || identity.runtime != "candle-0.11.0-cpu-f32"
+        || identity.preprocessing != QWEN3_VL_PROCESSOR_ID
+    {
         return Err(Qwen3VlRuntimeFailure::InvalidArtifact("installed identity"));
     }
-    if identity.model.repository == "Qwen/Qwen3-VL-2B-Instruct"
-        && identity.model.revision == QWEN3_VL_MODEL_REVISION
-        && identity.preprocessing == QWEN3_VL_PROCESSOR_ID
-    {
-        return Ok(Qwen3VlCheckpointSpec {
-            weight_artifacts: &["model.safetensors"],
-            expected_tensors: EXPECTED_TENSORS,
-            minimum_ram_bytes: QWEN3_VL_MINIMUM_RAM_BYTES,
-            processor_identity: QWEN3_VL_PROCESSOR_ID,
-            model_revision: QWEN3_VL_MODEL_REVISION,
-        });
-    }
-    if identity.model.repository == "Qwen/Qwen3-VL-4B-Instruct"
-        && identity.model.revision == QWEN3_VL_4B_MODEL_REVISION
-        && identity.preprocessing == QWEN3_VL_4B_PROCESSOR_ID
-    {
-        return Ok(Qwen3VlCheckpointSpec {
-            weight_artifacts: &REQUIRED_ARTIFACTS_4B[0..2],
-            expected_tensors: EXPECTED_TENSORS_4B,
-            minimum_ram_bytes: QWEN3_VL_4B_MINIMUM_RAM_BYTES,
-            processor_identity: QWEN3_VL_4B_PROCESSOR_ID,
-            model_revision: QWEN3_VL_4B_MODEL_REVISION,
-        });
-    }
-    Err(Qwen3VlRuntimeFailure::InvalidArtifact("installed identity"))
-}
-
-/// Every pinned artifact path an initialized runtime needs, resolved
-/// through the installation's own verified membership. One or more weight
-/// shard paths in manifest order, plus the five artifacts identical across
-/// every pinned checkpoint.
-struct ResolvedArtifactPaths {
-    weights: Vec<PathBuf>,
-    config: PathBuf,
-    tokenizer: PathBuf,
-    tokenizer_config: PathBuf,
-    chat_template: PathBuf,
-    preprocessor: PathBuf,
+    Ok(())
 }
 
 fn required_paths(
     installation: &LocalModelInstallation,
-    checkpoint: &Qwen3VlCheckpointSpec,
-) -> Result<ResolvedArtifactPaths, Qwen3VlRuntimeFailure> {
-    let weights = checkpoint
-        .weight_artifacts
+) -> Result<Vec<PathBuf>, Qwen3VlRuntimeFailure> {
+    REQUIRED_ARTIFACTS
         .iter()
         .map(|name| {
             installation
                 .artifact_path(Path::new(name))
                 .map_err(Into::into)
         })
-        .collect::<Result<Vec<_>, Qwen3VlRuntimeFailure>>()?;
-    let mut non_weight = NON_WEIGHT_ARTIFACTS.iter().map(|name| {
-        installation
-            .artifact_path(Path::new(name))
-            .map_err(Qwen3VlRuntimeFailure::from)
-    });
-    Ok(ResolvedArtifactPaths {
-        weights,
-        config: non_weight.next().unwrap()?,
-        tokenizer: non_weight.next().unwrap()?,
-        tokenizer_config: non_weight.next().unwrap()?,
-        chat_template: non_weight.next().unwrap()?,
-        preprocessor: non_weight.next().unwrap()?,
-    })
+        .collect()
 }
 
-fn validate_pinned_json(paths: &ResolvedArtifactPaths) -> Result<(), Qwen3VlRuntimeFailure> {
-    let config: Value = read_json(&paths.config, "config.json")?;
-    let preprocessor: Value = read_json(&paths.preprocessor, "preprocessor_config.json")?;
-    let tokenizer_config: Value = read_json(&paths.tokenizer_config, "tokenizer_config.json")?;
-    let chat_template: Value = read_json(&paths.chat_template, "chat_template.json")?;
+fn validate_pinned_json(paths: &[PathBuf]) -> Result<(), Qwen3VlRuntimeFailure> {
+    let config: Value = read_json(&paths[1], "config.json")?;
+    let preprocessor: Value = read_json(&paths[5], "preprocessor_config.json")?;
+    let tokenizer_config: Value = read_json(&paths[3], "tokenizer_config.json")?;
+    let chat_template: Value = read_json(&paths[4], "chat_template.json")?;
     let correct = config["model_type"] == "qwen3_vl"
         && config["image_token_id"] == IMAGE_TOKEN_ID
         && config["vision_start_token_id"] == VISION_START_TOKEN_ID
@@ -821,17 +585,12 @@ fn read_json(path: &Path, name: &'static str) -> Result<Value, Qwen3VlRuntimeFai
     .map_err(|_| Qwen3VlRuntimeFailure::InvalidArtifact(name))
 }
 
-fn validate_safetensors(
-    weight_paths: &[PathBuf],
-    expected_tensors: usize,
-) -> Result<(), Qwen3VlRuntimeFailure> {
-    // SAFETY: installation verification authenticated every complete file
-    // first. `multi` mirrors `new`'s exact same per-file guarantees for a
-    // single-shard checkpoint and generalizes them to a pre-sharded one.
-    let tensors = unsafe { candle::safetensors::MmapedSafetensors::multi(weight_paths) }
+fn validate_safetensors(path: &Path) -> Result<(), Qwen3VlRuntimeFailure> {
+    // SAFETY: installation verification authenticated the complete file first.
+    let tensors = unsafe { candle::safetensors::MmapedSafetensors::new(path) }
         .map_err(|e| Qwen3VlRuntimeFailure::Initialization(e.to_string()))?;
     let views = tensors.tensors();
-    if views.len() != expected_tensors
+    if views.len() != EXPECTED_TENSORS
         || views
             .iter()
             .any(|(_, tensor)| !matches!(DType::try_from(tensor.dtype()), Ok(DType::BF16)))
@@ -1465,158 +1224,6 @@ mod tests {
                     // works around a real per-token search gap for an
                     // isolated opening quote when nothing has been
                     // generated yet.
-                    assistant_prefill: "{\"selected_ids\":[\"".into(),
-                    maximum_generated_tokens: 8,
-                    schema: Qwen3VlStructuredSchema::StringIdArray {
-                        field: "selected_ids".into(),
-                        allowed_ids: vec!["cell-alpha".into(), "cell-beta".into()],
-                        allow_empty: false,
-                    },
-                },
-            )
-            .await
-            .unwrap();
-        assert!(!ids.token_ids.is_empty());
-        let parsed: serde_json::Value = serde_json::from_str(&ids.text).unwrap();
-        let selected = parsed["selected_ids"].as_array().unwrap();
-        assert!(!selected.is_empty());
-        assert!(selected
-            .iter()
-            .all(|id| matches!(id.as_str(), Some("cell-alpha" | "cell-beta"))));
-        runtime.unload();
-    }
-
-    /// Reference-parity proof for the higher-capacity 4B checkpoint
-    /// (`SCORPION_QWEN3_VL_LOCAL_CAPTCHA_HIGHER_CAPACITY_MODEL_QUALIFICATION_001`),
-    /// through the exact same corrected runtime code path as
-    /// `real_offline_generation_unload_and_reinitialize` — no
-    /// checkpoint-specific inference logic exists. Requires the same
-    /// semantic bar: content-correct, content-dependent, deterministic
-    /// output, not merely non-empty.
-    #[tokio::test]
-    #[ignore = "requires the pinned ~8.3 GB offline 4B model installation"]
-    async fn real_4b_offline_generation_unload_and_reinitialize() {
-        let source = PathBuf::from(
-            std::env::var("SCORPION_QWEN3_VL_4B_PINNED_ARTIFACTS")
-                .expect("set pinned offline 4B artifact directory"),
-        );
-        let parent = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
-        let staging = parent.path().join("staging");
-        let active = parent.path().join("active");
-        std::fs::create_dir(&staging).unwrap();
-        for name in REQUIRED_ARTIFACTS_4B {
-            std::fs::hard_link(source.join(name), staging.join(name)).unwrap();
-        }
-        let manifest = qwen3_vl_cpu_f32_manifest_4b();
-        let installation = manifest.activate(&staging, &active).unwrap();
-        let mut gradient_outputs = Vec::new();
-        for _ in 0..2 {
-            let runtime = Qwen3VlCpuRuntime::initialize_from_host(&installation).unwrap();
-            assert_eq!(runtime.model_revision(), QWEN3_VL_4B_MODEL_REVISION);
-            assert_eq!(runtime.processor_identity(), QWEN3_VL_4B_PROCESSOR_ID);
-            let output = runtime
-                .generate(
-                    &fixture_png(),
-                    "Describe this image in one word.",
-                    Qwen3VlGenerationConfiguration {
-                        maximum_generated_tokens: 8,
-                    },
-                )
-                .await
-                .unwrap();
-            assert!(!output.token_ids.is_empty());
-            assert!(
-                output.text.to_lowercase().contains("gradient"),
-                "expected a semantically correct one-word description of the \
-                 gradient fixture, matching both the pinned reference oracle's \
-                 own greedy output and the already-qualified 2B checkpoint's \
-                 output on the identical fixture; got {:?} instead",
-                output.text
-            );
-            gradient_outputs.push(output.text);
-
-            let other = runtime
-                .generate(
-                    &solid_color_fixture_png(),
-                    "Describe this image in one word.",
-                    Qwen3VlGenerationConfiguration {
-                        maximum_generated_tokens: 8,
-                    },
-                )
-                .await
-                .unwrap();
-            assert!(!other.text.trim().is_empty());
-            assert_ne!(
-                other.text,
-                *gradient_outputs.last().unwrap(),
-                "a flat-color image and a multi-directional gradient must not \
-                 produce the identical description"
-            );
-            runtime.unload();
-        }
-        assert_eq!(gradient_outputs[0], gradient_outputs[1]);
-    }
-
-    /// Structured-generation proof for the 4B checkpoint, mirroring
-    /// `real_structured_generation_is_nonempty_and_strictly_parsed` exactly.
-    #[tokio::test]
-    #[ignore = "requires the pinned ~8.3 GB offline 4B model installation"]
-    async fn real_4b_structured_generation_is_nonempty_and_strictly_parsed() {
-        let source = PathBuf::from(
-            std::env::var("SCORPION_QWEN3_VL_4B_PINNED_ARTIFACTS")
-                .expect("set pinned offline 4B artifact directory"),
-        );
-        let parent = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
-        let staging = parent.path().join("staging");
-        let active = parent.path().join("active");
-        std::fs::create_dir(&staging).unwrap();
-        for name in REQUIRED_ARTIFACTS_4B {
-            std::fs::hard_link(source.join(name), staging.join(name)).unwrap();
-        }
-        let installation = qwen3_vl_cpu_f32_manifest_4b()
-            .activate(&staging, &active)
-            .unwrap();
-        let runtime = Qwen3VlCpuRuntime::initialize_from_host(&installation).unwrap();
-        let numeric_contract = Qwen3VlStructuredGenerationContract {
-            assistant_prefill: "{\"answer\":".into(),
-            maximum_generated_tokens: 8,
-            schema: Qwen3VlStructuredSchema::FiniteNumbers {
-                fields: vec![("answer".into(), 0.0, 2.0)],
-            },
-        };
-        let output = runtime
-            .generate_structured(
-                &fixture_png(),
-                "Return exactly one JSON object whose answer field is the integer 1. No prose.",
-                numeric_contract.clone(),
-            )
-            .await
-            .unwrap();
-        assert!(!output.token_ids.is_empty(), "model generated no suffix");
-        let value: serde_json::Value = serde_json::from_str(&output.text)
-            .unwrap_or_else(|error| panic!("structured output {0:?}: {error}", output.text));
-        let object = value.as_object().unwrap();
-        assert_eq!(object.len(), 1);
-        let answer = object
-            .get("answer")
-            .and_then(|value| value.as_f64())
-            .unwrap();
-        assert!(answer.is_finite() && (0.0..=2.0).contains(&answer));
-        let repeated = runtime
-            .generate_structured(
-                &fixture_png(),
-                "Return exactly one JSON object whose answer field is the integer 1. No prose.",
-                numeric_contract,
-            )
-            .await
-            .unwrap();
-        assert_eq!(output.text, repeated.text);
-
-        let ids = runtime
-            .generate_structured(
-                &fixture_png(),
-                "Choose cell-beta. Return only the requested JSON object.",
-                Qwen3VlStructuredGenerationContract {
                     assistant_prefill: "{\"selected_ids\":[\"".into(),
                     maximum_generated_tokens: 8,
                     schema: Qwen3VlStructuredSchema::StringIdArray {

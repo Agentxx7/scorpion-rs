@@ -13,7 +13,7 @@ use crate::features::captcha::{
 use crate::features::local_model::LocalModelInstallation;
 use crate::features::qwen3_vl_runtime::{
     Qwen3VlCpuRuntime, Qwen3VlRuntimeFailure, Qwen3VlStructuredGenerationContract,
-    Qwen3VlStructuredSchema, QWEN3_VL_MODEL_REVISION, QWEN3_VL_PROCESSOR_ID,
+    Qwen3VlStructuredSchema,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -95,7 +95,7 @@ impl CaptchaProvider for Qwen3VlLocalCaptchaProvider {
         let started = Instant::now();
         let prepared = match prepare_request(&self.runtime, request) {
             Ok(prepared) => prepared,
-            Err(failure) => return failed(request, failure, started.elapsed()),
+            Err(failure) => return failed(&self.runtime, request, failure, started.elapsed()),
         };
         let generation = match tokio::time::timeout(
             request.deadline,
@@ -113,6 +113,7 @@ impl CaptchaProvider for Qwen3VlLocalCaptchaProvider {
         {
             Err(_) => {
                 return failed(
+                    &self.runtime,
                     request,
                     CaptchaSolveFailure::DeadlineExceeded,
                     started.elapsed(),
@@ -120,6 +121,7 @@ impl CaptchaProvider for Qwen3VlLocalCaptchaProvider {
             }
             Ok(Err(_)) => {
                 return failed(
+                    &self.runtime,
                     request,
                     CaptchaSolveFailure::LocalExecutionFailure,
                     started.elapsed(),
@@ -130,9 +132,9 @@ impl CaptchaProvider for Qwen3VlLocalCaptchaProvider {
         match parse_solution(request, prepared.context, &generation.text) {
             Ok(solution) => CaptchaSolveOutcome::Solved {
                 solution,
-                provenance: provenance(request, generation.elapsed, true),
+                provenance: provenance(&self.runtime, request, generation.elapsed, true),
             },
-            Err(failure) => failed(request, failure, started.elapsed()),
+            Err(failure) => failed(&self.runtime, request, failure, started.elapsed()),
         }
     }
 }
@@ -356,7 +358,13 @@ fn grammar(kind: CaptchaChallengeKind) -> &'static str {
     }
 }
 
+/// Provenance always names the exact checkpoint/revision the runtime
+/// instance actually loaded (`runtime.model_revision()`/
+/// `runtime.processor_identity()`) — never a fixed module constant. More
+/// than one pinned checkpoint can back this same `qwen3-vl-local` provider
+/// identity now, and provenance must be truthful about which one ran.
 fn provenance(
+    runtime: &Qwen3VlCpuRuntime,
     request: &CaptchaSolveRequest,
     elapsed: Duration,
     succeeded: bool,
@@ -364,9 +372,9 @@ fn provenance(
     CaptchaSolveProvenance::local_runtime(
         CaptchaProviderId::QWEN3_VL_LOCAL,
         CaptchaLocalRuntimeProvenance {
-            model_revision: QWEN3_VL_MODEL_REVISION.into(),
+            model_revision: runtime.model_revision().into(),
             runtime_identity: RUNTIME_IDENTITY.into(),
-            processor_identity: QWEN3_VL_PROCESSOR_ID.into(),
+            processor_identity: runtime.processor_identity().into(),
             challenge_kind: request.challenge.kind,
             prompt_grammar_identity: grammar(request.challenge.kind).into(),
             elapsed,
@@ -376,13 +384,14 @@ fn provenance(
 }
 
 fn failed(
+    runtime: &Qwen3VlCpuRuntime,
     request: &CaptchaSolveRequest,
     failure: CaptchaSolveFailure,
     elapsed: Duration,
 ) -> CaptchaSolveOutcome {
     CaptchaSolveOutcome::Failed {
         failure,
-        provenance: Some(provenance(request, elapsed, false)),
+        provenance: Some(provenance(runtime, request, elapsed, false)),
     }
 }
 
@@ -394,7 +403,9 @@ mod tests {
         CaptchaVisualInput,
     };
     use crate::features::qwen3_vl_runtime::{
-        qwen3_vl_cpu_f32_manifest, QWEN3_VL_MINIMUM_RAM_BYTES,
+        qwen3_vl_cpu_f32_manifest, qwen3_vl_cpu_f32_manifest_4b, QWEN3_VL_4B_MINIMUM_RAM_BYTES,
+        QWEN3_VL_4B_MODEL_REVISION, QWEN3_VL_4B_PROCESSOR_ID, QWEN3_VL_MINIMUM_RAM_BYTES,
+        QWEN3_VL_MODEL_REVISION, QWEN3_VL_PROCESSOR_ID,
     };
     use image::{DynamicImage, ImageBuffer, Rgb};
     use std::io::Cursor;
@@ -602,6 +613,99 @@ mod tests {
                 );
             }
             _ => panic!("real provider did not produce a strict solved outcome"),
+        }
+        provider.unload();
+    }
+
+    /// Same end-to-end proof as `real_provider_registry_runtime_and_strict_outcome`,
+    /// for the higher-capacity 4B checkpoint
+    /// (`SCORPION_QWEN3_VL_LOCAL_CAPTCHA_HIGHER_CAPACITY_MODEL_QUALIFICATION_001`)
+    /// — the exact same canonical `qwen3-vl-local` provider identity and
+    /// registry contract, backed by a different pinned checkpoint. Directly
+    /// proves provenance now truthfully names the checkpoint that actually
+    /// ran (`facts.model_revision`/`facts.processor_identity` here are the
+    /// 4B constants, not the 2B ones asserted above).
+    #[tokio::test]
+    #[ignore = "requires the pinned ~8.3 GB offline 4B model installation"]
+    async fn real_4b_provider_registry_runtime_and_strict_outcome() {
+        let source = PathBuf::from(
+            std::env::var("SCORPION_QWEN3_VL_4B_PINNED_ARTIFACTS")
+                .expect("set pinned offline 4B artifact directory"),
+        );
+        let parent = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
+        let staging = parent.path().join("staging");
+        let active = parent.path().join("active");
+        std::fs::create_dir(&staging).unwrap();
+        for name in [
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "chat_template.json",
+            "preprocessor_config.json",
+        ] {
+            std::fs::hard_link(source.join(name), staging.join(name)).unwrap();
+        }
+        let installation = qwen3_vl_cpu_f32_manifest_4b()
+            .activate(&staging, &active)
+            .unwrap();
+        assert!(matches!(
+            Qwen3VlLocalCaptchaProvider::new(&installation, QWEN3_VL_4B_MINIMUM_RAM_BYTES - 1),
+            Err(Qwen3VlRuntimeFailure::ResourceLimitExceeded { .. })
+        ));
+        let provider = Qwen3VlLocalCaptchaProvider::initialize_from_host(&installation).unwrap();
+        let mut registry = CaptchaProviderRegistry::new();
+        registry.register(&provider).unwrap();
+        assert!(std::ptr::eq(
+            registry.resolve(CaptchaProviderId::QWEN3_VL_LOCAL).unwrap(),
+            &provider as &dyn CaptchaProvider,
+        ));
+        assert_eq!(
+            registry.qualification_state(
+                CaptchaProviderId::QWEN3_VL_LOCAL,
+                CaptchaChallengeKind::ImageGridSelection,
+            ),
+            Some(CaptchaCapabilityQualification::ExecutableUnqualified)
+        );
+        let visual_bytes = fixture_png();
+        let grid = CaptchaImageGridInput::new(
+            CaptchaVisualInput::materialized(None, "image/png", visual_bytes),
+            (96, 64),
+            1,
+            1,
+            vec![CaptchaImageGridCell::new("cell-1", 0, 0, 0, 0, 96, 64)],
+            false,
+        )
+        .unwrap();
+        let request = CaptchaSolveRequest {
+            correlation_id: "real-offline-4b-provider".into(),
+            selected_provider: CaptchaProviderId::QWEN3_VL_LOCAL,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::ImageGridSelection,
+                instruction: "Select the only cell. Its stable ID is cell-1.".into(),
+                visuals: vec![CaptchaVisualInput::materialized_full_grid(grid)],
+            },
+            deadline: Duration::from_secs(1_800),
+        };
+        let outcome = solve_captcha(&provider, &request).await;
+        match outcome {
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::SelectedChoices(ids),
+                provenance,
+            } => {
+                assert_eq!(ids, ["cell-1"]);
+                assert_eq!(provenance.provider, CaptchaProviderId::QWEN3_VL_LOCAL);
+                let facts = provenance.local_runtime.unwrap();
+                assert!(facts.succeeded);
+                assert_eq!(facts.model_revision, QWEN3_VL_4B_MODEL_REVISION);
+                assert_eq!(facts.processor_identity, QWEN3_VL_4B_PROCESSOR_ID);
+                assert_eq!(
+                    facts.challenge_kind,
+                    CaptchaChallengeKind::ImageGridSelection
+                );
+            }
+            _ => panic!("real 4B provider did not produce a strict solved outcome"),
         }
         provider.unload();
     }

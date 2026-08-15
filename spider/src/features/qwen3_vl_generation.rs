@@ -167,6 +167,7 @@ mod tests {
                 tie_word_embeddings: true,
                 rope_theta: 10_000.0,
                 sliding_window: None,
+                rope_scaling: None,
             },
             vision_config: VisionConfig {
                 depth: 0,
@@ -203,7 +204,8 @@ mod tests {
                 vec![1],
                 vec![Vec::new()],
                 vec![Vec::new()],
-                &[offset],
+                offset,
+                &[[offset as i64; 3]],
             )
             .unwrap()
             .flatten_all()

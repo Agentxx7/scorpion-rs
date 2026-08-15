@@ -415,6 +415,18 @@ impl Qwen3VlCpuRuntime {
         let grid = Tensor::new(&grid_values, &self.device)
             .and_then(|t| t.unsqueeze(0))
             .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))?;
+        // Qwen3-VL's rotary embedding is a genuine interleaved 3-axis
+        // (temporal/height/width) MRoPE, not plain sequential 1D RoPE — see
+        // `compute_mrope_position_ids`'s doc comment. `mrope_delta` is the
+        // continuation offset every subsequently generated text token needs
+        // (mirrors the reference `mrope_position_deltas`).
+        let (position_ids, mrope_delta) =
+            candle_transformers::models::qwen3_vl::compute_mrope_position_ids(
+                prompt_ids.len(),
+                Some(image_span),
+                Some(processed.image_grid_thw),
+                MERGE_SIZE,
+            );
         let mut logits = session
             .model()
             .forward(
@@ -426,7 +438,8 @@ impl Qwen3VlCpuRuntime {
                 vec![prompt_ids.len()],
                 vec![vec![image_span]],
                 vec![Vec::new()],
-                &[0],
+                0,
+                &position_ids,
             )
             .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))?;
         let mut generated = Vec::with_capacity(configuration.maximum_generated_tokens);
@@ -450,6 +463,7 @@ impl Qwen3VlCpuRuntime {
             let next = Tensor::new(&[token], &self.device)
                 .and_then(|t| t.unsqueeze(0))
                 .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))?;
+            let next_position = mrope_delta + offset as i64;
             logits = session
                 .model()
                 .forward(
@@ -461,7 +475,8 @@ impl Qwen3VlCpuRuntime {
                     vec![1],
                     vec![Vec::new()],
                     vec![Vec::new()],
-                    &[offset],
+                    offset,
+                    &[[next_position; 3]],
                 )
                 .map_err(|e| Qwen3VlRuntimeFailure::Inference(e.to_string()))?;
             offset += 1;
@@ -1048,10 +1063,32 @@ mod tests {
         }));
     }
 
+    /// A second real image, deliberately unrelated in content to
+    /// `fixture_png`'s multi-directional gradient (a single flat color),
+    /// used only to prove generation output actually depends on what the
+    /// image contains.
+    fn solid_color_fixture_png() -> Vec<u8> {
+        let image = ImageBuffer::from_pixel(96, 64, Rgb([30u8, 120, 30]));
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgb8(image)
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
     /// Real qualification-host proof. Acquisition is deliberately external to
     /// the runtime; set the variable to a directory containing the six pinned
     /// files. The test hard-links them into canonical staging, atomically
     /// activates the installation, then performs two isolated initializations.
+    ///
+    /// Strengthened for `SCORPION_QWEN3_VL_CANDLE_REFERENCE_PARITY_ROOT_CAUSE_001`:
+    /// this previously asserted only non-empty output, which a genuinely
+    /// broken/degenerate model can satisfy trivially (confirmed live: the
+    /// pre-fix runtime returned incoherent text like `"### 1, 2, "` for this
+    /// exact fixture/prompt and still passed). Real qualification requires
+    /// semantically correct, content-dependent output, matching the pinned
+    /// Hugging Face `transformers` reference oracle's own greedy output for
+    /// the identical weights/config/image/prompt (`"Gradient."`).
     #[tokio::test]
     #[ignore = "requires the pinned 4.25 GB offline model installation"]
     async fn real_offline_generation_unload_and_reinitialize() {
@@ -1068,6 +1105,7 @@ mod tests {
         }
         let manifest = qwen3_vl_cpu_f32_manifest();
         let installation = manifest.activate(&staging, &active).unwrap();
+        let mut gradient_outputs = Vec::new();
         for _ in 0..2 {
             let runtime = Qwen3VlCpuRuntime::initialize_from_host(&installation).unwrap();
             let output = runtime
@@ -1081,9 +1119,41 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!output.token_ids.is_empty());
-            assert!(!output.text.trim().is_empty());
+            assert!(
+                output.text.to_lowercase().contains("gradient"),
+                "expected a semantically correct one-word description of the \
+                 gradient fixture (matches the pinned reference oracle's own \
+                 greedy output, \"Gradient.\"); got {:?} instead — non-empty \
+                 output alone does not prove the model is coherent",
+                output.text
+            );
+            gradient_outputs.push(output.text);
+
+            // A materially different image (flat color, no gradient) must
+            // not produce the same generic answer — proves the description
+            // genuinely depends on image content, not a fixed response.
+            let other = runtime
+                .generate(
+                    &solid_color_fixture_png(),
+                    "Describe this image in one word.",
+                    Qwen3VlGenerationConfiguration {
+                        maximum_generated_tokens: 8,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(!other.text.trim().is_empty());
+            assert_ne!(
+                other.text,
+                *gradient_outputs.last().unwrap(),
+                "a flat-color image and a multi-directional gradient must not \
+                 produce the identical description"
+            );
             runtime.unload();
         }
+        // Deterministic greedy decoding: repeated isolated sessions with the
+        // identical input must produce the identical output.
+        assert_eq!(gradient_outputs[0], gradient_outputs[1]);
     }
 
     /// Real pinned-model proof that assistant-prefilled output contains a
@@ -1146,7 +1216,15 @@ mod tests {
                 &fixture_png(),
                 "Choose cell-beta. Return only the requested JSON object.",
                 Qwen3VlStructuredGenerationContract {
-                    assistant_prefill: "{\"selected_ids\":[".into(),
+                    // `allow_empty: false` forces the array's first
+                    // character to be the opening quote of the first
+                    // chosen id regardless of what the model generates —
+                    // pre-committing it here (see the identical, documented
+                    // pattern in `qwen3_vl_captcha.rs::prepare_request`)
+                    // works around a real per-token search gap for an
+                    // isolated opening quote when nothing has been
+                    // generated yet.
+                    assistant_prefill: "{\"selected_ids\":[\"".into(),
                     maximum_generated_tokens: 8,
                     schema: Qwen3VlStructuredSchema::StringIdArray {
                         field: "selected_ids".into(),

@@ -13,13 +13,22 @@ members = [
     # internal
     "examples",
     "benches"]
-exclude = ["vendor/chromey"]
+exclude = ["vendor/chromey", "vendor/candle-transformers-qwen3vl-fix"]
 resolver = "2"
 
 [patch.crates-io]
 # Minimal upstream-compatible OOPIF attached-session API.  This remains a
 # transport-wrapper patch; Scorpion browser/CAPTCHA policy does not live here.
 chromey = { path = "vendor/chromey" }
+
+# SCORPION_QWEN3_VL_CANDLE_REFERENCE_PARITY_ROOT_CAUSE_001: candle-transformers
+# 0.11.0's Qwen3-VL text decoder silently dropped rope_scaling/mrope_section
+# and applied plain sequential 1D RoPE instead of the model's real
+# interleaved 3-axis MRoPE, plus inverted its prefill causal-mask condition
+# (every prompt token attended bidirectionally across the whole prompt).
+# Root-caused against a pinned transformers/PyTorch reference oracle; see
+# vendor/candle-transformers-qwen3vl-fix/README.md.
+candle-transformers = { path = "vendor/candle-transformers-qwen3vl-fix" }
 
 # Unify the external `spider_transformations` crate onto this workspace's
 # `spider` instead of pulling a second copy from crates.io. This removes a

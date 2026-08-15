@@ -172,10 +172,25 @@ fn prepare_request<'a>(
             if grid.original_dimensions() != metadata.original_dimensions {
                 return Err(CaptchaSolveFailure::InvalidChallenge);
             }
+            // When an empty selection is not a valid answer, the array's
+            // first character is forced to be the opening quote of the
+            // first chosen id regardless of what the model generates — pre-
+            // committing it in the prefill rather than requiring the
+            // constrained search to (re)discover that single forced token
+            // works around a real search-vocabulary gap: some tokenizer
+            // entries for an isolated opening quote don't get found by the
+            // ranked per-token search when nothing has been generated yet.
+            // When an empty selection is valid, the prefill must stay at
+            // `[` so the model can still legitimately close immediately.
+            let assistant_prefill = if grid.empty_selection_valid() {
+                "{\"selected_ids\":[".to_string()
+            } else {
+                "{\"selected_ids\":[\"".to_string()
+            };
             Ok(PreparedRequest {
                 bytes,
                 prompt: image_grid_prompt(request, grid),
-                assistant_prefill: "{\"selected_ids\":[".into(),
+                assistant_prefill,
                 schema: Qwen3VlStructuredSchema::StringIdArray {
                     field: "selected_ids".into(),
                     allowed_ids: grid

@@ -787,6 +787,58 @@ impl PaligemmaCpuRuntime {
         })
     }
 
+    /// Diagnostic-only: run the exact same canonical processor this
+    /// runtime's `detect`/`generate_structured_ids` use, and summarize the
+    /// resulting tensor (shape/dtype/device/min/max/mean/finiteness/
+    /// checksum) without exposing or dumping the tensor itself. Adds no
+    /// new preprocessing path and changes no solving behavior — it calls
+    /// the identical private `process_image` this runtime always uses.
+    pub fn image_tensor_diagnostics(
+        &self,
+        image_bytes: &[u8],
+    ) -> Result<PaligemmaTensorDiagnostics, PaligemmaRuntimeFailure> {
+        let processed = process_image(image_bytes, &self.device, self.dtype, self.image_size)?;
+        let shape: [usize; 4] = processed
+            .pixel_values
+            .dims4()
+            .map_err(|e| PaligemmaRuntimeFailure::Processing(e.to_string()))
+            .map(|(a, b, c, d)| [a, b, c, d])?;
+        let dtype = match processed.pixel_values.dtype() {
+            DType::F16 => "F16",
+            DType::F32 => "F32",
+            DType::BF16 => "BF16",
+            _ => "OTHER",
+        };
+        let is_cuda = self.device.is_cuda();
+        let flat = processed
+            .pixel_values
+            .to_dtype(DType::F32)
+            .and_then(|t| t.flatten_all())
+            .and_then(|t| t.to_vec1::<f32>())
+            .map_err(|e| PaligemmaRuntimeFailure::Processing(e.to_string()))?;
+        let all_finite = flat.iter().all(|v| v.is_finite());
+        let min = flat.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = flat.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mean = flat.iter().copied().sum::<f32>() / flat.len() as f32;
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        for value in &flat {
+            hasher.update(value.to_le_bytes());
+        }
+        let sha256_checksum = format!("{:x}", hasher.finalize());
+        Ok(PaligemmaTensorDiagnostics {
+            original_dimensions: processed.original_dimensions,
+            shape,
+            dtype,
+            is_cuda,
+            min,
+            max,
+            mean,
+            all_finite,
+            sha256_checksum,
+        })
+    }
+
     /// Real `detect {label}` grounding query: deterministic greedy decode
     /// constrained to exactly four `<locNNNN>` tokens (the model's own
     /// genuine bounding-box answer), then stop — the trailing free-text
@@ -1097,6 +1149,35 @@ fn validate_safetensors(weight_paths: &[PathBuf]) -> Result<(), PaligemmaRuntime
 struct ProcessedImage {
     original_dimensions: (u32, u32),
     pixel_values: Tensor,
+}
+
+/// Diagnostic-only summary of one processed input tensor — never the raw
+/// tensor itself. Exists solely to let a caller prove an image did not
+/// become blank/near-uniform/incorrectly normalized/channel-swapped before
+/// reaching the model, without needing model internals or a full tensor
+/// dump. Adds no behavior to `detect`/`generate_structured_ids`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaligemmaTensorDiagnostics {
+    /// Original decoded image dimensions.
+    pub original_dimensions: (u32, u32),
+    /// Tensor shape, e.g. `[1, 3, 224, 224]`.
+    pub shape: [usize; 4],
+    /// Tensor dtype identity string (e.g. `"F16"`, `"F32"`).
+    pub dtype: &'static str,
+    /// Whether the tensor's device is CUDA (vs CPU).
+    pub is_cuda: bool,
+    /// Minimum value across every element, computed in F32.
+    pub min: f32,
+    /// Maximum value across every element, computed in F32.
+    pub max: f32,
+    /// Arithmetic mean across every element, computed in F32.
+    pub mean: f32,
+    /// True only if every element is finite (no NaN/Inf).
+    pub all_finite: bool,
+    /// Stable, order-dependent checksum over every raw element byte
+    /// (SHA-256 of the F32-converted flattened tensor) — a reproducible
+    /// fingerprint, not a full dump.
+    pub sha256_checksum: String,
 }
 
 /// Decode and pack one image according to the pinned PaliGemma contract: a

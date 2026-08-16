@@ -2150,6 +2150,7 @@ fn captcha_and_browser_challenge_cannot_reconstruct_frame_identity() {
         "spider/src/features/solvers",
         "spider/src/features/browser_challenge.rs",
         "spider/src/features/qwen3_vl_captcha.rs",
+        "spider/src/features/captcha_browser.rs",
     ] {
         let path = root.join(relative);
         let mut files = Vec::new();
@@ -2299,5 +2300,100 @@ fn scanner_rejects_synthetic_frame_aware_browser_challenge_bypasses() {
         "provider.solve(CaptchaSolveRequest::new(challenge))",
     ] {
         assert!(browser_challenge_authority_violation(fixture));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CANONICAL CAPTCHA BROWSER EXECUTION BINDING
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_CAPTCHA_BROWSER_EXECUTION_BINDING_001
+//
+// Thin composition of one immutable BrowserChallengeSnapshot, one normalized
+// CaptchaSolveRequest, one explicitly selected provider attempt and the
+// exact browser action already owned by the snapshot seam.
+
+fn captcha_browser_binding_violation(source: &str) -> bool {
+    [
+        "find_element(",
+        "find_elements(",
+        "click_smooth(",
+        "click_and_drag_smooth(",
+        "call_js_fn(",
+        "Qwen3VlCpuRuntime",
+        "generate_structured(",
+        "fallback_provider",
+        "retry_challenge",
+        ".clamp(",
+    ]
+    .iter()
+    .any(|pattern| source.contains(pattern))
+}
+
+#[test]
+fn captcha_browser_binding_composes_canonical_seams_without_new_authority() {
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/captcha_browser.rs"))
+            .unwrap();
+    assert!(source.contains("BrowserChallengeSnapshot"));
+    assert!(source.contains("CaptchaRouteAttempts"));
+    assert!(source.contains("CaptchaSolveRequest"));
+    assert!(source.contains("snapshot.revalidate(page).await"));
+    assert!(source.contains("snapshot.apply(page, action).await"));
+    assert!(!captcha_browser_binding_violation(&source));
+}
+
+#[test]
+fn scanner_rejects_synthetic_captcha_browser_authority_leaks() {
+    for fixture in [
+        "page.find_element(selector).await?",
+        "page.find_elements(selector).await?",
+        "page.click_smooth(point).await?",
+        "page.click_and_drag_smooth(from, to).await?",
+        "element.call_js_fn(script, false).await?",
+        "Qwen3VlCpuRuntime::initialize(installation, ram)",
+        "runtime.generate_structured(request).await?",
+        "fallback_provider.solve(request).await",
+        "retry_challenge(challenge).await",
+        "x.clamp(0.0, width)",
+    ] {
+        assert!(captcha_browser_binding_violation(fixture));
+    }
+}
+
+#[test]
+fn captcha_browser_binding_composes_frame_aware_seam_without_duplicating_routing() {
+    // SCORPION_CANONICAL_BROWSER_FRAME_CONTEXT_SNAPSHOT_AND_ACTION_001's
+    // successor: the frame-aware entry point must compose
+    // revalidate_in_frame/apply_in_frame (never a second frame-aware action
+    // stack, never a raw frame-identity reconstruction), and must share
+    // materialization/action-selection with the top-level entry point
+    // rather than duplicating provider-routing logic.
+    let source =
+        fs::read_to_string(workspace_root().join("spider/src/features/captcha_browser.rs"))
+            .unwrap();
+    assert!(source.contains("pub async fn execute_browser_captcha_attempt_in_frame"));
+    assert!(source.contains("snapshot.revalidate_in_frame(page, top_level, frame).await"));
+    assert!(source.contains(".apply_in_frame(page, top_level, frame, action)"));
+    assert!(source.contains("use crate::features::frame_context::FrameContext"));
+    assert_eq!(source.matches("fn materialize_request(").count(), 1);
+    assert_eq!(source.matches("fn actions_for_solution(").count(), 1);
+    assert_eq!(
+        source.matches("async fn solve_and_select_actions(").count(),
+        1
+    );
+    assert!(!captcha_browser_binding_violation(&source));
+    for forbidden in [
+        "AttachedTargetSession",
+        "attached_session(",
+        "GetFrameOwnerParams",
+        "GetFrameTreeParams",
+        "Target.attachedToTarget",
+        "FrameOwnerOffset",
+        "resolve_frame_owner_offset",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "captcha_browser.rs must not reconstruct frame identity or transforms via {forbidden:?}"
+        );
     }
 }

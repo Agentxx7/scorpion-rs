@@ -160,6 +160,64 @@ impl BrowserImageTransform {
             y: self.browser_geometry.y + y / self.capture_scale,
         })
     }
+
+    /// Translate one CSS viewport point into captured-image coordinates.
+    pub fn browser_to_image(&self, x: f64, y: f64) -> Result<Point, BrowserChallengeFailure> {
+        if !x.is_finite()
+            || !y.is_finite()
+            || !self.capture_scale.is_finite()
+            || self.capture_scale <= 0.0
+            || x < self.browser_geometry.x
+            || y < self.browser_geometry.y
+            || x >= self.browser_geometry.x + self.browser_geometry.width
+            || y >= self.browser_geometry.y + self.browser_geometry.height
+        {
+            return Err(BrowserChallengeFailure::TransformAmbiguous);
+        }
+        Ok(Point {
+            x: (x - self.browser_geometry.x) * self.capture_scale,
+            y: (y - self.browser_geometry.y) * self.capture_scale,
+        })
+    }
+
+    /// Translate one browser rectangle into exact integer image-pixel geometry.
+    pub fn browser_rect_to_image(
+        &self,
+        rect: BrowserRect,
+    ) -> Result<(u32, u32, u32, u32), BrowserChallengeFailure> {
+        if !rect.valid() {
+            return Err(BrowserChallengeFailure::TransformAmbiguous);
+        }
+        let top_left = self.browser_to_image(rect.x, rect.y)?;
+        let right = (rect.x + rect.width - self.browser_geometry.x) * self.capture_scale;
+        let bottom = (rect.y + rect.height - self.browser_geometry.y) * self.capture_scale;
+        if right > f64::from(self.image_width) + GEOMETRY_EPSILON
+            || bottom > f64::from(self.image_height) + GEOMETRY_EPSILON
+        {
+            return Err(BrowserChallengeFailure::TransformAmbiguous);
+        }
+        let values = [top_left.x, top_left.y, right, bottom];
+        if values
+            .iter()
+            .any(|value| !value.is_finite() || (value - value.round()).abs() > 0.01)
+        {
+            return Err(BrowserChallengeFailure::TransformAmbiguous);
+        }
+        let x = top_left.x.round() as u32;
+        let y = top_left.y.round() as u32;
+        let right = right.round() as u32;
+        let bottom = bottom.round() as u32;
+        let width = right
+            .checked_sub(x)
+            .ok_or(BrowserChallengeFailure::TransformAmbiguous)?;
+        let height = bottom
+            .checked_sub(y)
+            .ok_or(BrowserChallengeFailure::TransformAmbiguous)?;
+        if width == 0 || height == 0 {
+            return Err(BrowserChallengeFailure::TransformAmbiguous);
+        }
+        Ok((x, y, width, height))
+    }
 }
 
 /// Authoritative offset from a direct child frame's own CSS viewport origin
@@ -790,6 +848,34 @@ impl BrowserChallengeSnapshot {
         Ok(())
     }
 
+    /// Build an exact image-space drag from one retained target and offset.
+    pub fn horizontal_drag_from_target(
+        &self,
+        stable_id: &str,
+        offset: f64,
+    ) -> Result<BrowserHorizontalDrag, BrowserChallengeFailure> {
+        if !offset.is_finite() {
+            return Err(BrowserChallengeFailure::DragOutOfBounds);
+        }
+        let target = self
+            .targets
+            .get(stable_id)
+            .ok_or(BrowserChallengeFailure::TargetIdentityUnavailable)?;
+        let center = self.transform.browser_to_image(
+            target.geometry.x + target.geometry.width / 2.0,
+            target.geometry.y + target.geometry.height / 2.0,
+        )?;
+        let end_x = center.x + offset;
+        self.transform
+            .image_to_browser(end_x, center.y)
+            .map_err(|_| BrowserChallengeFailure::DragOutOfBounds)?;
+        Ok(BrowserHorizontalDrag {
+            start_x: center.x,
+            start_y: center.y,
+            end_x,
+        })
+    }
+
     /// Revalidate then apply exactly one authoritative browser action.
     pub async fn apply(
         &self,
@@ -1334,6 +1420,21 @@ mod tests {
         assert_eq!(
             transform.image_to_browser(401.0, 0.0),
             Err(BrowserChallengeFailure::PointOutOfBounds)
+        );
+        assert_eq!(
+            transform.browser_to_image(60.0, 60.0).unwrap(),
+            Point { x: 100.0, y: 80.0 }
+        );
+        assert_eq!(
+            transform
+                .browser_rect_to_image(BrowserRect {
+                    x: 20.0,
+                    y: 30.0,
+                    width: 40.0,
+                    height: 20.0,
+                })
+                .unwrap(),
+            (20, 20, 80, 40)
         );
     }
 

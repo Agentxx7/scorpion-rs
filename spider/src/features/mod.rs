@@ -44,6 +44,9 @@ pub mod gemini_common;
 pub mod browser_challenge;
 /// Provider-neutral CAPTCHA solver capability.
 pub mod captcha;
+/// Thin canonical binding between browser attempts and CAPTCHA providers.
+#[cfg(feature = "chrome")]
+pub mod captcha_browser;
 /// Provider-neutral governance contract for acquiring, independently
 /// annotating, splitting and immutably freezing CAPTCHA evaluation corpora.
 pub mod captcha_evaluation_corpus;

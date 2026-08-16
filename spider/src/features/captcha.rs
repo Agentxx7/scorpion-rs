@@ -670,6 +670,14 @@ impl CaptchaRouteAttempts {
         Self::default()
     }
 
+    /// Read-only diagnostic/provenance access to every recorded attempt, in
+    /// order. Never used for retry, substitution, or re-routing — this
+    /// binding performs exactly one explicit attempt regardless of what a
+    /// caller does with this accessor afterward.
+    pub fn recorded(&self) -> &[CaptchaRouteAttempt] {
+        &self.attempts
+    }
+
     /// Execute exactly the provider selected by `request` and retain its outcome.
     pub async fn execute_explicit_attempt(
         &mut self,

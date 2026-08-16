@@ -82,6 +82,93 @@ pub const PALIGEMMA_CUDA_MINIMUM_RAM_BYTES: u64 = 13_500_000_000;
 #[cfg(feature = "local_paligemma_cuda")]
 pub const PALIGEMMA_CUDA_MINIMUM_VRAM_BYTES: u64 = 8_000_000_000;
 
+/// Immutable upstream model revision accepted for the qualified
+/// `google/paligemma-3b-mix-448` checkpoint variant — a genuinely different,
+/// separately pinned artifact set from the 224 variant above, not a
+/// reinterpretation of it. See
+/// `SCORPION_PALIGEMMA_448_PRODUCTION_RUNTIME_INTEGRATION_001`.
+pub const PALIGEMMA_448_MODEL_REVISION: &str = "ead2d9a35598cb89119af004f5d023b311d1c4a1";
+/// Immutable accelerated-runtime identity for the 448 checkpoint. Distinct
+/// from `PALIGEMMA_CUDA_RUNTIME_IDENTITY` (which always means the 224
+/// envelope) so provenance never conflates the two image envelopes sharing
+/// the same device/dtype backend.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_448_CUDA_RUNTIME_IDENTITY: &str = "candle-0.11.0-cuda-f16-448";
+/// Stable implementation identity for the 448 CUDA/F16 processor contract —
+/// same normalization formula as `PALIGEMMA_CUDA_PROCESSOR_ID`, resized to
+/// the 448x448 envelope.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_448_CUDA_PROCESSOR_ID: &str =
+    "paligemma-3b-mix-448@ead2d9a3-candle-0.11.0-cuda-f16-processor-v1-448x448";
+/// Minimum available host RAM required before 448 CUDA/F16 initialization.
+/// Real measured peak RSS during a real load-and-full-battery cycle through
+/// the production `CaptchaProvider` seam was 12,349,747,200 bytes
+/// (~11.50 GB) — essentially identical to the 224 CUDA floor's own real
+/// measurement (~11.49 GB), since both variants mmap near-identical total
+/// F32 shard bytes (~11.7 GB) during verification/loading and weights do
+/// not remain host-resident once uploaded — rounded up with the same ~8%
+/// safety margin convention used throughout this module, not a
+/// formula-only estimate. See the frontier SDD for the full measurement.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_448_CUDA_MINIMUM_RAM_BYTES: u64 = 13_500_000_000;
+/// Minimum available device (VRAM) memory required before 448 CUDA/F16
+/// initialization. Real measured VRAM in use after a real load-and-full-
+/// battery cycle through the production `CaptchaProvider` seam was
+/// 7,251,820,544 bytes (~6.76 GB) — higher than the 224 CUDA floor's own
+/// real measurement (~6.77 GB is coincidentally close, but the 448
+/// envelope's 4x image token sequence length, 1024 vs 256, genuinely
+/// increases prefill/KV-cache footprint even though weight bytes are the
+/// same) — rounded up with the same ~8% safety margin convention. See the
+/// frontier SDD for the full measurement.
+#[cfg(feature = "local_paligemma_cuda")]
+pub const PALIGEMMA_448_CUDA_MINIMUM_VRAM_BYTES: u64 = 8_000_000_000;
+
+/// Upstream repository for the 224 checkpoint variant.
+const PALIGEMMA_224_REPOSITORY: &str = "google/paligemma-3b-mix-224";
+/// Upstream repository for the 448 checkpoint variant.
+const PALIGEMMA_448_REPOSITORY: &str = "google/paligemma-3b-mix-448";
+
+/// Immutable identity and fixed-image-envelope parameters for one qualified
+/// PaliGemma checkpoint variant. The 224 and 448 variants share every
+/// architecture, processing formula and grounding grammar; only these
+/// values (and the pinned artifact table) differ between them — see
+/// `PaligemmaCheckpointProfile::config`.
+#[derive(Clone, Copy, Debug)]
+struct PaligemmaCheckpointProfile {
+    repository: &'static str,
+    revision: &'static str,
+    image_size: u32,
+    image_seq_len: usize,
+}
+
+impl PaligemmaCheckpointProfile {
+    /// The real `candle-transformers` config for this variant's fixed image
+    /// envelope. Both already exist in the vendored fork
+    /// (`vendor/candle-transformers-qwen3vl-fix/src/models/paligemma.rs`);
+    /// this is Scorpion-side parameter selection only, no new model code.
+    fn config(&self) -> Config {
+        if self.image_size == PALIGEMMA_448_PROFILE.image_size {
+            Config::paligemma_3b_448()
+        } else {
+            Config::paligemma_3b_224()
+        }
+    }
+}
+
+const PALIGEMMA_224_PROFILE: PaligemmaCheckpointProfile = PaligemmaCheckpointProfile {
+    repository: PALIGEMMA_224_REPOSITORY,
+    revision: PALIGEMMA_MODEL_REVISION,
+    image_size: IMAGE_SIZE,
+    image_seq_len: IMAGE_SEQ_LEN,
+};
+
+const PALIGEMMA_448_PROFILE: PaligemmaCheckpointProfile = PaligemmaCheckpointProfile {
+    repository: PALIGEMMA_448_REPOSITORY,
+    revision: PALIGEMMA_448_MODEL_REVISION,
+    image_size: 448,
+    image_seq_len: 1024,
+};
+
 const REQUIRED_ARTIFACTS: [&str; 7] = [
     "model-00001-of-00003.safetensors",
     "model-00002-of-00003.safetensors",
@@ -105,7 +192,7 @@ const EOS_TOKEN_ID: u32 = 1;
 const LOC_TOKEN_BASE: u32 = 256_000;
 const LOC_TOKEN_COUNT: u32 = 1024;
 
-const PINNED_ARTIFACTS: [(&str, u64, &str); 7] = [
+const PINNED_ARTIFACTS_224: [(&str, u64, &str); 7] = [
     (
         "model-00001-of-00003.safetensors",
         4_953_412_480,
@@ -143,12 +230,57 @@ const PINNED_ARTIFACTS: [(&str, u64, &str); 7] = [
     ),
 ];
 
+/// Pinned artifact table for `google/paligemma-3b-mix-448` @
+/// `PALIGEMMA_448_MODEL_REVISION`. Independently downloaded and hashed
+/// during qualification — see
+/// `SCORPION_CAPTCHA_REAL_WORLD_GROUNDING_MODEL_CANDIDATE_QUALIFICATION_001`.
+/// `tokenizer.json`/`tokenizer_config.json` are byte-identical to the 224
+/// variant's (same `GemmaTokenizer` vocabulary shared across both mix
+/// checkpoints) — genuinely re-hashed here, not copied by assumption.
+const PINNED_ARTIFACTS_448: [(&str, u64, &str); 7] = [
+    (
+        "model-00001-of-00003.safetensors",
+        4_956_951_424,
+        "570dab6f84d3b784a06707cdc4742f97545dfd57d73742bb2fcb3190a09696a4",
+    ),
+    (
+        "model-00002-of-00003.safetensors",
+        4_999_820_608,
+        "334b225c0ec1db8f3952121f5f67a78b37167623e2178c0babe3086fcc8ea4ad",
+    ),
+    (
+        "model-00003-of-00003.safetensors",
+        1_740_714_288,
+        "8c75421941def510a8c2364726d8ab36cf1a0653b355368d2e2a80766b5a4f5f",
+    ),
+    (
+        "config.json",
+        1_053,
+        "1cbf1b02dd9f98f23c4133cda6c359defc678b7bc6eeba63cff02f4dd7aaae14",
+    ),
+    (
+        "tokenizer.json",
+        17_549_604,
+        "ef6773c135b77b834de1d13c75a4c98ab7a3684ffd602d1831e1f1bf5467c563",
+    ),
+    (
+        "tokenizer_config.json",
+        39_968,
+        "3259402b1d1802e02417d7bff75a889ec61d359d15be6050a957b307c48edbbe",
+    ),
+    (
+        "preprocessor_config.json",
+        700,
+        "5fc342baea95529a5eb9746a0232fb88941d759812d7b616c382f2f87ba6123f",
+    ),
+];
+
 /// Exact immutable manifest for the qualified image-only production runtime.
 /// It contains no mutable URL identity and advertises no CAPTCHA qualification.
 pub fn paligemma_cpu_f32_manifest() -> LocalModelManifest {
     LocalModelManifest {
-        identity: pinned_model_identity(),
-        artifacts: pinned_artifacts(),
+        identity: pinned_model_identity(&PALIGEMMA_224_PROFILE),
+        artifacts: pinned_artifacts(&PALIGEMMA_224_PROFILE, &PINNED_ARTIFACTS_224),
         runtime_requirements: LocalModelRuntimeRequirements {
             runtime: "candle-0.11.0-cpu-f32".into(),
             preprocessing: PALIGEMMA_PROCESSOR_ID.into(),
@@ -170,8 +302,8 @@ pub fn paligemma_cpu_f32_manifest() -> LocalModelManifest {
 #[cfg(feature = "local_paligemma_cuda")]
 pub fn paligemma_cuda_f16_manifest() -> LocalModelManifest {
     LocalModelManifest {
-        identity: pinned_model_identity(),
-        artifacts: pinned_artifacts(),
+        identity: pinned_model_identity(&PALIGEMMA_224_PROFILE),
+        artifacts: pinned_artifacts(&PALIGEMMA_224_PROFILE, &PINNED_ARTIFACTS_224),
         runtime_requirements: LocalModelRuntimeRequirements {
             runtime: PALIGEMMA_CUDA_RUNTIME_IDENTITY.into(),
             preprocessing: PALIGEMMA_CUDA_PROCESSOR_ID.into(),
@@ -185,25 +317,58 @@ pub fn paligemma_cuda_f16_manifest() -> LocalModelManifest {
     }
 }
 
-fn pinned_model_identity() -> LocalModelIdentity {
-    LocalModelIdentity {
-        provider: "huggingface".into(),
-        repository: "google/paligemma-3b-mix-224".into(),
-        model: "paligemma-3b-mix-224".into(),
-        revision: PALIGEMMA_MODEL_REVISION.into(),
+/// Exact immutable manifest for the qualified `google/paligemma-3b-mix-448`
+/// checkpoint's accelerated CUDA/F16 runtime — same architecture, same
+/// `detect {label}` grammar, same canonical short-label contract as
+/// [`paligemma_cuda_f16_manifest`], only the pinned model/revision and fixed
+/// image envelope (448x448, 1024 image tokens) differ. `devices` declares
+/// CUDA only, matching the runtime's own fail-closed construction; no CPU
+/// variant of this checkpoint is qualified or offered.
+#[cfg(feature = "local_paligemma_cuda")]
+pub fn paligemma_448_cuda_f16_manifest() -> LocalModelManifest {
+    LocalModelManifest {
+        identity: pinned_model_identity(&PALIGEMMA_448_PROFILE),
+        artifacts: pinned_artifacts(&PALIGEMMA_448_PROFILE, &PINNED_ARTIFACTS_448),
+        runtime_requirements: LocalModelRuntimeRequirements {
+            runtime: PALIGEMMA_448_CUDA_RUNTIME_IDENTITY.into(),
+            preprocessing: PALIGEMMA_448_CUDA_PROCESSOR_ID.into(),
+            minimum_ram_bytes: PALIGEMMA_448_CUDA_MINIMUM_RAM_BYTES,
+            devices: vec![LocalModelDeviceRequirement {
+                device: LocalModelDevice::Cuda,
+                minimum_device_memory_bytes: Some(PALIGEMMA_448_CUDA_MINIMUM_VRAM_BYTES),
+            }],
+        },
+        qualifications: Vec::new(),
     }
 }
 
-fn pinned_artifacts() -> Vec<LocalModelArtifact> {
-    PINNED_ARTIFACTS
+fn pinned_model_identity(profile: &PaligemmaCheckpointProfile) -> LocalModelIdentity {
+    LocalModelIdentity {
+        provider: "huggingface".into(),
+        repository: profile.repository.into(),
+        model: profile
+            .repository
+            .rsplit('/')
+            .next()
+            .unwrap_or(profile.repository)
+            .into(),
+        revision: profile.revision.into(),
+    }
+}
+
+fn pinned_artifacts(
+    profile: &PaligemmaCheckpointProfile,
+    table: &[(&str, u64, &str)],
+) -> Vec<LocalModelArtifact> {
+    table
         .iter()
         .map(|(path, size, sha256)| LocalModelArtifact {
             reference: ArtifactReference {
                 provider_id: ProviderId::from("huggingface"),
-                repository_id: "google/paligemma-3b-mix-224".into(),
+                repository_id: profile.repository.into(),
                 path: (*path).into(),
-                requested_revision: Some(PALIGEMMA_MODEL_REVISION.into()),
-                resolved_revision: Some(PALIGEMMA_MODEL_REVISION.into()),
+                requested_revision: Some(profile.revision.into()),
+                resolved_revision: Some(profile.revision.into()),
                 size_bytes: Some(*size),
                 identities: Vec::new(),
                 download_url: None,
@@ -369,8 +534,9 @@ pub struct PaligemmaGenerationResult {
 pub struct PaligemmaImageMetadata {
     /// Original decoded image dimensions.
     pub original_dimensions: (u32, u32),
-    /// Dimensions admitted by the qualified fixed processor envelope
-    /// (always `224x224`).
+    /// Dimensions admitted by this instance's qualified fixed processor
+    /// envelope (`224x224` or `448x448`, per the checkpoint variant this
+    /// runtime was initialized against).
     pub processed_dimensions: (u32, u32),
 }
 
@@ -391,6 +557,11 @@ pub struct PaligemmaCpuRuntime {
     dtype: DType,
     runtime_identity: &'static str,
     processor_identity: &'static str,
+    /// Fixed square processor envelope for this instance (`224` or `448`).
+    image_size: u32,
+    /// Leading `<image>` placeholder count for this instance (`256` or
+    /// `1024`) — `(image_size / patch_size)^2`.
+    image_seq_len: usize,
 }
 
 impl PaligemmaCpuRuntime {
@@ -406,12 +577,13 @@ impl PaligemmaCpuRuntime {
             DType::F32,
             "candle-0.11.0-cpu-f32",
             PALIGEMMA_PROCESSOR_ID,
+            &PALIGEMMA_224_PROFILE,
         )
     }
 
     /// Truthful identity of the backend that actually executed this
     /// instance — `"candle-0.11.0-cpu-f32"` or, under `local_paligemma_cuda`,
-    /// `PALIGEMMA_CUDA_RUNTIME_IDENTITY`.
+    /// `PALIGEMMA_CUDA_RUNTIME_IDENTITY`/`PALIGEMMA_448_CUDA_RUNTIME_IDENTITY`.
     pub fn runtime_identity(&self) -> &'static str {
         self.runtime_identity
     }
@@ -422,22 +594,37 @@ impl PaligemmaCpuRuntime {
         self.processor_identity
     }
 
-    /// Shared construction path for every device/dtype combination this
-    /// runtime supports. `runtime_identity`/`processor_identity` must match
-    /// the installation's own declared identity (`validate_installation_identity`)
-    /// so an installation built for one backend can never silently execute
-    /// on another.
+    /// Truthful exact upstream model revision this instance was verified
+    /// and initialized against — the installation's own durable identity,
+    /// never a compile-time constant selected independently of it.
+    pub fn model_revision(&self) -> &str {
+        &self.installation_identity.model.revision
+    }
+
+    /// Shared construction path for every checkpoint/device/dtype
+    /// combination this runtime supports. `runtime_identity`/`processor_identity`
+    /// must match the installation's own declared identity
+    /// (`validate_installation_identity`) so an installation built for one
+    /// backend can never silently execute on another, and `profile` selects
+    /// the exact pinned repository/revision/image-envelope this instance is
+    /// bound to for the lifetime of the runtime.
     fn initialize_on_device(
         installation: &LocalModelInstallation,
         device: Device,
         dtype: DType,
         runtime_identity: &'static str,
         processor_identity: &'static str,
+        profile: &PaligemmaCheckpointProfile,
     ) -> Result<Self, PaligemmaRuntimeFailure> {
         installation.reverify()?;
-        validate_installation_identity(installation, runtime_identity, processor_identity)?;
+        validate_installation_identity(
+            installation,
+            profile,
+            runtime_identity,
+            processor_identity,
+        )?;
         let paths = required_paths(installation)?;
-        validate_pinned_json(&paths)?;
+        validate_pinned_json(&paths, profile)?;
         validate_safetensors(&paths[0..3])?;
 
         // The real pinned config.json omits several architecture constants
@@ -447,9 +634,11 @@ impl PaligemmaCpuRuntime {
         // deserialization of the full `Config` would fail closed on a
         // "missing field" error. `validate_pinned_json` above already
         // confirms the JSON's own declared fields match this exact pinned
-        // architecture; the full `Config` is the same one
-        // `candle-transformers` itself ships for this checkpoint.
-        let config = Config::paligemma_3b_224();
+        // architecture; `profile.config()` selects the same real
+        // `candle-transformers` config `candle-transformers` itself ships
+        // for this checkpoint's fixed image envelope (224 or 448) — no new
+        // architecture code, only parameter selection.
+        let config = profile.config();
         // SAFETY: `LocalModelInstallation::reverify` has just checked the full
         // file digest and immutable membership. The installation cannot be
         // activated partially, and this runtime retains no mutable file API.
@@ -472,6 +661,8 @@ impl PaligemmaCpuRuntime {
             dtype,
             runtime_identity,
             processor_identity,
+            image_size: profile.image_size,
+            image_seq_len: profile.image_seq_len,
         })
     }
 
@@ -507,6 +698,7 @@ impl PaligemmaCpuRuntime {
             DType::F16,
             PALIGEMMA_CUDA_RUNTIME_IDENTITY,
             PALIGEMMA_CUDA_PROCESSOR_ID,
+            &PALIGEMMA_224_PROFILE,
         )
     }
 
@@ -519,22 +711,62 @@ impl PaligemmaCpuRuntime {
     pub fn initialize_cuda_f16_from_host(
         installation: &LocalModelInstallation,
     ) -> Result<Self, PaligemmaRuntimeFailure> {
-        let mut system = System::new();
-        system.refresh_memory();
-        let available_ram_bytes = system.available_memory();
-        // `Device::new_cuda` establishes (and binds to this thread) the CUDA
-        // context that `cuMemGetInfo` reads; candle-core exposes no
-        // higher-level free-VRAM query, so this one raw driver call is made
-        // directly against the same `cudarc` version candle-core itself
-        // depends on for its `cuda` feature. The device is queried for VRAM
-        // *before* any weight is loaded onto it, then reused (not
-        // recreated) for the real load — never a second, separate context.
-        let device = Device::new_cuda(0)
-            .map_err(|e| PaligemmaRuntimeFailure::DeviceUnavailable(e.to_string()))?;
-        let (available_vram_bytes, _total) = cudarc::driver::result::mem_get_info()
-            .map_err(|e| PaligemmaRuntimeFailure::DeviceUnavailable(e.to_string()))?;
-        preflight_cuda_resources(available_vram_bytes as u64)?;
+        let (available_ram_bytes, available_vram_bytes, device) = cuda_host_preflight()?;
+        preflight_cuda_resources(available_vram_bytes)?;
         Self::initialize_cuda_f16(installation, available_ram_bytes, device)
+    }
+
+    /// Initialize the qualified `google/paligemma-3b-mix-448` checkpoint's
+    /// accelerated CUDA/F16 backend from an explicit host RAM reading and an
+    /// already-established CUDA device. Same provider type, same
+    /// architecture and grounding grammar as
+    /// [`Self::initialize_cuda_f16`] — only the pinned checkpoint profile
+    /// (repository/revision/image envelope) and its own distinct resource
+    /// floors differ. No CPU fallback, matching every other constructor on
+    /// this type. See
+    /// `SCORPION_PALIGEMMA_448_PRODUCTION_RUNTIME_INTEGRATION_001`.
+    #[cfg(feature = "local_paligemma_cuda")]
+    pub fn initialize_448_cuda_f16(
+        installation: &LocalModelInstallation,
+        available_ram_bytes: u64,
+        device: Device,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
+        if !device.is_cuda() {
+            return Err(PaligemmaRuntimeFailure::DeviceUnavailable(
+                "initialize_448_cuda_f16 requires a CUDA device".into(),
+            ));
+        }
+        if available_ram_bytes < PALIGEMMA_448_CUDA_MINIMUM_RAM_BYTES {
+            return Err(PaligemmaRuntimeFailure::ResourceLimitExceeded {
+                available: available_ram_bytes,
+                required: PALIGEMMA_448_CUDA_MINIMUM_RAM_BYTES,
+            });
+        }
+        Self::initialize_on_device(
+            installation,
+            device,
+            DType::F16,
+            PALIGEMMA_448_CUDA_RUNTIME_IDENTITY,
+            PALIGEMMA_448_CUDA_PROCESSOR_ID,
+            &PALIGEMMA_448_PROFILE,
+        )
+    }
+
+    /// Initialize the qualified 448 checkpoint's accelerated CUDA/F16
+    /// backend using current available host RAM and current free device
+    /// VRAM. No CPU fallback: see [`Self::initialize_448_cuda_f16`].
+    #[cfg(feature = "local_paligemma_cuda")]
+    pub fn initialize_448_cuda_f16_from_host(
+        installation: &LocalModelInstallation,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
+        let (available_ram_bytes, available_vram_bytes, device) = cuda_host_preflight()?;
+        if available_vram_bytes < PALIGEMMA_448_CUDA_MINIMUM_VRAM_BYTES {
+            return Err(PaligemmaRuntimeFailure::DeviceMemoryLimitExceeded {
+                available: available_vram_bytes,
+                required: PALIGEMMA_448_CUDA_MINIMUM_VRAM_BYTES,
+            });
+        }
+        Self::initialize_448_cuda_f16(installation, available_ram_bytes, device)
     }
 
     /// Verified installation identity used by this initialized runtime.
@@ -548,10 +780,10 @@ impl PaligemmaCpuRuntime {
         &self,
         image_bytes: &[u8],
     ) -> Result<PaligemmaImageMetadata, PaligemmaRuntimeFailure> {
-        let processed = process_image(image_bytes, &self.device, self.dtype)?;
+        let processed = process_image(image_bytes, &self.device, self.dtype, self.image_size)?;
         Ok(PaligemmaImageMetadata {
             original_dimensions: processed.original_dimensions,
-            processed_dimensions: (IMAGE_SIZE, IMAGE_SIZE),
+            processed_dimensions: (self.image_size, self.image_size),
         })
     }
 
@@ -564,8 +796,12 @@ impl PaligemmaCpuRuntime {
         image_bytes: &[u8],
         label: &str,
     ) -> Result<PaligemmaDetectionBox, PaligemmaRuntimeFailure> {
-        let processed = process_image(image_bytes, &self.device, self.dtype)?;
-        let prompt_ids = build_prompt_tokens(&self.tokenizer, &format!("detect {label}"))?;
+        let processed = process_image(image_bytes, &self.device, self.dtype, self.image_size)?;
+        let prompt_ids = build_prompt_tokens(
+            &self.tokenizer,
+            &format!("detect {label}"),
+            self.image_seq_len,
+        )?;
         let started = Instant::now();
         let mut session = self
             .factory
@@ -624,10 +860,11 @@ impl PaligemmaCpuRuntime {
         } else {
             "{\"selected_ids\":[\"".to_string()
         };
-        let processed = process_image(image_bytes, &self.device, self.dtype)?;
+        let processed = process_image(image_bytes, &self.device, self.dtype, self.image_size)?;
         let prompt_ids = build_prompt_tokens(
             &self.tokenizer,
             &format!("{prompt} Return JSON only: {{\"selected_ids\":[\"id\"]}}."),
+            self.image_seq_len,
         )?;
         let prefill_ids = self
             .tokenizer
@@ -746,14 +983,39 @@ pub fn preflight_cuda_resources(available_vram_bytes: u64) -> Result<(), Paligem
     Ok(())
 }
 
+/// Shared CUDA host preflight for every `*_cuda_f16_from_host` constructor:
+/// establish (and bind to this thread) device 0, read current available host
+/// RAM and current free VRAM before any weight is loaded. Each caller then
+/// applies its own checkpoint-specific resource floor — this helper makes no
+/// pass/fail decision itself.
+#[cfg(feature = "local_paligemma_cuda")]
+fn cuda_host_preflight() -> Result<(u64, u64, Device), PaligemmaRuntimeFailure> {
+    let mut system = System::new();
+    system.refresh_memory();
+    let available_ram_bytes = system.available_memory();
+    // `Device::new_cuda` establishes (and binds to this thread) the CUDA
+    // context that `cuMemGetInfo` reads; candle-core exposes no
+    // higher-level free-VRAM query, so this one raw driver call is made
+    // directly against the same `cudarc` version candle-core itself depends
+    // on for its `cuda` feature. The device is queried for VRAM *before* any
+    // weight is loaded onto it, then reused (not recreated) for the real
+    // load — never a second, separate context.
+    let device = Device::new_cuda(0)
+        .map_err(|e| PaligemmaRuntimeFailure::DeviceUnavailable(e.to_string()))?;
+    let (available_vram_bytes, _total) = cudarc::driver::result::mem_get_info()
+        .map_err(|e| PaligemmaRuntimeFailure::DeviceUnavailable(e.to_string()))?;
+    Ok((available_ram_bytes, available_vram_bytes as u64, device))
+}
+
 fn validate_installation_identity(
     installation: &LocalModelInstallation,
+    profile: &PaligemmaCheckpointProfile,
     expected_runtime_identity: &str,
     expected_processor_identity: &str,
 ) -> Result<(), PaligemmaRuntimeFailure> {
     let identity = installation.identity();
-    if identity.model.repository != "google/paligemma-3b-mix-224"
-        || identity.model.revision != PALIGEMMA_MODEL_REVISION
+    if identity.model.repository != profile.repository
+        || identity.model.revision != profile.revision
         || identity.runtime != expected_runtime_identity
         || identity.preprocessing != expected_processor_identity
     {
@@ -777,7 +1039,10 @@ fn required_paths(
         .collect()
 }
 
-fn validate_pinned_json(paths: &[PathBuf]) -> Result<(), PaligemmaRuntimeFailure> {
+fn validate_pinned_json(
+    paths: &[PathBuf],
+    profile: &PaligemmaCheckpointProfile,
+) -> Result<(), PaligemmaRuntimeFailure> {
     let config: Value = read_json(&paths[3], "config.json")?;
     let preprocessor: Value = read_json(&paths[6], "preprocessor_config.json")?;
     let tokenizer_config: Value = read_json(&paths[5], "tokenizer_config.json")?;
@@ -793,9 +1058,9 @@ fn validate_pinned_json(paths: &[PathBuf]) -> Result<(), PaligemmaRuntimeFailure
         && config["vision_config"]["hidden_size"] == 1152
         && config["vision_config"]["num_hidden_layers"] == 27
         && config["vision_config"]["patch_size"] == PATCH_SIZE
-        && preprocessor["image_seq_length"] == IMAGE_SEQ_LEN
-        && preprocessor["size"]["height"] == IMAGE_SIZE
-        && preprocessor["size"]["width"] == IMAGE_SIZE
+        && preprocessor["image_seq_length"] == profile.image_seq_len
+        && preprocessor["size"]["height"] == profile.image_size
+        && preprocessor["size"]["width"] == profile.image_size
         && tokenizer_config["tokenizer_class"] == "GemmaTokenizer";
     if !correct {
         return Err(PaligemmaRuntimeFailure::InvalidArtifact(
@@ -835,29 +1100,31 @@ struct ProcessedImage {
 }
 
 /// Decode and pack one image according to the pinned PaliGemma contract: a
-/// direct (non-aspect-preserving) resize to the fixed 224x224 envelope —
-/// `SiglipImageProcessor`'s own real behavior, not a Scorpion approximation
-/// — then `(pixel/255 - 0.5) / 0.5` normalization (identical formula to the
-/// pinned Qwen3-VL processor). Normalization itself always happens in F32
-/// (matching the reference processor's own arithmetic); the result is then
-/// cast to the runtime's own weight dtype so the vision tower's first
-/// `conv2d` never sees a dtype mismatch against F16 (or any future
-/// non-F32) weights.
+/// direct (non-aspect-preserving) resize to the runtime's fixed square
+/// envelope (`224x224` or `448x448`) — `SiglipImageProcessor`'s own real
+/// behavior, not a Scorpion approximation — then `(pixel/255 - 0.5) / 0.5`
+/// normalization (identical formula to the pinned Qwen3-VL processor,
+/// identical across both PaliGemma envelopes). Normalization itself always
+/// happens in F32 (matching the reference processor's own arithmetic); the
+/// result is then cast to the runtime's own weight dtype so the vision
+/// tower's first `conv2d` never sees a dtype mismatch against F16 (or any
+/// future non-F32) weights.
 fn process_image(
     encoded: &[u8],
     device: &Device,
     dtype: DType,
+    image_size: u32,
 ) -> Result<ProcessedImage, PaligemmaRuntimeFailure> {
     let image = image::load_from_memory(encoded)
         .map_err(|e| PaligemmaRuntimeFailure::Processing(e.to_string()))?;
     let original_dimensions = image.dimensions();
     let rgb = image
-        .resize_exact(IMAGE_SIZE, IMAGE_SIZE, FilterType::CatmullRom)
+        .resize_exact(image_size, image_size, FilterType::CatmullRom)
         .to_rgb8();
-    let mut packed = Vec::with_capacity(3 * (IMAGE_SIZE as usize) * (IMAGE_SIZE as usize));
+    let mut packed = Vec::with_capacity(3 * (image_size as usize) * (image_size as usize));
     for channel in 0..3 {
-        for y in 0..IMAGE_SIZE {
-            for x in 0..IMAGE_SIZE {
+        for y in 0..image_size {
+            for x in 0..image_size {
                 let value = f32::from(rgb.get_pixel(x, y)[channel]);
                 packed.push((value / 255.0 - 0.5) / 0.5);
             }
@@ -865,7 +1132,7 @@ fn process_image(
     }
     let pixel_values = Tensor::from_vec(
         packed,
-        (1, 3, IMAGE_SIZE as usize, IMAGE_SIZE as usize),
+        (1, 3, image_size as usize, image_size as usize),
         device,
     )
     .and_then(|t| t.to_dtype(dtype))
@@ -889,40 +1156,41 @@ fn process_image(
 /// end-to-end even though the leading image placeholders are discarded
 /// afterward.
 ///
-/// The 256 leading `<image>` placeholder ids are discarded, not fed to the
-/// model: `candle_transformers::models::paligemma::Model::setup` takes the
-/// real 256-position vision-tower image embeddings and the text-token
+/// The leading `<image>` placeholder ids (`image_seq_len` of them — `256`
+/// for the 224 envelope, `1024` for the 448 envelope) are discarded, not fed
+/// to the model: `candle_transformers::models::paligemma::Model::setup`
+/// takes the real vision-tower image embeddings and the text-token
 /// embeddings as two separate tensors and concatenates them itself
 /// (`Tensor::cat(&[image_features, text_features], 1)`); passing the
 /// placeholder ids' own (semantically meaningless) text embeddings as well
-/// would duplicate the image span into a 517-position sequence instead of
-/// the reference's real 261, corrupting every downstream position and
-/// producing incoherent output — confirmed empirically (a first attempt
-/// that passed the full 261-token sequence, including the placeholders,
-/// produced degenerate near-`1023` bin values regardless of true target
-/// position).
+/// would duplicate the image span, corrupting every downstream position and
+/// producing incoherent output — confirmed empirically for the 224 envelope
+/// (a first attempt that passed the full 261-token sequence, including the
+/// placeholders, produced degenerate near-`1023` bin values regardless of
+/// true target position).
 fn build_prompt_tokens(
     tokenizer: &Tokenizer,
     prompt: &str,
+    image_seq_len: usize,
 ) -> Result<Vec<u32>, PaligemmaRuntimeFailure> {
-    let rendered = format!("{}{}{prompt}\n", "<image>".repeat(IMAGE_SEQ_LEN), "<bos>");
+    let rendered = format!("{}{}{prompt}\n", "<image>".repeat(image_seq_len), "<bos>");
     let encoding = tokenizer
         .encode(rendered, false)
         .map_err(|e| PaligemmaRuntimeFailure::Tokenization(e.to_string()))?;
     let ids = encoding.get_ids().to_vec();
     let image_count = ids.iter().filter(|id| **id == IMAGE_TOKEN_ID).count();
-    if image_count != IMAGE_SEQ_LEN || ids.first() != Some(&IMAGE_TOKEN_ID) {
+    if image_count != image_seq_len || ids.first() != Some(&IMAGE_TOKEN_ID) {
         return Err(PaligemmaRuntimeFailure::InvalidArtifact(
             "image token framing",
         ));
     }
     if !ids
-        .get(IMAGE_SEQ_LEN..IMAGE_SEQ_LEN + 1)
+        .get(image_seq_len..image_seq_len + 1)
         .is_some_and(|s| s == [BOS_TOKEN_ID])
     {
         return Err(PaligemmaRuntimeFailure::InvalidArtifact("bos framing"));
     }
-    Ok(ids[IMAGE_SEQ_LEN..].to_vec())
+    Ok(ids[image_seq_len..].to_vec())
 }
 
 /// The final position's logits, always as F32 — greedy argmax/ranking
@@ -1123,9 +1391,22 @@ mod tests {
 
     #[test]
     fn pinned_processor_shape_matches_reference_fixture() {
-        let output = process_image(&fixture_png(), &Device::Cpu, DType::F32).unwrap();
+        let output = process_image(&fixture_png(), &Device::Cpu, DType::F32, IMAGE_SIZE).unwrap();
         assert_eq!(output.original_dimensions, (224, 224));
         assert_eq!(output.pixel_values.dims(), &[1, 3, 224, 224]);
+    }
+
+    #[test]
+    fn pinned_processor_shape_matches_448_envelope() {
+        let output = process_image(
+            &fixture_png(),
+            &Device::Cpu,
+            DType::F32,
+            PALIGEMMA_448_PROFILE.image_size,
+        )
+        .unwrap();
+        assert_eq!(output.original_dimensions, (224, 224));
+        assert_eq!(output.pixel_values.dims(), &[1, 3, 448, 448]);
     }
 
     #[test]

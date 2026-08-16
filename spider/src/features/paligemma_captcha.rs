@@ -24,7 +24,7 @@ use crate::features::captcha::{
 use crate::features::local_model::LocalModelInstallation;
 use crate::features::paligemma_runtime::{
     PaligemmaCpuRuntime, PaligemmaDetectionBox, PaligemmaRuntimeFailure,
-    PaligemmaStringIdArraySchema, PALIGEMMA_MODEL_REVISION,
+    PaligemmaStringIdArraySchema,
 };
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -95,6 +95,24 @@ impl PaligemmaLocalCaptchaProvider {
         })
     }
 
+    /// Initialize the qualified `google/paligemma-3b-mix-448` checkpoint's
+    /// accelerated CUDA/F16 backend using current available host RAM and
+    /// current free device VRAM. Same provider
+    /// (`CaptchaProviderId::PALIGEMMA_LOCAL`), same challenge kinds, same
+    /// `CaptchaSolveOutcome` semantics as every other constructor on this
+    /// type — only the pinned checkpoint (repository, revision, image
+    /// envelope) and its own qualified resource floors differ, and
+    /// provenance reports the difference truthfully. No CPU fallback: see
+    /// `PaligemmaCpuRuntime::initialize_448_cuda_f16_from_host`.
+    #[cfg(feature = "local_paligemma_cuda")]
+    pub fn initialize_448_cuda_f16_from_host(
+        installation: &LocalModelInstallation,
+    ) -> Result<Self, PaligemmaRuntimeFailure> {
+        Ok(Self {
+            runtime: PaligemmaCpuRuntime::initialize_448_cuda_f16_from_host(installation)?,
+        })
+    }
+
     /// Consume the provider and release runtime-owned model resources.
     pub fn unload(self) {
         self.runtime.unload();
@@ -125,11 +143,18 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
         let started = Instant::now();
         let runtime_identity = self.runtime.runtime_identity();
         let processor_identity = self.runtime.processor_identity();
+        // Truthful exact revision of the checkpoint this instance was
+        // actually verified and initialized against — not a compile-time
+        // constant selected independently of which manifest was activated,
+        // so a 224 provider and a 448 provider never report each other's
+        // revision. See `SCORPION_PALIGEMMA_448_PRODUCTION_RUNTIME_INTEGRATION_001`.
+        let model_revision = self.runtime.model_revision();
         if request.challenge.visuals.len() != 1 {
             return failed(
                 request,
                 CaptchaSolveFailure::InvalidChallenge,
                 started.elapsed(),
+                model_revision,
                 runtime_identity,
                 processor_identity,
             );
@@ -140,6 +165,7 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                 request,
                 CaptchaSolveFailure::InvalidChallenge,
                 started.elapsed(),
+                model_revision,
                 runtime_identity,
                 processor_identity,
             );
@@ -151,6 +177,7 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                     request,
                     CaptchaSolveFailure::InvalidChallenge,
                     started.elapsed(),
+                    model_revision,
                     runtime_identity,
                     processor_identity,
                 )
@@ -173,6 +200,7 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                 request,
                 CaptchaSolveFailure::DeadlineExceeded,
                 started.elapsed(),
+                model_revision,
                 runtime_identity,
                 processor_identity,
             ),
@@ -180,6 +208,7 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                 request,
                 failure,
                 started.elapsed(),
+                model_revision,
                 runtime_identity,
                 processor_identity,
             ),
@@ -189,6 +218,7 @@ impl CaptchaProvider for PaligemmaLocalCaptchaProvider {
                     request,
                     elapsed,
                     true,
+                    model_revision,
                     runtime_identity,
                     processor_identity,
                 ),
@@ -347,13 +377,14 @@ fn provenance(
     request: &CaptchaSolveRequest,
     elapsed: Duration,
     succeeded: bool,
+    model_revision: &str,
     runtime_identity: &'static str,
     processor_identity: &'static str,
 ) -> CaptchaSolveProvenance {
     CaptchaSolveProvenance::local_runtime(
         CaptchaProviderId::PALIGEMMA_LOCAL,
         CaptchaLocalRuntimeProvenance {
-            model_revision: PALIGEMMA_MODEL_REVISION.into(),
+            model_revision: model_revision.into(),
             runtime_identity: runtime_identity.into(),
             processor_identity: processor_identity.into(),
             challenge_kind: request.challenge.kind,
@@ -368,6 +399,7 @@ fn failed(
     request: &CaptchaSolveRequest,
     failure: CaptchaSolveFailure,
     elapsed: Duration,
+    model_revision: &str,
     runtime_identity: &'static str,
     processor_identity: &'static str,
 ) -> CaptchaSolveOutcome {
@@ -377,6 +409,7 @@ fn failed(
             request,
             elapsed,
             false,
+            model_revision,
             runtime_identity,
             processor_identity,
         )),
@@ -390,7 +423,9 @@ mod tests {
         solve_captcha, CaptchaChallenge, CaptchaImageGridCell, CaptchaProviderRegistry,
         CaptchaVisualInput,
     };
-    use crate::features::paligemma_runtime::{paligemma_cpu_f32_manifest, PALIGEMMA_PROCESSOR_ID};
+    use crate::features::paligemma_runtime::{
+        paligemma_cpu_f32_manifest, PALIGEMMA_MODEL_REVISION, PALIGEMMA_PROCESSOR_ID,
+    };
     use image::{DynamicImage, ImageBuffer, Rgb};
     use std::io::Cursor;
     use std::path::PathBuf;

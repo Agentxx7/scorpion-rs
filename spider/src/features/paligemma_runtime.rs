@@ -1023,6 +1023,16 @@ fn id_array_state(input: &str, allowed: &[String], allow_empty: bool) -> Grammar
 /// to find a genuine next id before `]}` can become legal again: the
 /// grammar itself makes `..."cell-1",]}` structurally unreachable, rather
 /// than relying on the strict JSON parser to reject it after generation.
+///
+/// A comma is itself only explored as a legal continuation when at least
+/// one allowed id remains unused after the id it follows — `used` grows by
+/// exactly one non-duplicate index per matched id, so `next_used.len() <
+/// allowed.len()` is exactly "an unused id still exists." When every id is
+/// already used, the comma branch is skipped entirely rather than
+/// recursed into, so `id_array_constrained_token`'s search rejects the
+/// comma-producing token itself (state stays `Invalid`) instead of only
+/// discovering the dead end one token later with no way to reconsider it —
+/// see `SCORPION_PALIGEMMA_ID_ARRAY_COMMA_REQUIRES_AVAILABLE_ID_FIX_001`.
 fn id_array_match_next(input: &str, allowed: &[String], used: &[usize]) -> GrammarState {
     if input.is_empty() {
         return GrammarState::Prefix;
@@ -1043,10 +1053,12 @@ fn id_array_match_next(input: &str, allowed: &[String], used: &[usize]) -> Gramm
         if rest.is_empty() {
             return GrammarState::Prefix;
         }
-        if let Some(next) = rest.strip_prefix(',') {
-            let state = id_array_match_next(next, allowed, &next_used);
-            if state != GrammarState::Invalid {
-                return state;
+        if next_used.len() < allowed.len() {
+            if let Some(next) = rest.strip_prefix(',') {
+                let state = id_array_match_next(next, allowed, &next_used);
+                if state != GrammarState::Invalid {
+                    return state;
+                }
             }
         }
         if "]}".starts_with(rest) {
@@ -1275,6 +1287,137 @@ mod tests {
             id_array_grammar_state(
                 &strip_field_prefix("{\"selected_ids\":[\"cell-1\",]}", &schema.field).unwrap(),
                 &schema
+            ),
+            GrammarState::Invalid
+        );
+    }
+
+    /// Regression 1/7 (`SCORPION_PALIGEMMA_ID_ARRAY_COMMA_REQUIRES_AVAILABLE_ID_FIX_001`):
+    /// with a single allowed id, once it is selected a comma must be
+    /// illegal (no unused id could ever follow it) while normal
+    /// termination without a comma remains legal — the exact real
+    /// dead-end `SCORPION_PALIGEMMA_448_PRODUCTION_RUNTIME_INTEGRATION_001`'s
+    /// battery rerun hit after the prerequisite trailing-comma fix closed
+    /// off the previous (invalid) escape.
+    #[test]
+    fn id_array_grammar_forbids_comma_when_no_unused_id_remains() {
+        let schema = PaligemmaStringIdArraySchema {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-1".into()],
+            allow_empty: false,
+        };
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[\"cell-1\",", &schema.field).unwrap(),
+                &schema
+            ),
+            GrammarState::Invalid,
+            "a comma must never be a legal continuation once no unused id remains"
+        );
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[\"cell-1\"]}", &schema.field).unwrap(),
+                &schema
+            ),
+            GrammarState::Complete,
+            "normal termination without a comma must remain legal"
+        );
+    }
+
+    /// Regression 2/7: with a second allowed id still unused, a comma
+    /// after the first selection remains legal — this fix must not
+    /// over-restrict genuinely multi-selectable schemas.
+    #[test]
+    fn id_array_grammar_permits_comma_when_an_unused_id_remains() {
+        let schema = PaligemmaStringIdArraySchema {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-1".into(), "cell-2".into()],
+            allow_empty: false,
+        };
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[\"cell-1\",", &schema.field).unwrap(),
+                &schema
+            ),
+            GrammarState::Prefix,
+            "a comma must remain legal (in-progress) while an unused id still exists"
+        );
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[\"cell-1\",\"cell-2\"]}", &schema.field)
+                    .unwrap(),
+                &schema
+            ),
+            GrammarState::Complete
+        );
+    }
+
+    /// Regression 3/7: after every available id has been selected, a
+    /// further comma must be illegal, exactly as the single-id case, now
+    /// proven for the multi-id case too.
+    #[test]
+    fn id_array_grammar_forbids_comma_after_all_ids_are_used() {
+        let schema = PaligemmaStringIdArraySchema {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-1".into(), "cell-2".into()],
+            allow_empty: false,
+        };
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[\"cell-1\",\"cell-2\",", &schema.field)
+                    .unwrap(),
+                &schema
+            ),
+            GrammarState::Invalid
+        );
+    }
+
+    /// Regression 4/7: duplicate-id protection is unaffected by this fix —
+    /// re-selecting an already-used id remains Invalid regardless of how
+    /// many ids remain unused.
+    #[test]
+    fn id_array_grammar_duplicate_protection_unchanged_by_comma_fix() {
+        let schema = PaligemmaStringIdArraySchema {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-1".into(), "cell-2".into()],
+            allow_empty: false,
+        };
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[\"cell-1\",\"cell-1\"]}", &schema.field)
+                    .unwrap(),
+                &schema
+            ),
+            GrammarState::Invalid
+        );
+    }
+
+    /// Regression 5/7: empty-selection semantics (gated purely by
+    /// `allow_empty`, evaluated before any id is ever chosen) are
+    /// unaffected by a fix that only concerns the post-id comma decision.
+    #[test]
+    fn id_array_grammar_empty_selection_semantics_unchanged_by_comma_fix() {
+        let allow_empty_schema = PaligemmaStringIdArraySchema {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-1".into()],
+            allow_empty: true,
+        };
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[]}", &allow_empty_schema.field).unwrap(),
+                &allow_empty_schema
+            ),
+            GrammarState::Complete
+        );
+        let forbid_empty_schema = PaligemmaStringIdArraySchema {
+            field: "selected_ids".into(),
+            allowed_ids: vec!["cell-1".into()],
+            allow_empty: false,
+        };
+        assert_eq!(
+            id_array_grammar_state(
+                &strip_field_prefix("{\"selected_ids\":[]}", &forbid_empty_schema.field).unwrap(),
+                &forbid_empty_schema
             ),
             GrammarState::Invalid
         );

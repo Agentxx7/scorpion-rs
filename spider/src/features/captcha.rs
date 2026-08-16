@@ -741,6 +741,32 @@ fn invalid() -> CaptchaSolveOutcome {
     }
 }
 
+/// Maximum length, in characters, of a canonical `PointSelection` visual
+/// grounding label — generous enough for a genuinely descriptive noun
+/// phrase ("the small outlined checkbox in the top-left corner", 47
+/// chars), tight enough to reject explanatory task prose. This is a
+/// rejection threshold, never a truncation point: an overlong label fails
+/// closed with `CaptchaSolveFailure::InvalidChallenge` rather than being
+/// silently chopped.
+pub const CAPTCHA_POINT_SELECTION_LABEL_MAX_CHARS: usize = 80;
+
+/// The canonical, provider-neutral contract for `PointSelection.instruction`:
+/// a concise visual grounding target ("what should I locate"), never task
+/// orchestration prose ("how browser verification works", "click to
+/// complete", vendor/workflow narration). Deterministic and generic — no
+/// vendor name or challenge-provider branching, no heuristic rewriting.
+/// Enforced once, here, so every provider (present and future) receives an
+/// already-conforming label instead of each reimplementing this check or
+/// attempting its own prose-to-label summarization.
+fn is_canonical_point_selection_label(instruction: &str) -> bool {
+    let trimmed = instruction.trim();
+    !trimmed.is_empty()
+        && trimmed.chars().count() <= CAPTCHA_POINT_SELECTION_LABEL_MAX_CHARS
+        // A concise noun-phrase label never needs sentence-terminating
+        // punctuation; task-orchestration prose reliably does.
+        && !trimmed.contains(['.', '!', '?'])
+}
+
 /// Validate advertised capabilities before invoking the explicitly selected
 /// provider. This is the only canonical dispatch operation and performs no
 /// fallback, racing, retry or provider substitution.
@@ -778,6 +804,8 @@ pub async fn solve_captcha(
             .visuals
             .iter()
             .any(|visual| visual.bytes().is_none())
+        || (request.challenge.kind == CaptchaChallengeKind::PointSelection
+            && !is_canonical_point_selection_label(&request.challenge.instruction))
     {
         return invalid();
     }
@@ -876,6 +904,130 @@ mod tests {
                 provenance: Some(CaptchaSolveProvenance::local(CAPS.provider)),
             }
         }
+    }
+
+    static POINT_CAPS: CaptchaProviderCapabilities = CaptchaProviderCapabilities {
+        provider: CaptchaProviderId::LOCAL_LANGUAGE_MODEL,
+        locality: CaptchaProviderLocality::Local,
+        supported_kinds: &[CaptchaChallengeKind::PointSelection],
+        supported_media_types: &["image/png"],
+        maximum_inputs: 1,
+        requires_credentials: false,
+    };
+
+    struct PointProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CaptchaProvider for PointProvider {
+        fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+            &POINT_CAPS
+        }
+
+        async fn solve(&self, _request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::Point { x: 1.0, y: 1.0 },
+                provenance: CaptchaSolveProvenance::local(POINT_CAPS.provider),
+            }
+        }
+    }
+
+    fn point_request(instruction: &str) -> CaptchaSolveRequest {
+        CaptchaSolveRequest {
+            correlation_id: "point-label-contract".into(),
+            selected_provider: POINT_CAPS.provider,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::PointSelection,
+                instruction: instruction.into(),
+                visuals: vec![CaptchaVisualInput::materialized(
+                    None,
+                    "image/png",
+                    vec![1u8],
+                )],
+            },
+            deadline: Duration::from_secs(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn explanatory_prose_point_selection_label_is_rejected_before_provider_execution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = PointProvider {
+            calls: Arc::clone(&calls),
+        };
+        let request = point_request(
+            "This is a Cloudflare Turnstile \"Verify you are human\" checkbox challenge. \
+             Return the point at the center of the unchecked checkbox so a click \
+             completes verification.",
+        );
+        assert!(matches!(
+            solve_captcha(&provider, &request).await,
+            CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::InvalidChallenge,
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn overlong_point_selection_label_is_rejected_before_provider_execution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = PointProvider {
+            calls: Arc::clone(&calls),
+        };
+        // No sentence punctuation, but exceeds the canonical length bound —
+        // rejected on length alone, not just punctuation.
+        let request = point_request(&"the outlined checkbox ".repeat(6));
+        assert!(matches!(
+            solve_captcha(&provider, &request).await,
+            CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::InvalidChallenge,
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_point_selection_label_is_rejected_before_provider_execution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = PointProvider {
+            calls: Arc::clone(&calls),
+        };
+        let request = point_request("   ");
+        assert!(matches!(
+            solve_captcha(&provider, &request).await,
+            CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::InvalidChallenge,
+                ..
+            }
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn concise_point_selection_labels_are_accepted() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = PointProvider {
+            calls: Arc::clone(&calls),
+        };
+        for label in [
+            "the outlined square",
+            "the verification checkbox",
+            "the outlined checkbox",
+            "the slider handle",
+            "the requested image tile",
+        ] {
+            let request = point_request(label);
+            assert!(matches!(
+                solve_captcha(&provider, &request).await,
+                CaptchaSolveOutcome::Solved { .. }
+            ));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 
     #[test]

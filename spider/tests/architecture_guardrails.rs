@@ -2397,3 +2397,66 @@ fn captcha_browser_binding_composes_frame_aware_seam_without_duplicating_routing
         );
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_CACHE_IDENTITY_AND_LEGACY_STACK_CONVERGENCE_001 ---
+//
+// Before this frontier, four legacy Chrome-hybrid cache read/write paths in
+// `spider/src/utils/mod.rs` (`cache_chrome_response`,
+// `cache_chrome_response_from_cdp_body`, `cache_http_response_skip_browser`,
+// and both `get_cached_url_base` variants) bound the live `Authorization`
+// token out of `CacheOptions::Authorized` / `SkipBrowserAuthorized` and
+// threaded it straight into `create_cache_key_raw`'s plaintext key —
+// persisted into the same `CACACHE_MANAGER` the canonical HTTP executor
+// (`cache_request::CanonicalCacheExecutor`) reads from, and in the
+// `chrome_remote_cache` case uploaded verbatim to the remote cache server
+// inside a `DumpJob`. `CanonicalCacheExecutor`'s own `cacheable_request()`
+// never partitions by credential — it refuses to cache anything carrying
+// Authorization/Cookie/Proxy-Authorization at all. These paths now
+// converge onto that same fail-closed rule instead of embedding the
+// credential in the cache identity.
+
+#[test]
+fn legacy_chrome_cache_paths_never_embed_credentials_in_cache_identity() {
+    let utils = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+
+    // The exact historical patterns that embedded a live Authorization
+    // token in a legacy cache key or a remote-cache `DumpJob`. None of
+    // these forms may reappear.
+    for forbidden in [
+        "SkipBrowserAuthorized(token)) => Some(token)",
+        "auth_opt.map(|token| token.as_ref())",
+        "auth_opt.map(|x| x.as_str())",
+        "create_cache_key_raw(target_url, Some(method), auth_opt, namespace)",
+    ] {
+        assert!(
+            !utils.contains(forbidden),
+            "credential re-entered legacy cache identity via {forbidden:?}"
+        );
+    }
+
+    // Each entry point that persists into (or reads from) the hybrid
+    // CACACHE_MANAGER / remote cache server must still exist...
+    for owner_fn in [
+        "pub async fn cache_chrome_response(",
+        "pub async fn cache_http_response_skip_browser(",
+        "async fn cache_chrome_response_from_cdp_body(",
+        "pub async fn get_cached_url_base(",
+    ] {
+        assert!(
+            utils.contains(owner_fn),
+            "missing legacy chrome cache entry point {owner_fn}"
+        );
+    }
+
+    // ...and must still fail closed (bail before building any key or
+    // remote payload) on an authenticated `CacheOptions` variant, mirroring
+    // `cacheable_request()` in cache_request.rs.
+    assert!(
+        utils.matches("CacheOptions::Authorized(_)").count() >= 5,
+        "expected a fail-closed auth guard in each legacy chrome cache read/write path"
+    );
+    assert!(
+        utils.matches("SkipBrowserAuthorized(_)").count() >= 5,
+        "expected a fail-closed auth guard in each legacy chrome cache read/write path"
+    );
+}

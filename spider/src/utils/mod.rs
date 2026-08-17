@@ -2480,16 +2480,24 @@ pub async fn cache_chrome_response(
         _ => HttpVersion::Http11,
     };
 
-    let auth_opt = match cache_options {
-        Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => None,
-        Some(CacheOptions::Authorized(token))
-        | Some(CacheOptions::SkipBrowserAuthorized(token)) => Some(token),
-        Some(CacheOptions::No) | None => None,
-    };
+    // Canonical cache semantics never persist authenticated responses —
+    // `cacheable_request()` in cache_request.rs refuses to cache any
+    // request carrying Authorization/Cookie/Proxy-Authorization headers
+    // rather than partitioning the cache by credential. Converging this
+    // legacy Chrome-hybrid write path onto that same fail-closed rule
+    // keeps the raw token out of the cache identity (and out of the
+    // remote-dump payload below) instead of embedding it in the
+    // on-disk/cacache key.
+    if matches!(
+        cache_options,
+        Some(CacheOptions::Authorized(_)) | Some(CacheOptions::SkipBrowserAuthorized(_))
+    ) {
+        return;
+    }
     let cache_key = create_cache_key_raw(
         target_url,
         Some(&chrome_http_req_res.method),
-        auth_opt.map(|token| token.as_ref()),
+        None,
         namespace,
     );
 
@@ -2638,8 +2646,17 @@ pub async fn cache_http_response_skip_browser(
         return;
     }
 
-    let auth_opt = cache_auth_token(cache_options);
-    let cache_key = create_cache_key_raw(target_url, Some(method), auth_opt, namespace);
+    // Fail closed on authenticated requests: never let a live Authorization
+    // token reach the cache key, and never enqueue an authenticated
+    // response for upload to the remote cache server below. Mirrors
+    // `cacheable_request()` in cache_request.rs.
+    if matches!(
+        cache_options,
+        Some(CacheOptions::Authorized(_)) | Some(CacheOptions::SkipBrowserAuthorized(_))
+    ) {
+        return;
+    }
+    let cache_key = create_cache_key_raw(target_url, Some(method), None, namespace);
     let cache_site =
         chromiumoxide::cache::manager::site_key_for_target_url(target_url, None, namespace);
 
@@ -2735,6 +2752,15 @@ async fn cache_chrome_response_from_cdp_body(
         return;
     }
 
+    // Fail closed on authenticated requests — mirrors `cacheable_request()`
+    // in cache_request.rs, which never persists a credentialed response.
+    if matches!(
+        cache_options,
+        Some(CacheOptions::Authorized(_)) | Some(CacheOptions::SkipBrowserAuthorized(_))
+    ) {
+        return;
+    }
+
     if let Ok(u) = url::Url::parse(target_url) {
         let http_response = HttpResponse {
             url: u,
@@ -2751,16 +2777,10 @@ async fn cache_chrome_response_from_cdp_body(
             headers: chrome_http_req_res.response_headers.clone(),
         };
 
-        let auth_opt = match cache_options {
-            Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => None,
-            Some(CacheOptions::Authorized(token))
-            | Some(CacheOptions::SkipBrowserAuthorized(token)) => Some(token),
-            Some(CacheOptions::No) | None => None,
-        };
         let cache_key = create_cache_key_raw(
             target_url,
             Some(&chrome_http_req_res.method),
-            auth_opt.map(|x| x.as_str()),
+            None,
             namespace,
         );
 
@@ -8631,12 +8651,18 @@ pub async fn get_cached_url_base(
 ) -> Option<String> {
     use http_cache::CacheManager;
 
-    let auth_opt = match cache_options {
-        Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => None,
-        Some(CacheOptions::Authorized(token))
-        | Some(CacheOptions::SkipBrowserAuthorized(token)) => Some(token),
-        Some(CacheOptions::No) | None => return None,
-    };
+    // Fail closed on authenticated requests: an authenticated response is
+    // never persisted (see `cache_chrome_response` et al.), so it can
+    // never legitimately hit here either. Returning early also keeps the
+    // live token from ever reaching `create_cache_key_raw` below —
+    // mirrors `cacheable_request()` in cache_request.rs.
+    match cache_options {
+        Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => {}
+        Some(CacheOptions::Authorized(_))
+        | Some(CacheOptions::SkipBrowserAuthorized(_))
+        | Some(CacheOptions::No)
+        | None => return None,
+    }
 
     // Override behavior:
     // - AllowStale: accept even stale entries
@@ -8648,7 +8674,7 @@ pub async fn get_cached_url_base(
         _ => std::time::SystemTime::now(),
     };
 
-    let auth_str = auth_opt.as_deref();
+    let auth_str: Option<&str> = None;
 
     // Helper: attempt CACACHE_MANAGER lookup for a given URL.
     let try_cacache = |url: &str| {
@@ -8714,11 +8740,8 @@ pub async fn get_cached_url_base(
         // env-var) before the first GET fires. Idempotent.
         ensure_remote_cache_client();
 
-        let cache_site = chromiumoxide::cache::manager::site_key_for_target_url(
-            target_url,
-            auth_opt.as_deref(),
-            namespace,
-        );
+        let cache_site =
+            chromiumoxide::cache::manager::site_key_for_target_url(target_url, None, namespace);
         let make_session_key = |url: &str| format!("GET:{}", url);
 
         let try_session_get = |url: &str| {
@@ -8749,12 +8772,7 @@ pub async fn get_cached_url_base(
         // Timeout prevents blocking the critical path if the cache server is slow/down.
         let _ = tokio::time::timeout(
             Duration::from_secs(3),
-            chromiumoxide::cache::remote::get_cache_site(
-                target_url,
-                auth_opt.as_deref(),
-                Some("true"),
-                namespace,
-            ),
+            chromiumoxide::cache::remote::get_cache_site(target_url, None, Some("true"), namespace),
         )
         .await;
 
@@ -8784,12 +8802,18 @@ pub async fn get_cached_url_base(
     cache_policy: &Option<BasicCachePolicy>, // optional override/behavior
     namespace: Option<&str>,
 ) -> Option<String> {
-    let auth_opt = match cache_options {
-        Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => None,
-        Some(CacheOptions::Authorized(token))
-        | Some(CacheOptions::SkipBrowserAuthorized(token)) => Some(token),
-        Some(CacheOptions::No) | None => return None,
-    };
+    // Fail closed on authenticated requests: the write side
+    // (`cache_http_response_skip_browser`) never publishes an
+    // authenticated response to the remote cache server, so a read never
+    // legitimately hits here either — mirrors `cacheable_request()` in
+    // cache_request.rs.
+    match cache_options {
+        Some(CacheOptions::Yes) | Some(CacheOptions::SkipBrowser) => {}
+        Some(CacheOptions::Authorized(_))
+        | Some(CacheOptions::SkipBrowserAuthorized(_))
+        | Some(CacheOptions::No)
+        | None => return None,
+    }
 
     let allow_stale = matches!(cache_policy, Some(BasicCachePolicy::AllowStale));
     let now = match cache_policy {
@@ -8801,11 +8825,8 @@ pub async fn get_cached_url_base(
     // before the first GET fires. Idempotent.
     ensure_remote_cache_client();
 
-    let cache_site = chromiumoxide::cache::manager::site_key_for_target_url(
-        target_url,
-        auth_opt.as_deref(),
-        namespace,
-    );
+    let cache_site =
+        chromiumoxide::cache::manager::site_key_for_target_url(target_url, None, namespace);
     let make_session_key = |url: &str| format!("GET:{}", url);
 
     let try_get = |url: &str| {
@@ -8853,12 +8874,7 @@ pub async fn get_cached_url_base(
     // Timeout prevents blocking the critical path if the cache server is slow/down.
     let _ = tokio::time::timeout(
         Duration::from_secs(3),
-        chromiumoxide::cache::remote::get_cache_site(
-            target_url,
-            auth_opt.as_deref(),
-            Some("true"),
-            namespace,
-        ),
+        chromiumoxide::cache::remote::get_cache_site(target_url, None, Some("true"), namespace),
     )
     .await;
 

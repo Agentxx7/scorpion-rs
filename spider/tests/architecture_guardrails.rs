@@ -2751,3 +2751,190 @@ fn no_shadow_ids_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_PERSISTED_DOMAIN_SEMANTICS_001 ---
+//
+// Track 2 of the frozen roadmap: canonical state/transition semantics for
+// persisted domain objects, built on Track 1's identity. `CurrentState`,
+// `HistoryEntry`, `HistoryLog`, and `Transition` are defined exactly once,
+// in `spider/src/features/domain_state.rs` — semantics only: the
+// transition contract (current state + explicit transition → new current
+// state), "one current state per identity," "historical records are
+// immutable/append-only," and the persistence/domain-decision ownership
+// boundary. No database, no `WatchDefinition`/`WatchState` product model,
+// no `AuthSessionId`, no scheduling, no `ChangeResult`/`ChangeEvent`, no
+// health semantics — those remain later, separate frontier work. This
+// frontier also reconciled the `Observation`/`Snapshot` bare-name naming
+// collisions (`Fingerprint` deliberately deferred to Track 6).
+
+#[test]
+fn domain_state_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "struct CurrentState",
+            "CurrentState must only be defined in the canonical domain_state module",
+        ),
+        (
+            "struct HistoryEntry",
+            "HistoryEntry must only be defined in the canonical domain_state module",
+        ),
+        (
+            "struct HistoryLog",
+            "HistoryLog must only be defined in the canonical domain_state module",
+        ),
+        (
+            "trait Transition",
+            "Transition must only be defined in the canonical domain_state module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/domain_state.rs"], description);
+    }
+}
+
+#[test]
+fn domain_state_module_declared_unconditionally_in_features_mod() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod domain_state;")
+        .expect("domain_state module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    let gated = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .is_some_and(|line| line.trim_start().starts_with("#[cfg("));
+    assert!(
+        !gated,
+        "domain_state module must be declared unconditionally — persisted-domain \
+         state/transition semantics must not depend on optional cargo features"
+    );
+}
+
+#[test]
+fn domain_state_module_has_no_persistence_or_product_model_implementation() {
+    let domain_state =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_state.rs")).unwrap();
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+        "struct AuthSessionId",
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "fn schedule",
+        "struct Scheduler",
+        "sqlx::",
+        "cacache::",
+        "CACACHE_MANAGER",
+        "tokio::fs::",
+        "std::fs::File",
+        "std::fs::write",
+        "reqwest::",
+        "chromiumoxide::",
+    ] {
+        assert!(
+            !domain_state.contains(forbidden),
+            "domain_state module must stay semantics-only: found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn history_log_is_structurally_append_only() {
+    let domain_state =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_state.rs")).unwrap();
+    // HistoryLog's only mutating method is `append`. None of these may
+    // exist anywhere in the module — a `remove`/`clear`/mutable-access
+    // method on HistoryLog (or a public field/IndexMut on HistoryEntry)
+    // would let a caller alter or discard a historical record after the
+    // fact, breaking the immutable/append-only invariant.
+    for forbidden in [
+        "fn remove(",
+        "fn clear(",
+        "fn get_mut(",
+        "IndexMut<",
+        "impl std::ops::IndexMut",
+        "pub state: S",
+        "pub identity: Id",
+        "pub recorded_at",
+    ] {
+        assert!(
+            !domain_state.contains(forbidden),
+            "HistoryLog/HistoryEntry must stay append-only/immutable: found {forbidden:?}"
+        );
+    }
+    assert!(
+        domain_state.contains("fn append(&mut self, entry: HistoryEntry<Id, S>)"),
+        "HistoryLog must expose its append operation with the expected signature"
+    );
+}
+
+#[test]
+fn transition_contract_matches_current_state_plus_transition_to_new_current_state() {
+    let domain_state =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_state.rs")).unwrap();
+    // The canonical contract: Transition::apply is a pure fn(&S) -> Result<S, _>
+    // (no storage handle, no identity, no I/O capability in the signature),
+    // and CurrentState::apply is the only way to run one, producing exactly
+    // one new CurrentState plus the HistoryEntry it superseded.
+    assert!(domain_state.contains("fn apply(&self, current: &S) -> Result<S, Self::Rejection>"));
+    assert!(domain_state.contains("pub fn apply<T: Transition<S>>("));
+    assert!(domain_state.contains("Result<Applied<Id, S>, (Self, T::Rejection)>"));
+}
+
+#[test]
+fn no_bare_observation_or_snapshot_types_introduced() {
+    // Reconciled: `Observation` is owned by spider_agent_types::PageObservation
+    // (a different crate/domain); `Snapshot` already has two qualified,
+    // unrelated owners (VitalsSnapshot, BrowserChallengeSnapshot) plus a
+    // locked informal use in SCORPION_SDD.md §5.2. Neither bare name may be
+    // (re)introduced as a new canonical type anywhere in spider/src.
+    for pattern in [
+        "struct Observation",
+        "enum Observation",
+        "struct Snapshot",
+        "enum Snapshot",
+    ] {
+        assert_pattern_only_in_files(
+            pattern,
+            &[],
+            "bare Observation/Snapshot types are reconciled away — see \
+             features/domain_state.rs's \"Naming reconciliation\" doc section",
+        );
+    }
+}
+
+#[test]
+fn no_shadow_domain_state_types_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct CurrentState",
+                "struct HistoryEntry",
+                "struct HistoryLog",
+                "trait Transition",
+                "struct WatchState",
+                "struct WatchDefinition",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — persisted-domain \
+                     state/transition semantics are owned exclusively by \
+                     spider::features::domain_state",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

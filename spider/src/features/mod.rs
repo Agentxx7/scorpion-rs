@@ -90,6 +90,12 @@ pub mod artifact_reference;
 /// robots_sitemap `PlanningInput` variants are individually gated behind
 /// their respective existing features.
 pub mod discovery_target;
+/// Canonical state/transition semantics for persisted Scorpion domain
+/// objects: `CurrentState`, `HistoryEntry`, `HistoryLog`, `Transition`.
+/// Semantics only — no persistence, no concrete state machine, no product
+/// model. Always available; no feature gate. Built on `identity`. See
+/// `SCORPION_SDD.md` §5.2.
+pub mod domain_state;
 /// RSS and Atom feed parsing and normalization.
 #[cfg(feature = "feed")]
 pub mod feed;

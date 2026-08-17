@@ -128,7 +128,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **BLOCKED** | `WatchId` identity now exists (`features/identity.rs`); `WatchDefinition`/`WatchState`/`Snapshot`/`Transition`/the canonical state model/seam still do not exist and must not be implemented until a frontier establishes canonical ownership (SCORPION_SDD.md §5.2). |
+| WATCH/MONITOR | **BLOCKED** | `WatchId` identity (`features/identity.rs`) and the generic state/transition semantics (`features/domain_state.rs`) now exist; `WatchDefinition` and a concrete `WatchState`/`Transition<WatchState>` product model still do not exist and must not be implemented until a frontier establishes canonical ownership (SCORPION_SDD.md §5.2). |
 
 ### 3.9 Identity
 
@@ -146,6 +146,37 @@ two identity types exist — `ResearchId`, `CrawlId`, `FetchId`, `SessionId`,
 `AuthSessionId`, `JobId`, `OperationId`, and any other identity type each
 require their own frontier scoped to an actually-locked, actually-needed
 concept; none may be added "for symmetry" with these two.
+
+### 3.10 State/Transition Semantics
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Persisted-domain state/transition semantics | `spider/src/features/domain_state.rs` | `std`, `features/identity.rs` (parameterization only) | Network, transport, persistence, any concrete domain state/product model | `CurrentState`, `HistoryEntry`, `HistoryLog`, `Transition` | None |
+
+**Clarification on `domain_state.rs`:** This module owns semantics
+only — the canonical distinction between identity, current state,
+historical record, and transition; the transition contract (`current
+state + explicit transition → new current state`, realized as
+`CurrentState::apply`); the "one current state per identity" invariant
+(enforced by `CurrentState` holding exactly one state value, never a
+collection); the "historical records are immutable/append-only"
+invariant (enforced structurally — `HistoryLog`'s only mutating method is
+`append`; `HistoryEntry` has no field-mutating method at all); and the
+ownership boundary between domain code (decides transition validity,
+`Transition::apply` receives no storage handle) and persistence (stores
+state, never re-decides a transition — SCORPION_SDD.md §5.2). It defines
+no database/cache/file persistence, no `WatchDefinition`/`WatchState`
+product model, no `AuthSessionId`, no scheduling, no
+`ChangeResult`/`ChangeEvent`, no health semantics. This frontier also
+reconciled two bare-name collisions before adding new canonical
+vocabulary: `Observation` remains owned by
+`spider_agent_types::PageObservation` (a different, agent-automation
+domain) — the closest concept this module needs is named `HistoryEntry`
+instead; `Snapshot` remains split between `VitalsSnapshot`,
+`BrowserChallengeSnapshot`, and `SCORPION_SDD.md` §5.2's informal locked
+use naming a future watch-specific transition *input* — this module
+never defines a bare `Snapshot` type. `Fingerprint` is a known, separate
+naming collision deliberately left unreconciled; it belongs to Track 6.
 
 ---
 
@@ -325,7 +356,10 @@ Do not create alternative versions of canonical domain models.
 `AcquiredArtifact` are only defined in their canonical modules. `EvidenceId`
 and `WatchId` are only defined in `spider/src/features/identity.rs` — no
 interface (`spider_cli`, `spider_mcp`, or otherwise) may define its own
-identity type for either concept.
+identity type for either concept. `CurrentState`, `HistoryEntry`,
+`HistoryLog`, and `Transition` are only defined in
+`spider/src/features/domain_state.rs`; no bare `Observation` or `Snapshot`
+type may be introduced anywhere (see §3.10).
 
 ### 7.7 THIN INTERFACES
 
@@ -442,5 +476,13 @@ The following are intentionally not refactored in this frontier:
   implement deterministic serialization/validation, and are not shadowed
   by `spider_cli`/`spider_mcp`; the identity module contains no
   persistence or state/lifecycle implementation
+- `CurrentState`/`HistoryEntry`/`HistoryLog`/`Transition` are each defined
+  in exactly one canonical module (`features/domain_state.rs`), declared
+  unconditionally, contain no persistence or concrete product-model
+  implementation, structurally enforce `HistoryLog` append-only semantics
+  (no `remove`/`clear`/`get_mut`/`IndexMut`), match the canonical
+  transition contract signature, are not shadowed by
+  `spider_cli`/`spider_mcp`, and introduce no bare `Observation`/`Snapshot`
+  type anywhere in `spider/src`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

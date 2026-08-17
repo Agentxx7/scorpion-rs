@@ -980,6 +980,8 @@ fn interfaces_define_no_shadow_domain_models() {
         "pub struct ArtifactDownloadBinding",
         "pub enum TransportPolicy",
         "pub struct AcquiredArtifact",
+        "pub struct EvidenceRef",
+        "pub enum EvidenceLedgerError",
     ];
     for interface_src in ["spider_cli/src", "spider_mcp/src"] {
         let dir = manifest_dir.parent().unwrap().join(interface_src);
@@ -3163,6 +3165,140 @@ fn no_shadow_persistence_seam_in_cli_or_mcp() {
                     "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
                      persistence seam is owned exclusively by \
                      spider::features::domain_persistence",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}
+
+// --- SECTION: SCORPION_DURABLE_EVIDENCE_LEDGER_001 ---
+//
+// Track 4 of the frozen roadmap: EvidenceId becomes the canonical durable
+// identity for evidence records, and EvidenceBundle (the existing
+// canonical evidence model in `utils/evidence.rs` — never a second one)
+// gains an `id` field plus the `backend_provenance`/`response_origin`
+// provenance fields it was missing. `record_evidence`/`read_evidence`
+// persist a bundle through `DomainPersistence`'s append-only historical
+// semantics only — never its current-state compare-and-swap path, because
+// evidence has no "current state" to replace. Every ledger write uses the
+// fixed revision `1`, so Track 3's existing `(identity, revision)`
+// uniqueness constraint is exactly what makes a duplicate `EvidenceId`
+// write fail closed — this frontier adds no new conflict logic of its
+// own. `EvidenceRef` is a pure `EvidenceId` wrapper: it never carries
+// evidence content.
+
+#[test]
+fn evidence_ledger_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "struct EvidenceRef",
+            "EvidenceRef must only be defined in the canonical evidence module",
+        ),
+        (
+            "enum EvidenceLedgerError",
+            "EvidenceLedgerError must only be defined in the canonical evidence module",
+        ),
+        (
+            "fn record_evidence(",
+            "record_evidence must only be defined in the canonical evidence module",
+        ),
+        (
+            "fn read_evidence(",
+            "read_evidence must only be defined in the canonical evidence module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["utils/evidence.rs"], description);
+    }
+}
+
+#[test]
+fn evidence_ledger_writes_are_append_only_never_current_state() {
+    let evidence =
+        fs::read_to_string(workspace_root().join("spider/src/utils/evidence.rs")).unwrap();
+    // Evidence has no "current state" to replace — Track 2's CAS
+    // current-state semantics belong to future, genuinely stateful
+    // capabilities (WatchState, ...), not to an immutable evidence record.
+    assert!(
+        evidence.contains(".append_history("),
+        "record_evidence must persist through DomainPersistence::append_history"
+    );
+    assert!(
+        !evidence.contains(".write_current("),
+        "evidence must never be persisted through DomainPersistence::write_current — \
+         it has no current state to compare-and-swap"
+    );
+    // Every evidence record is the one and only record for its EvidenceId
+    // — the fixed revision `1`, never a counter that could imply
+    // multiple revisions of "the same" evidence.
+    assert!(evidence.contains("append_history(&id.to_string(), 1,"));
+}
+
+#[test]
+fn evidence_ledger_never_defines_its_own_conflict_or_lifecycle_logic() {
+    let evidence =
+        fs::read_to_string(workspace_root().join("spider/src/utils/evidence.rs")).unwrap();
+    // Duplicate-write and conflict handling must be inherited from
+    // Track 3's PersistenceError, not reimplemented here.
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "struct AuthSessionId",
+        "struct Fingerprint",
+        "struct Lineage",
+        "fn schedule",
+        "struct Scheduler",
+        "EventSourc",
+        "trait Transition",
+    ] {
+        assert!(
+            !evidence.contains(forbidden),
+            "evidence.rs must stay a ledger over the existing domain model: \
+             found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn evidence_bundle_provenance_is_read_from_page_never_fabricated() {
+    let evidence =
+        fs::read_to_string(workspace_root().join("spider/src/utils/evidence.rs")).unwrap();
+    // backend_provenance/response_origin must be populated by reading the
+    // same canonical, already-audited Page accessors transport/dns
+    // already use — never a literal/synthesized value.
+    assert!(evidence.contains(".backend_provenance()"));
+    assert!(evidence.contains(".response_origin()"));
+    assert!(evidence.contains("page.transport()"));
+}
+
+#[test]
+fn no_shadow_evidence_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct EvidenceBundle",
+                "struct EvidenceRef",
+                "enum EvidenceLedgerError",
+                "fn record_evidence(",
+                "fn read_evidence(",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     evidence ledger is owned exclusively by spider::utils::evidence",
                     file.relative_path
                 );
             }

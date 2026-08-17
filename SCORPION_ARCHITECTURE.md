@@ -110,10 +110,13 @@ Every architecture-relevant implementation is classified as exactly one of:
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
 | Evidence bundle construction | `spider/src/utils/evidence.rs` | `Page` (UPSTREAM_COMPAT), `transport` | Independent provenance stamping | `build_evidence()` | `spider_mcp::evidence` shim (UPSTREAM_COMPAT) |
-| Transport provenance stamping | `spider/src/page.rs` — **field/method only**: `Page::transport`, `Page::transport()` | `ACQUISITION_TRANSPORT_SCOPE` | Caller-supplied policy | `Page::transport()` | None |
+| Durable evidence ledger | `spider/src/utils/evidence.rs` | `features/identity.rs` (`EvidenceId`), `features/domain_persistence.rs` (`disk` feature) | `write_current` (evidence has no current state), a second evidence store | `record_evidence()`, `read_evidence()`, `EvidenceRef` | None |
+| Transport provenance stamping | `spider/src/page.rs` — **field/method only**: `Page::transport`, `Page::transport()`, `Page::backend_provenance()`, `Page::response_origin()` | `ACQUISITION_TRANSPORT_SCOPE` | Caller-supplied policy | `Page::transport()` | None |
 | Acquisition scope | `spider/src/features/transport.rs` | `tokio` | Independent provenance | `ACQUISITION_TRANSPORT_SCOPE` | None |
 
 **Clarification on `page.rs`:** `Page` is the upstream Spider response/evidence vocabulary. The `Page::transport` provenance field and its getter are canonical Scorpion additions — the single source of truth for transport provenance. The rest of `Page` (structure, `page::build`, legacy link extraction, anti-bot detection) is UPSTREAM_COMPAT. The canonical evidence seam is `spider/src/utils/evidence.rs`; `Page` is consumed by it as an upstream primitive, not owned by it.
+
+**Clarification on the durable evidence ledger:** `EvidenceBundle` (already the one canonical evidence model) gained an `id: Option<EvidenceId>` field and `backend_provenance`/`response_origin` fields — both read from `Page::backend_provenance()`/`Page::response_origin()` (`spider_transport::BackendProvenance`/`ResponseOrigin`, the same canonical provenance types the transport/cache execution seams already stamp) exactly the way `transport`/`dns` were already read from `Page::transport()`; no new provenance source, nothing fabricated. `record_evidence()` mints (or reuses a caller-supplied) `EvidenceId`, then persists the bundle through `DomainPersistence::append_history` — Track 3's append-only historical semantics, never `write_current` — because evidence is immutable and historical from the moment it is captured, not a value that later gets replaced. Every write uses the fixed revision `1`; Track 3's own `(identity, revision)` uniqueness constraint is what makes a duplicate `EvidenceId` write fail closed, unmodified by this frontier. `EvidenceRef` is a plain `EvidenceId` wrapper (`Copy`, no payload) for later Watch/Change/Lineage frontiers to hold cheaply and resolve via `read_evidence()` when they need the content — it is not a second evidence model.
 
 ### 3.7 Interfaces
 
@@ -392,7 +395,11 @@ identity type for either concept. `CurrentState`, `HistoryEntry`,
 type may be introduced anywhere (see §3.10). `DomainPersistence` is only
 defined in `spider/src/features/domain_persistence.rs` (see §3.11 and
 §7.11) — no interface, and no other module, may define a second
-persistence seam for canonical domain state.
+persistence seam for canonical domain state. `EvidenceBundle` (extended,
+never replaced) remains the one canonical evidence model; `EvidenceRef`
+and `EvidenceLedgerError` are only defined in
+`spider/src/utils/evidence.rs` (see §3.6) — no interface may define its
+own evidence-reference or evidence-ledger-error type.
 
 ### 7.7 THIN INTERFACES
 
@@ -540,5 +547,13 @@ The following are intentionally not refactored in this frontier:
   at the database constraint level (never an `UPDATE`/`DELETE`/`INSERT OR
   REPLACE`/`INSERT OR IGNORE` on the history table), and is not shadowed
   by `spider_cli`/`spider_mcp`
+- `EvidenceRef`/`EvidenceLedgerError`/`record_evidence`/`read_evidence`
+  are each defined in exactly one canonical module (`utils/evidence.rs`),
+  persist through `DomainPersistence::append_history` only (never
+  `write_current` — evidence has no current state), always use the fixed
+  revision `1`, define no lifecycle/product-model/scheduling/event-
+  sourcing logic of their own, read `backend_provenance`/`response_origin`
+  from `Page`'s existing canonical accessors (never a fabricated value),
+  and are not shadowed by `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

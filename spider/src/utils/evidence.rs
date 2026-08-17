@@ -11,13 +11,14 @@
 //! captures — nothing here changes crawling, fetching, or rendering
 //! behavior.
 
+use crate::features::identity::EvidenceId;
 use crate::features::transport::{self, TransportPolicy};
 use crate::page::Page;
 #[cfg(not(feature = "wreq"))]
 use crate::website::Website;
 
 #[cfg(feature = "serde")]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of exactly the supplied bytes, encoded as lowercase hexadecimal.
@@ -43,8 +44,17 @@ pub fn page_screenshot_bytes(_page: &Page) -> Option<&[u8]> {
 /// `Option`, populated only when the underlying data was actually observed
 /// during a fetch — never fabricated or guessed.
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct EvidenceBundle {
+    /// This bundle's durable identity in the evidence ledger. `None` for a
+    /// bundle fresh from [`build_evidence`] that has not (yet) been
+    /// recorded — see [`record_evidence`] (behind the `disk` feature).
+    /// Identity is assigned, never derived from fetch content; it is not
+    /// itself provenance. Present unconditionally (identity carries no
+    /// feature gate of its own — see `features/identity.rs`) so
+    /// `EvidenceBundle`'s shape does not change across builds depending
+    /// on whether the `disk` feature happens to be enabled.
+    pub id: Option<EvidenceId>,
     /// The URL that was actually requested.
     pub requested_url: Option<String>,
     /// The URL after following any redirects. Equal to `requested_url` when
@@ -118,6 +128,20 @@ pub struct EvidenceBundle {
     /// local resolution applies (`default` transport, or a page carrying
     /// no provenance stamp).
     pub dns: Option<String>,
+    /// Which backend observed or reconstructed this response —
+    /// `"reqwest"`, `"wreq"`, `"cache_layer"`,
+    /// `"noncanonical_fetch_engine"`, `"noncanonical_remote_fetcher"`, or
+    /// `"upstream_compatibility"`. Read directly from
+    /// `Page::backend_provenance()` (`spider_transport::BackendProvenance`,
+    /// the same canonical provenance type the transport/cache execution
+    /// seams stamp); `None` for a page no audited path stamped.
+    pub backend_provenance: Option<String>,
+    /// Neutral origin of the response representation this bundle was
+    /// built from — `"network"`, `"reconstructed_cache"`, or `"synthetic"`.
+    /// Read directly from `Page::response_origin()`
+    /// (`spider_transport::ResponseOrigin`); `None` for a page no audited
+    /// path stamped.
+    pub response_origin: Option<String>,
 }
 
 /// Build retrieval evidence for one fetched page. Content and screenshot
@@ -176,6 +200,7 @@ pub fn build_evidence(
     let observed_transport = page.transport();
 
     EvidenceBundle {
+        id: None,
         requested_url: Some(page.get_url().to_string()),
         final_url: Some(page.get_url_final().to_string()),
         retrieved_at: page.get_retrieved_at(),
@@ -198,6 +223,196 @@ pub fn build_evidence(
             Some(transport::AcquisitionTransport::Tor) => Some("proxy".to_string()),
             _ => None,
         },
+        backend_provenance: page
+            .backend_provenance()
+            .map(|backend| backend_provenance_label(backend).to_string()),
+        response_origin: page
+            .response_origin()
+            .map(|origin| response_origin_label(origin).to_string()),
+    }
+}
+
+/// Stringify [`spider_transport::BackendProvenance`] for
+/// [`EvidenceBundle::backend_provenance`]. Truthful presentation of an
+/// already-observed fact, not a new provenance source — mirrors
+/// `AcquisitionTransport::label()`'s existing style.
+fn backend_provenance_label(backend: spider_transport::BackendProvenance) -> &'static str {
+    match backend {
+        spider_transport::BackendProvenance::Reqwest => "reqwest",
+        spider_transport::BackendProvenance::Wreq => "wreq",
+        spider_transport::BackendProvenance::CacheLayer => "cache_layer",
+        spider_transport::BackendProvenance::NoncanonicalFetchEngine => "noncanonical_fetch_engine",
+        spider_transport::BackendProvenance::NoncanonicalRemoteFetcher => {
+            "noncanonical_remote_fetcher"
+        }
+        spider_transport::BackendProvenance::UpstreamCompatibility => "upstream_compatibility",
+    }
+}
+
+/// Stringify [`spider_transport::ResponseOrigin`] for
+/// [`EvidenceBundle::response_origin`]. Truthful presentation of an
+/// already-observed fact, not a new provenance source.
+fn response_origin_label(origin: spider_transport::ResponseOrigin) -> &'static str {
+    match origin {
+        spider_transport::ResponseOrigin::Network => "network",
+        spider_transport::ResponseOrigin::ReconstructedCache => "reconstructed_cache",
+        spider_transport::ResponseOrigin::Synthetic => "synthetic",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Durable evidence ledger (Track 4:
+// SCORPION_DURABLE_EVIDENCE_LEDGER_001). Extends this module's existing
+// EvidenceBundle/build_evidence/sha256_hex ownership rather than starting a
+// second evidence model — see this file's own module doc comment.
+// ---------------------------------------------------------------------------
+
+/// Failure recording or reading durable evidence. Storage-shaped only —
+/// wraps [`crate::features::domain_persistence::PersistenceError`]
+/// unchanged plus a serialization failure, inventing no evidence-domain
+/// error vocabulary of its own.
+#[cfg(feature = "disk")]
+#[derive(Debug)]
+pub enum EvidenceLedgerError {
+    /// A duplicate `EvidenceId` (or any other persistence-layer conflict
+    /// or backend failure). See
+    /// [`crate::features::domain_persistence::PersistenceError`] for the
+    /// specific reason.
+    Persistence(crate::features::domain_persistence::PersistenceError),
+    /// The bundle could not be encoded/decoded. The evidence content
+    /// itself was never in question; this is strictly a serialization
+    /// failure.
+    Serialization(serde_json::Error),
+}
+
+#[cfg(feature = "disk")]
+impl std::fmt::Display for EvidenceLedgerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvidenceLedgerError::Persistence(error) => write!(f, "evidence ledger: {error}"),
+            EvidenceLedgerError::Serialization(error) => {
+                write!(f, "evidence ledger: bundle serialization failed: {error}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "disk")]
+impl std::error::Error for EvidenceLedgerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            EvidenceLedgerError::Persistence(error) => Some(error),
+            EvidenceLedgerError::Serialization(error) => Some(error),
+        }
+    }
+}
+
+/// Assign `bundle` a durable [`EvidenceId`] (minting a fresh one via
+/// [`EvidenceId::new`] unless the caller already set `bundle.id`) and
+/// append it to the durable evidence ledger through
+/// [`crate::features::domain_persistence::DomainPersistence`]'s
+/// append-only historical semantics — never its current-state
+/// compare-and-swap semantics, because evidence has no "current state" to
+/// replace: it is immutable and historical from the moment it is
+/// recorded. Every write uses the fixed revision `1` (the one and only
+/// record an `EvidenceId` will ever have), so [`DomainPersistence::append_history`]'s
+/// existing `(identity, revision)` uniqueness constraint is exactly what
+/// makes a duplicate `EvidenceId` write fail closed here — nothing in
+/// this function decides that; it inherits it unchanged from Track 3.
+///
+/// On success, returns `bundle` with `id` populated (the identity that
+/// was actually written), ready to be named by an [`EvidenceRef`].
+///
+/// This function neither fabricates nor alters any provenance field:
+/// `bundle`'s existing fields (as built by [`build_evidence`]) are
+/// persisted exactly as given, byte-for-byte, via `serde_json`.
+///
+/// [`DomainPersistence::append_history`]: crate::features::domain_persistence::DomainPersistence::append_history
+#[cfg(feature = "disk")]
+pub async fn record_evidence(
+    store: &crate::features::domain_persistence::DomainPersistence,
+    mut bundle: EvidenceBundle,
+) -> Result<EvidenceBundle, EvidenceLedgerError> {
+    let id = bundle.id.unwrap_or_default();
+    bundle.id = Some(id);
+
+    let payload = serde_json::to_vec(&bundle).map_err(EvidenceLedgerError::Serialization)?;
+
+    store
+        .append_history(&id.to_string(), 1, &payload, std::time::SystemTime::now())
+        .await
+        .map_err(EvidenceLedgerError::Persistence)?;
+
+    Ok(bundle)
+}
+
+/// Read back the durable evidence record for `id`, exactly as
+/// [`record_evidence`] wrote it — no reconstruction, no re-derivation
+/// from any other source. `Ok(None)` when nothing has ever been recorded
+/// for this identity.
+#[cfg(feature = "disk")]
+pub async fn read_evidence(
+    store: &crate::features::domain_persistence::DomainPersistence,
+    id: EvidenceId,
+) -> Result<Option<EvidenceBundle>, EvidenceLedgerError> {
+    let history = store
+        .read_history(&id.to_string())
+        .await
+        .map_err(EvidenceLedgerError::Persistence)?;
+
+    match history.into_iter().next() {
+        Some((_revision, payload, _recorded_at)) => {
+            let bundle: EvidenceBundle =
+                serde_json::from_slice(&payload).map_err(EvidenceLedgerError::Serialization)?;
+            Ok(Some(bundle))
+        }
+        None => Ok(None),
+    }
+}
+
+/// A neutral reference to one durable evidence record — names it without
+/// carrying its payload, so later Watch/Change/Lineage frontiers can hold
+/// this cheaply (16 bytes, `Copy`) and resolve it back to the full
+/// [`EvidenceBundle`] via [`EvidenceRef::resolve`] only when they actually
+/// need the content. This is a pure identity wrapper: it stores nothing
+/// about evidence content, decides no domain semantics, and is not a
+/// second evidence model.
+#[cfg(feature = "disk")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct EvidenceRef {
+    id: EvidenceId,
+}
+
+#[cfg(feature = "disk")]
+impl EvidenceRef {
+    /// Reference the evidence record named by `id`. Does not verify that
+    /// record exists — construction is a pure value operation, exactly
+    /// like [`EvidenceId`] itself; use [`EvidenceRef::resolve`] to find
+    /// out.
+    pub fn new(id: EvidenceId) -> Self {
+        Self { id }
+    }
+
+    /// The identity this reference names.
+    pub fn id(&self) -> EvidenceId {
+        self.id
+    }
+
+    /// Resolve this reference to the full durable evidence record,
+    /// through the same [`read_evidence`] every other caller uses.
+    pub async fn resolve(
+        &self,
+        store: &crate::features::domain_persistence::DomainPersistence,
+    ) -> Result<Option<EvidenceBundle>, EvidenceLedgerError> {
+        read_evidence(store, self.id).await
+    }
+}
+
+#[cfg(feature = "disk")]
+impl From<EvidenceId> for EvidenceRef {
+    fn from(id: EvidenceId) -> Self {
+        Self::new(id)
     }
 }
 
@@ -413,6 +628,11 @@ mod tests {
         assert_eq!(bundle.screenshot, None);
         assert_eq!(bundle.screenshot_hash, None);
         assert_eq!(bundle.metadata, None);
+        assert_eq!(bundle.id, None);
+        assert_eq!(bundle.transport, None);
+        assert_eq!(bundle.dns, None);
+        assert_eq!(bundle.backend_provenance, None);
+        assert_eq!(bundle.response_origin, None);
     }
 
     /// requested_url and final_url are independent fields — a redirect
@@ -468,5 +688,146 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "disk")]
+    mod ledger {
+        use super::*;
+        use crate::features::domain_persistence::{DomainPersistence, PersistenceError};
+
+        fn sample_bundle() -> EvidenceBundle {
+            EvidenceBundle {
+                requested_url: Some("https://example.test/".to_string()),
+                final_url: Some("https://example.test/".to_string()),
+                retrieved_at: Some(1_700_000_000_000),
+                status_code: Some(200),
+                observed_status_code: Some(200),
+                transport: Some("default".to_string()),
+                backend_provenance: Some("reqwest".to_string()),
+                response_origin: Some("network".to_string()),
+                content: Some("hello".to_string()),
+                ..Default::default()
+            }
+        }
+
+        #[tokio::test]
+        async fn record_evidence_assigns_id_and_reads_back_truthfully() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let bundle = sample_bundle();
+
+            let recorded = record_evidence(&store, bundle.clone()).await.unwrap();
+            let id = recorded.id.expect("record_evidence must assign an id");
+
+            let read_back = read_evidence(&store, id).await.unwrap().unwrap();
+            assert_eq!(read_back.id, Some(id));
+            assert_eq!(read_back.requested_url, bundle.requested_url);
+            assert_eq!(read_back.final_url, bundle.final_url);
+            assert_eq!(read_back.retrieved_at, bundle.retrieved_at);
+            assert_eq!(read_back.status_code, bundle.status_code);
+            assert_eq!(read_back.observed_status_code, bundle.observed_status_code);
+            assert_eq!(read_back.transport, bundle.transport);
+            assert_eq!(read_back.backend_provenance, bundle.backend_provenance);
+            assert_eq!(read_back.response_origin, bundle.response_origin);
+            assert_eq!(read_back.content, bundle.content);
+        }
+
+        #[tokio::test]
+        async fn record_evidence_never_fabricates_absent_provenance() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            // A bundle with no provenance captured at all (e.g. a page no
+            // audited acquisition path stamped) must read back with every
+            // provenance field still absent — never invented at write or
+            // read time.
+            let bundle = EvidenceBundle {
+                requested_url: Some("https://example.test/".to_string()),
+                ..Default::default()
+            };
+            let recorded = record_evidence(&store, bundle).await.unwrap();
+            let id = recorded.id.unwrap();
+            let read_back = read_evidence(&store, id).await.unwrap().unwrap();
+            assert_eq!(read_back.transport, None);
+            assert_eq!(read_back.dns, None);
+            assert_eq!(read_back.backend_provenance, None);
+            assert_eq!(read_back.response_origin, None);
+            assert_eq!(read_back.source, None);
+            assert_eq!(read_back.provider, None);
+            assert_eq!(read_back.query, None);
+        }
+
+        #[tokio::test]
+        async fn read_evidence_of_unknown_id_is_none() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            assert!(read_evidence(&store, EvidenceId::new())
+                .await
+                .unwrap()
+                .is_none());
+        }
+
+        #[tokio::test]
+        async fn duplicate_evidence_id_write_fails_closed_and_leaves_original_untouched() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let first = record_evidence(&store, sample_bundle()).await.unwrap();
+            let id = first.id.unwrap();
+
+            // Attempt to record a second, different bundle under the same
+            // already-written EvidenceId.
+            let mut second_attempt = sample_bundle();
+            second_attempt.id = Some(id);
+            second_attempt.content = Some("attempted-overwrite".to_string());
+
+            let error = record_evidence(&store, second_attempt).await.unwrap_err();
+            assert!(matches!(
+                error,
+                EvidenceLedgerError::Persistence(PersistenceError::HistoryAlreadyExists)
+            ));
+
+            // The original record is completely untouched.
+            let read_back = read_evidence(&store, id).await.unwrap().unwrap();
+            assert_eq!(read_back.content, first.content);
+            assert_ne!(read_back.content, Some("attempted-overwrite".to_string()));
+        }
+
+        #[tokio::test]
+        async fn distinct_bundles_get_distinct_ids_and_do_not_collide() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let a = record_evidence(&store, sample_bundle()).await.unwrap();
+            let b = record_evidence(&store, sample_bundle()).await.unwrap();
+            assert_ne!(a.id, b.id);
+            assert!(read_evidence(&store, a.id.unwrap())
+                .await
+                .unwrap()
+                .is_some());
+            assert!(read_evidence(&store, b.id.unwrap())
+                .await
+                .unwrap()
+                .is_some());
+        }
+
+        #[tokio::test]
+        async fn evidence_ref_resolves_to_the_intended_evidence_id() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let recorded = record_evidence(&store, sample_bundle()).await.unwrap();
+            let id = recorded.id.unwrap();
+
+            let evidence_ref = EvidenceRef::new(id);
+            assert_eq!(evidence_ref.id(), id);
+
+            let resolved = evidence_ref.resolve(&store).await.unwrap().unwrap();
+            assert_eq!(resolved.id, Some(id));
+            assert_eq!(resolved.requested_url, recorded.requested_url);
+        }
+
+        #[tokio::test]
+        async fn evidence_ref_from_id_matches_new() {
+            let id = EvidenceId::new();
+            assert_eq!(EvidenceRef::from(id), EvidenceRef::new(id));
+        }
+
+        #[tokio::test]
+        async fn evidence_ref_of_unrecorded_id_resolves_to_none() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let evidence_ref = EvidenceRef::new(EvidenceId::new());
+            assert!(evidence_ref.resolve(&store).await.unwrap().is_none());
+        }
     }
 }

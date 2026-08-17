@@ -3565,3 +3565,229 @@ fn no_shadow_auth_session_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_FINGERPRINT_AND_TRANSFORM_LINEAGE_001 ---
+//
+// Track 6 of the frozen roadmap: content/transform lineage
+// (`TransformLineageId`, `TransformationIdentity`,
+// `TransformLineageRecord`, in `features/transform_lineage.rs`) without
+// redefining or shadowing the existing, unrelated
+// `spider::configuration::Fingerprint` (browser anti-detection stealth
+// profile, re-exported from the `spider_fingerprint` crate).
+// `TransformLineageId` is content-addressed — deterministic from
+// (input hash, transformation identity, output hash) — a materially
+// different construction than `features/identity.rs`'s three
+// randomly-minted identity types, which is why it lives in its own
+// module rather than that one.
+
+#[test]
+fn configuration_fingerprint_ownership_remains_intact() {
+    let configuration =
+        fs::read_to_string(workspace_root().join("spider/src/configuration.rs")).unwrap();
+    assert!(
+        configuration.contains("pub use spider_fingerprint::Fingerprint;"),
+        "configuration::Fingerprint's existing re-export must remain exactly as it was — \
+         this frontier must not touch it"
+    );
+}
+
+#[test]
+fn no_bare_fingerprint_type_is_defined_anywhere_in_spider() {
+    // `Fingerprint` is only ever a re-export from `spider_fingerprint` —
+    // it must never be *defined* (shadowed/redefined) anywhere in this
+    // crate, including by this frontier's own new module.
+    for pattern in ["struct Fingerprint", "enum Fingerprint"] {
+        assert_pattern_only_in_files(
+            pattern,
+            &[],
+            "Fingerprint must never be defined in spider/src — it is owned entirely \
+             by the spider_fingerprint crate and only re-exported from configuration.rs",
+        );
+    }
+}
+
+#[test]
+fn transform_lineage_never_imports_or_references_configuration_fingerprint() {
+    let transform_lineage =
+        fs::read_to_string(workspace_root().join("spider/src/features/transform_lineage.rs"))
+            .unwrap();
+    // Checked as actual code forms (imports), not prose — the module's
+    // own doc comment legitimately *names* `configuration::Fingerprint`
+    // in English as part of the required reconciliation.
+    for forbidden in [
+        "use crate::configuration::Fingerprint",
+        "use spider_fingerprint",
+    ] {
+        assert!(
+            !transform_lineage.contains(forbidden),
+            "transform_lineage.rs must never import configuration::Fingerprint \
+             (or the spider_fingerprint crate) — found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn transform_lineage_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "struct TransformLineageId",
+            "TransformLineageId must only be defined in the canonical transform_lineage module",
+        ),
+        (
+            "struct TransformationIdentity",
+            "TransformationIdentity must only be defined in the canonical transform_lineage module",
+        ),
+        (
+            "struct TransformLineageRecord",
+            "TransformLineageRecord must only be defined in the canonical transform_lineage module",
+        ),
+        (
+            "enum TransformLineageError",
+            "TransformLineageError must only be defined in the canonical transform_lineage module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/transform_lineage.rs"], description);
+    }
+}
+
+#[test]
+fn transform_lineage_module_gated_behind_evidence_and_disk() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod transform_lineage;")
+        .expect("transform_lineage module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    let gate_line = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .expect("expected a line before the module declaration");
+    assert_eq!(
+        gate_line.trim(),
+        "#[cfg(all(feature = \"evidence\", feature = \"disk\"))]",
+        "transform_lineage must be gated behind evidence (sha256_hex) and disk \
+         (DomainPersistence/EvidenceRef) — it must not introduce a third, independent \
+         storage or hashing stack"
+    );
+}
+
+#[test]
+fn transform_lineage_identity_is_content_addressed_not_randomly_minted() {
+    let transform_lineage =
+        fs::read_to_string(workspace_root().join("spider/src/features/transform_lineage.rs"))
+            .unwrap();
+    // The determinism proof: the id is a pure function of
+    // (input_hash, transformation, output_hash) — never of recorded_at
+    // or any random source. No `random_bytes`/`AtomicU64` counter
+    // (identity.rs's random-minting machinery) is reachable here.
+    assert!(transform_lineage.contains("fn derive("));
+    assert!(transform_lineage
+        .contains("format!(\"lineage-v1|{input_hash}|{transformation}|{output_hash}\")"));
+    for forbidden in ["random_bytes", "AtomicU64", "fastrand", "rand::"] {
+        assert!(
+            !transform_lineage.contains(forbidden),
+            "transform_lineage.rs's identity must be purely content-addressed, \
+             never randomly minted: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn transform_lineage_persists_append_only_and_reuses_domain_persistence() {
+    let transform_lineage =
+        fs::read_to_string(workspace_root().join("spider/src/features/transform_lineage.rs"))
+            .unwrap();
+    assert!(transform_lineage.contains(".append_history("));
+    assert!(!transform_lineage.contains(".write_current("));
+    // A duplicate content-addressed key is treated as success (the
+    // identical fact was already recorded), not surfaced as an error —
+    // and no direct SQL / second persistence mechanism exists here.
+    assert!(transform_lineage.contains("Err(PersistenceError::HistoryAlreadyExists) => Ok(id)"));
+    for forbidden in ["sqlx::query", "struct DomainPersistence"] {
+        assert!(
+            !transform_lineage.contains(forbidden),
+            "transform_lineage.rs must not construct its own persistence mechanism: \
+             found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn transform_lineage_reuses_evidence_ref_and_sha256_hex_without_duplication() {
+    let transform_lineage =
+        fs::read_to_string(workspace_root().join("spider/src/features/transform_lineage.rs"))
+            .unwrap();
+    assert!(transform_lineage.contains("use crate::utils::evidence::{sha256_hex, EvidenceRef}"));
+    // EvidenceRef is stored by value (Copy, 16-byte reference) — never
+    // alongside a duplicated evidence payload/content field.
+    assert!(transform_lineage.contains("input_evidence: Option<EvidenceRef>"));
+    for forbidden in [
+        "struct EvidenceBundle",
+        "struct EvidenceRef",
+        "fn sha256_hex",
+    ] {
+        assert!(
+            !transform_lineage.contains(forbidden),
+            "transform_lineage.rs must reuse EvidenceRef/sha256_hex, never redefine \
+             them: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn transform_lineage_never_implements_out_of_scope_capabilities() {
+    let transform_lineage =
+        fs::read_to_string(workspace_root().join("spider/src/features/transform_lineage.rs"))
+            .unwrap();
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "fn schedule",
+        "struct Scheduler",
+        "EventSourc",
+        "struct AuthSessionId",
+        "struct EvidenceBundle",
+    ] {
+        assert!(
+            !transform_lineage.contains(forbidden),
+            "transform_lineage.rs must stay scoped to lineage identity/persistence: \
+             found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_transform_lineage_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct TransformLineageId",
+                "struct TransformationIdentity",
+                "struct TransformLineageRecord",
+                "enum TransformLineageError",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     transform lineage model is owned exclusively by \
+                     spider::features::transform_lineage",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

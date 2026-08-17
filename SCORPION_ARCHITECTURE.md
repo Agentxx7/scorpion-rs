@@ -258,6 +258,43 @@ three represent "this identity is authenticated"; none are redefined,
 renamed, or touched by this frontier — guardrailed directly (no
 `AuthSessionId`/`AuthSessionState` reference appears in either file).
 
+### 3.13 Content/Transform Lineage
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Content/transform lineage | `spider/src/features/transform_lineage.rs` | `features/domain_persistence.rs` (`DomainPersistence`), `utils/evidence.rs` (`sha256_hex`, `EvidenceRef`) | `configuration::Fingerprint`/`spider_fingerprint`, `spider_transformations` (interface-layer only), any concrete transformation-library type | `TransformLineageId`, `TransformationIdentity`, `record_lineage()`, `read_lineage()` | None |
+
+**Clarification on `transform_lineage.rs`:** Required Fingerprint
+reconciliation first: `spider::configuration::Fingerprint`
+(re-exported from the `spider_fingerprint` crate) is an unrelated
+browser anti-detection stealth-spoofing profile (`Basic`/`NativeGPU`/
+`None`) with no notion of content, transformation, or provenance — it is
+not redefined, shadowed, or imported here, and the new type introduced
+is named `TransformLineageId`, never bare `Fingerprint`. Unlike
+`features/identity.rs`'s three randomly-minted identity types,
+`TransformLineageId` is **content-addressed** — a deterministic SHA-256
+(reusing `sha256_hex`, never reimplemented) of `(input hash,
+transformation identity, output hash)` — which is why it lives in its
+own module rather than blending a second minting strategy into
+`identity.rs`'s tightly-scoped contract. The same triple always produces
+the same id (`record_lineage` treats a resulting
+`PersistenceError::HistoryAlreadyExists` as success, not a conflict,
+since a content-addressed collision can only mean the identical fact was
+already recorded); a different input, transformation, or output always
+hashes to a different id. `spider` has no dependency on
+`spider_transformations` (an interface-layer crate used only by
+`spider_cli`/`spider_mcp`), so the transformation link is named by a
+caller-supplied deterministic description string, not a concrete
+`TransformConfig` type — the same neutral-seam pattern
+`domain_persistence.rs` already established. Persisted only through
+`DomainPersistence::append_history` (never `write_current` — a lineage
+fact has no current state), exactly like Track 4's evidence ledger.
+`EvidenceRef` is stored by reference when the input is already durable
+evidence — never a duplicate of the evidence payload. Implements no
+`WatchDefinition`/`WatchState`, no scheduling, no
+`ChangeResult`/`ChangeEvent`, no health, and does not redesign
+`EvidenceBundle` or transport.
+
 ---
 
 ## 4. Canonical Path Map
@@ -453,7 +490,13 @@ only defined in `spider/src/features/identity.rs`; `AuthSessionState`,
 `InvalidateSession`, and `AuthSessionError` are only defined in
 `spider/src/features/auth_session.rs` (see §3.12) — no interface may
 define its own session-lifecycle model, and no bare `SessionId` may be
-introduced anywhere.
+introduced anywhere. `Fingerprint` is never defined anywhere in
+`spider/src` — it is owned entirely by the `spider_fingerprint` crate and
+only re-exported from `configuration.rs`; `TransformLineageId`,
+`TransformationIdentity`, `TransformLineageRecord`, and
+`TransformLineageError` are only defined in
+`spider/src/features/transform_lineage.rs` (see §3.13) — no interface may
+define its own content/transform lineage model.
 
 ### 7.7 THIN INTERFACES
 
@@ -624,5 +667,15 @@ The following are intentionally not refactored in this frontier:
   credential-carrying type (`HeaderValue`, `HeaderMap`,
   `SecretRequestHeaders`, a cookie jar) is referenced by identity or
   lifecycle state; and none of it is shadowed by `spider_cli`/`spider_mcp`
+- `configuration::Fingerprint`'s re-export is unchanged; no bare
+  `struct`/`enum Fingerprint` is ever defined in `spider/src`;
+  `transform_lineage.rs` never imports it or the `spider_fingerprint`
+  crate; `TransformLineageId`'s identity is purely content-addressed
+  (derived only from the input/transformation/output triple, never a
+  random source or `recorded_at`); lineage persists through
+  `DomainPersistence::append_history` only (never `write_current`, never
+  raw SQL); `EvidenceRef` is stored by reference, never duplicated; and
+  none of `transform_lineage.rs`'s types are shadowed by
+  `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

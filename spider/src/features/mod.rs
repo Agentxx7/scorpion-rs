@@ -191,6 +191,17 @@ pub mod source;
 /// output, descriptor, and deterministic metadata-registry vocabulary.
 /// Always available; concrete provider execution remains a later frontier.
 pub mod source_provider;
+/// Canonical content/transform lineage: `source input → transformation →
+/// output`, recorded immutably through `DomainPersistence`.
+/// `TransformLineageId` is content-addressed (deterministic SHA-256 of
+/// the input/transformation/output triple) — a different construction
+/// than `features/identity.rs`'s three randomly-minted identity types,
+/// which is why it lives here instead. Does not redefine, shadow, or
+/// import `configuration::Fingerprint` (an unrelated browser
+/// anti-detection concept). Requires `evidence` (for `sha256_hex`) and
+/// `disk` (for `DomainPersistence`/`EvidenceRef`).
+#[cfg(all(feature = "evidence", feature = "disk"))]
+pub mod transform_lineage;
 
 /// Canonical HTTP transport policy (`Default` / Tor-over-SOCKS5h), with
 /// fail-closed `.onion` protection and transport-pinned redirects.

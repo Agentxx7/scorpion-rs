@@ -211,6 +211,53 @@ no health, no event sourcing, and no generic Job/Operation persistence —
 it is a mechanism two future capabilities will call into, not a
 capability itself.
 
+### 3.12 Authenticated Session Lifecycle
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Authenticated-session identity | `spider/src/features/identity.rs` | `std`, `ahash` (entropy mixing only) | Network, transport, persistence, credential/cookie types | `AuthSessionId` | None |
+| Authenticated-session lifecycle | `spider/src/features/auth_session.rs` | `features/identity.rs` (`AuthSessionId`), `features/domain_state.rs` (`Transition`/`CurrentState`), `features/domain_persistence.rs` (`disk`+`serde`) | A second cookie/session subsystem, a new browser architecture, CAPTCHA/transport internals, credential/cookie types | `AuthSessionState`, `PauseSession`/`ResumeSession`/`InvalidateSession`, `create_session()`, `apply_session_transition()` | None |
+
+**Clarification on `auth_session.rs`:** Realizes `SCORPION.md` §5's
+lifecycle rule ("pausing and resuming the *same* authenticated browser
+session — not re-authenticating from scratch, and not silently
+continuing unauthenticated") on top of Track 2/3 unmodified. Three
+states — `Active`, `Paused`, `Invalidated` (terminal) — source-justified
+directly from §5's own words; "resumed" is the transition
+(`ResumeSession`) that produces `Active` again, not a fourth state, since
+inventing one would be symmetry, not domain justification. `ResumeSession`
+only succeeds when its `BrowserContinuityToken` matches exactly the one
+`PauseSession` recorded — a mismatch (including "no token", i.e. a fresh
+context) is rejected as `ContinuityMismatch`, which is what makes "same
+browser session, not silent re-authentication" a checked property rather
+than a comment. This is the first capability to use Track 2's full
+contract — current state via `DomainPersistence::write_current`
+(compare-and-swap) *and* each superseded state via
+`DomainPersistence::append_history` (immutable) — where Track 4's
+evidence ledger only ever needed the append-only half. `AuthSessionId`
+shares `EvidenceId`/`WatchId`'s exact 16-opaque-byte shape, so it is
+structurally incapable of holding a cookie, `Authorization` value, token,
+or credential; `AuthSessionState` carries only `origin`,
+`AuthenticationProfile` (§5's locked method vocabulary — classification,
+not a secret), and, while paused, `BrowserContinuityToken` (a
+caller-derived opaque reference, never the underlying cookie jar's
+contents). `SCORPION.md` §5's `CredentialRef` remains locked/undefined,
+exactly as before this frontier — not implemented here. No new browser
+suspension/resumption machinery is built; a real
+`BrowserContinuityToken`'s derivation from a live browser/cookie-jar
+primitive is left to the caller (a future frontier), consistent with "do
+not create a new browser architecture."
+
+**Collision audit:** "session" already names three unrelated things —
+`chromiumoxide::cdp::browser_protocol::target::SessionId` (CDP
+browser-automation transport identity, also used unchanged in
+`features/frame_context.rs`'s frame-identity chain) and `spider_mcp`'s
+`CrawlSession`/`CrawlSessionStatus` (in-memory async MCP tool-call
+progress tracking, `DashMap<String, CrawlSession>`-keyed). None of the
+three represent "this identity is authenticated"; none are redefined,
+renamed, or touched by this frontier — guardrailed directly (no
+`AuthSessionId`/`AuthSessionState` reference appears in either file).
+
 ---
 
 ## 4. Canonical Path Map
@@ -399,7 +446,14 @@ persistence seam for canonical domain state. `EvidenceBundle` (extended,
 never replaced) remains the one canonical evidence model; `EvidenceRef`
 and `EvidenceLedgerError` are only defined in
 `spider/src/utils/evidence.rs` (see §3.6) — no interface may define its
-own evidence-reference or evidence-ledger-error type.
+own evidence-reference or evidence-ledger-error type. `AuthSessionId` is
+only defined in `spider/src/features/identity.rs`; `AuthSessionState`,
+`AuthenticationProfile`, `BrowserContinuityToken`,
+`AuthSessionTransitionRejected`, `PauseSession`/`ResumeSession`/
+`InvalidateSession`, and `AuthSessionError` are only defined in
+`spider/src/features/auth_session.rs` (see §3.12) — no interface may
+define its own session-lifecycle model, and no bare `SessionId` may be
+introduced anywhere.
 
 ### 7.7 THIN INTERFACES
 
@@ -555,5 +609,20 @@ The following are intentionally not refactored in this frontier:
   sourcing logic of their own, read `backend_provenance`/`response_origin`
   from `Page`'s existing canonical accessors (never a fabricated value),
   and are not shadowed by `spider_cli`/`spider_mcp`
+- No bare `SessionId` exists anywhere in `spider/src`; `AuthSessionId` is
+  defined in exactly one module (`features/identity.rs`) sharing
+  `EvidenceId`/`WatchId`'s exact opaque-byte shape; `AuthSessionState`/
+  `AuthenticationProfile`/`BrowserContinuityToken`/
+  `AuthSessionTransitionRejected`/the three transition types/
+  `AuthSessionError` are defined in exactly one module
+  (`features/auth_session.rs`); that module documents (and a guardrail
+  proves) it never touches `frame_context.rs` or `spider_mcp`'s
+  `CrawlSession`; it uses exactly 3 `Transition<AuthSessionState>` impls;
+  its persistence uses both `DomainPersistence::write_current` and
+  `::append_history` (never a second persistence mechanism); resume
+  requires an exact `BrowserContinuityToken` match; no real
+  credential-carrying type (`HeaderValue`, `HeaderMap`,
+  `SecretRequestHeaders`, a cookie jar) is referenced by identity or
+  lifecycle state; and none of it is shadowed by `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

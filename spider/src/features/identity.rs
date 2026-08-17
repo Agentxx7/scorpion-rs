@@ -29,9 +29,25 @@
 //!   itself remains **BLOCKED** — `WatchDefinition`/`WatchState`/the state
 //!   machine do not exist and must not be added here. This module defines
 //!   only the identity that will eventually name a watch, nothing more.
+//! - [`AuthSessionId`] realizes the identity half of the authenticated
+//!   session lifecycle locked in `SCORPION.md` §5 ("Authenticated
+//!   Research") — specifically its rule that "future MFA/interactive
+//!   authentication must support pausing and resuming the *same*
+//!   authenticated browser session." This type is identity only; it is
+//!   **not**, and structurally cannot become, a credential, cookie, or
+//!   token — see `features/auth_session.rs` for the lifecycle state that
+//!   uses it and the explicit proof that secrets never enter identity.
+//!   Distinct from — and never to be confused with — three other,
+//!   unrelated existing "session" concepts: `chromiumoxide`'s CDP
+//!   `SessionId` (a browser-automation transport concept, re-exported
+//!   into `features/frame_context.rs`'s frame-identity chain) and
+//!   `spider_mcp`'s `CrawlSession` (in-memory async tool-call progress
+//!   tracking, keyed by a plain `String`, with no relation to
+//!   authentication). None of those three are redefined, renamed, or
+//!   touched by this type.
 //!
-//! Only these two identity types exist. Do not add `ResearchId`, `CrawlId`,
-//! `FetchId`, `SessionId`, `AuthSessionId`, `JobId`, `OperationId`, or any
+//! Only these three identity types exist. Do not add `ResearchId`,
+//! `CrawlId`, `FetchId`, a bare `SessionId`, `JobId`, `OperationId`, or any
 //! other identity "for symmetry" — each new identity type is its own
 //! frontier, scoped to a concept that is actually locked and actually
 //! needed next.
@@ -327,6 +343,100 @@ impl<'de> serde::Deserialize<'de> for WatchId {
     }
 }
 
+/// Canonical identity for one authenticated-session lifecycle instance.
+///
+/// Realizes the identity half of `SCORPION.md` §5's "Authenticated
+/// Research" — pause/resume/invalidate lifecycle state lives in
+/// `features/auth_session.rs`, built on this identity and on
+/// [`crate::features::domain_state`]'s transition contract. This type is
+/// identity only, and — like every identity in this module — 16 opaque
+/// random bytes: it cannot hold a cookie, an `Authorization` value, a
+/// token, or any other credential, because there is no field, variant, or
+/// constructor through which one could ever be supplied. See
+/// `features/auth_session.rs`'s module doc for the full secret/identity
+/// separation proof.
+///
+/// Not to be confused with `chromiumoxide`'s CDP `SessionId` (browser
+/// transport identity) or `spider_mcp`'s `CrawlSession` (async tool-call
+/// progress tracking) — see this module's own doc comment.
+///
+/// Serialized form: `auth_` followed by 32 lowercase hex characters, e.g.
+/// `auth_0123456789abcdef0123456789abcdef`. The format is fixed and
+/// deterministic — [`AuthSessionId::to_string`] always produces it and
+/// [`AuthSessionId::from_str`] accepts only it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AuthSessionId([u8; ID_BYTES]);
+
+impl AuthSessionId {
+    /// Wire-format prefix. Part of the type's serialization contract.
+    pub const PREFIX: &'static str = "auth_";
+
+    /// Mint a fresh, unused-so-far identity. Pure value construction —
+    /// this performs no I/O and records nothing anywhere.
+    pub fn new() -> Self {
+        Self(random_bytes())
+    }
+}
+
+impl Default for AuthSessionId {
+    /// Same as [`AuthSessionId::new`] — a fresh identity, not a sentinel
+    /// "empty" value (this identity kind has none).
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for AuthSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_id(Self::PREFIX, &self.0))
+    }
+}
+
+impl fmt::Debug for AuthSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AuthSessionId({self})")
+    }
+}
+
+impl FromStr for AuthSessionId {
+    type Err = IdentityParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_id(Self::PREFIX, s).map(Self)
+    }
+}
+
+impl TryFrom<&str> for AuthSessionId {
+    type Error = IdentityParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl TryFrom<String> for AuthSessionId {
+    type Error = IdentityParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for AuthSessionId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for AuthSessionId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +476,31 @@ mod tests {
         let watch = WatchId::new().to_string();
         assert!(matches!(
             EvidenceId::from_str(&watch),
+            Err(IdentityParseError::WrongPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn auth_session_id_round_trips_through_display_and_parse() {
+        let id = AuthSessionId::new();
+        let text = id.to_string();
+        assert!(text.starts_with(AuthSessionId::PREFIX));
+        assert_eq!(text.len(), AuthSessionId::PREFIX.len() + ID_BYTES * 2);
+        let parsed: AuthSessionId = text.parse().expect("round trip must parse");
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn auth_session_id_is_distinct_from_evidence_id_and_watch_id() {
+        assert_ne!(AuthSessionId::PREFIX, EvidenceId::PREFIX);
+        assert_ne!(AuthSessionId::PREFIX, WatchId::PREFIX);
+        let auth = AuthSessionId::new().to_string();
+        assert!(matches!(
+            EvidenceId::from_str(&auth),
+            Err(IdentityParseError::WrongPrefix { .. })
+        ));
+        assert!(matches!(
+            WatchId::from_str(&auth),
             Err(IdentityParseError::WrongPrefix { .. })
         ));
     }
@@ -416,6 +551,13 @@ mod tests {
         for _ in 0..256 {
             assert!(
                 seen.insert(WatchId::new()),
+                "collision in freshly minted IDs"
+            );
+        }
+        let mut seen = HashSet::new();
+        for _ in 0..256 {
+            assert!(
+                seen.insert(AuthSessionId::new()),
                 "collision in freshly minted IDs"
             );
         }

@@ -81,6 +81,15 @@ pub mod artifact_download_execution;
 /// Provider-neutral metadata for versioned repository artifacts. Always
 /// available and performs no acquisition, download, parsing, or verification.
 pub mod artifact_reference;
+/// Canonical authenticated-session lifecycle: `AuthSessionState`
+/// (Active/Paused/Invalidated), `PauseSession`/`ResumeSession`/
+/// `InvalidateSession` transitions (built on `domain_state::Transition`),
+/// and — behind `disk` + `serde` — `create_session`/
+/// `apply_session_transition` persisting through `DomainPersistence`.
+/// Identity (`AuthSessionId`) lives in `features/identity.rs`. Always
+/// available; no feature gate on the state/transition vocabulary itself.
+/// See `SCORPION.md` §5.
+pub mod auth_session;
 /// `DiscoveryTarget`: the smallest canonical planning boundary for
 /// discovery pointers (sitemap index child sitemaps, robots.txt-declared
 /// sitemaps, caller/request-supplied URLs) — URLs to acquire *later*,

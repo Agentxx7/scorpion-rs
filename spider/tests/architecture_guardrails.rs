@@ -3305,3 +3305,263 @@ fn no_shadow_evidence_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_AUTHENTICATED_SESSION_LIFECYCLE_001 ---
+//
+// Track 5 of the frozen roadmap: AuthSessionId (identity.rs) and the
+// authenticated-session lifecycle (auth_session.rs: AuthSessionState,
+// PauseSession/ResumeSession/InvalidateSession transitions, persistence
+// through DomainPersistence) — the first capability to use Track 2's
+// full current-state + historical-record contract (not append-only-only,
+// like Track 4's evidence ledger). No bare SessionId is introduced; no
+// existing "session" meaning (chromiumoxide CDP SessionId, frame_context,
+// spider_mcp CrawlSession) is redefined; no credential material can enter
+// identity or lifecycle state.
+
+#[test]
+fn auth_session_id_is_defined_exactly_once() {
+    assert_pattern_only_in_files(
+        "struct AuthSessionId",
+        &["features/identity.rs"],
+        "AuthSessionId must only be defined in the canonical identity module",
+    );
+}
+
+#[test]
+fn no_bare_session_id_is_introduced() {
+    // The frontier explicitly forbids a generic/bare SessionId — only the
+    // domain-specific AuthSessionId. `chromiumoxide`'s own CDP SessionId
+    // is vendored/upstream, not defined anywhere in spider/src, so this
+    // scan can safely forbid the bare name outright.
+    assert_pattern_only_in_files(
+        "struct SessionId",
+        &[],
+        "no bare SessionId may be introduced — only the domain-specific AuthSessionId",
+    );
+}
+
+#[test]
+fn auth_session_lifecycle_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "enum AuthSessionState",
+            "AuthSessionState must only be defined in the canonical auth_session module",
+        ),
+        (
+            "enum AuthenticationProfile",
+            "AuthenticationProfile must only be defined in the canonical auth_session module",
+        ),
+        (
+            "struct BrowserContinuityToken",
+            "BrowserContinuityToken must only be defined in the canonical auth_session module",
+        ),
+        (
+            "enum AuthSessionTransitionRejected",
+            "AuthSessionTransitionRejected must only be defined in the canonical auth_session module",
+        ),
+        (
+            "struct PauseSession",
+            "PauseSession must only be defined in the canonical auth_session module",
+        ),
+        (
+            "struct ResumeSession",
+            "ResumeSession must only be defined in the canonical auth_session module",
+        ),
+        (
+            "struct InvalidateSession",
+            "InvalidateSession must only be defined in the canonical auth_session module",
+        ),
+        (
+            "enum AuthSessionError",
+            "AuthSessionError must only be defined in the canonical auth_session module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/auth_session.rs"], description);
+    }
+}
+
+#[test]
+fn auth_session_id_never_collides_with_existing_session_meanings() {
+    // Reconciliation proof: the three pre-existing "session" concepts
+    // must remain completely untouched by this frontier — no reference
+    // to AuthSessionId/AuthSessionState anywhere near them.
+    let frame_context =
+        fs::read_to_string(workspace_root().join("spider/src/features/frame_context.rs")).unwrap();
+    assert!(
+        !frame_context.contains("AuthSessionId") && !frame_context.contains("AuthSessionState"),
+        "frame_context.rs (chromiumoxide CDP SessionId identity chain) must remain \
+         untouched by the authenticated-session lifecycle"
+    );
+
+    let mcp_state_path = workspace_root().join("spider_mcp/src/state.rs");
+    if mcp_state_path.exists() {
+        let mcp_state = fs::read_to_string(&mcp_state_path).unwrap();
+        assert!(
+            !mcp_state.contains("AuthSessionId") && !mcp_state.contains("AuthSessionState"),
+            "spider_mcp::CrawlSession (async tool-call progress tracking) must remain \
+             untouched by the authenticated-session lifecycle"
+        );
+    }
+
+    // And the reconciliation must be documented, not merely true by
+    // accident.
+    let auth_session =
+        fs::read_to_string(workspace_root().join("spider/src/features/auth_session.rs")).unwrap();
+    for must_mention in [
+        "chromiumoxide::cdp::browser_protocol::target::SessionId",
+        "CrawlSession",
+        "frame_context.rs",
+    ] {
+        assert!(
+            auth_session.contains(must_mention),
+            "auth_session.rs must document its reconciliation against {must_mention:?}"
+        );
+    }
+}
+
+#[test]
+fn auth_session_lifecycle_uses_domain_state_transition_contract() {
+    let auth_session =
+        fs::read_to_string(workspace_root().join("spider/src/features/auth_session.rs")).unwrap();
+    assert!(auth_session.contains("use crate::features::domain_state::Transition"));
+    // Exactly the three transitions the lifecycle vocabulary justifies —
+    // no bare "Resumed" state, no invented transitions.
+    assert_eq!(
+        auth_session
+            .matches("impl Transition<AuthSessionState> for")
+            .count(),
+        3,
+        "expected exactly 3 Transition<AuthSessionState> impls: pause, resume, invalidate"
+    );
+    assert!(auth_session.contains("impl Transition<AuthSessionState> for PauseSession"));
+    assert!(auth_session.contains("impl Transition<AuthSessionState> for ResumeSession"));
+    assert!(auth_session.contains("impl Transition<AuthSessionState> for InvalidateSession"));
+}
+
+#[test]
+fn auth_session_persistence_uses_both_domain_persistence_primitives() {
+    let auth_session =
+        fs::read_to_string(workspace_root().join("spider/src/features/auth_session.rs")).unwrap();
+    // Unlike Track 4's evidence ledger (append-only only), an
+    // authenticated session has genuine current state — this module must
+    // use both of Track 3's primitives: compare-and-swap for the current
+    // lifecycle state, and append-only history for each superseded one.
+    assert!(auth_session.contains(".write_current("));
+    assert!(auth_session.contains(".append_history("));
+    // No unconditional overwrite / no direct SQL / no second persistence
+    // mechanism of its own.
+    for forbidden in ["set_current(", "overwrite_current(", "sqlx::query"] {
+        assert!(
+            !auth_session.contains(forbidden),
+            "auth_session.rs must not construct its own persistence mechanism: \
+             found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn auth_session_pause_resume_requires_matching_continuity_token() {
+    let auth_session =
+        fs::read_to_string(workspace_root().join("spider/src/features/auth_session.rs")).unwrap();
+    // The truthfulness proof for "pause/resume preserves the same
+    // authenticated browser session, never silently re-authenticates":
+    // resume must compare the presented token against the one recorded
+    // at pause time and reject on mismatch.
+    assert!(auth_session.contains("if *continuity == self.continuity"));
+    assert!(auth_session.contains("AuthSessionTransitionRejected::ContinuityMismatch"));
+}
+
+#[test]
+fn auth_session_credential_types_never_appear_in_identity_or_lifecycle() {
+    let identity =
+        fs::read_to_string(workspace_root().join("spider/src/features/identity.rs")).unwrap();
+    let auth_session =
+        fs::read_to_string(workspace_root().join("spider/src/features/auth_session.rs")).unwrap();
+    // AuthSessionId must share EvidenceId/WatchId's exact structural
+    // shape — 16 opaque bytes, nothing else — which is what makes it
+    // structurally incapable of holding a cookie/token/credential.
+    assert!(identity.contains("pub struct AuthSessionId([u8; ID_BYTES]);"));
+    // Real credential-carrying types already named elsewhere in this
+    // codebase (features/secret_request_headers.rs, reqwest's header
+    // vocabulary, the cookie jar) must never be imported or referenced
+    // as an actual type here — checked as code forms (an import or a
+    // field-type annotation), not bare prose words, since this module's
+    // own doc comments legitimately *discuss* cookies/tokens/credentials
+    // in English to explain why none of them can enter.
+    for forbidden in [
+        "use reqwest::header",
+        ": HeaderValue",
+        ": HeaderMap",
+        ": SecretRequestHeaders",
+        "use cookie::",
+        "cookie::Jar",
+    ] {
+        assert!(
+            !identity.contains(forbidden) && !auth_session.contains(forbidden),
+            "found a real credential-carrying type reference: {forbidden:?} — \
+             AuthSessionId/AuthSessionState must never be able to hold secret material"
+        );
+    }
+}
+
+#[test]
+fn auth_session_never_implements_out_of_scope_capabilities() {
+    let auth_session =
+        fs::read_to_string(workspace_root().join("spider/src/features/auth_session.rs")).unwrap();
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "struct Fingerprint",
+        "struct Lineage",
+        "fn schedule",
+        "struct Scheduler",
+        "EventSourc",
+        "chromiumoxide::Browser",
+        "chromiumoxide::Page",
+    ] {
+        assert!(
+            !auth_session.contains(forbidden),
+            "auth_session.rs must stay scoped to identity/lifecycle/persistence: \
+             found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_auth_session_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct AuthSessionId",
+                "enum AuthSessionState",
+                "enum AuthenticationProfile",
+                "struct BrowserContinuityToken",
+                "struct PauseSession",
+                "struct ResumeSession",
+                "struct InvalidateSession",
+                "enum AuthSessionError",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     authenticated-session lifecycle is owned exclusively by \
+                     spider::features::identity / spider::features::auth_session",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

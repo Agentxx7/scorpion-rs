@@ -128,7 +128,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **BLOCKED** | `WatchId` identity (`features/identity.rs`) and the generic state/transition semantics (`features/domain_state.rs`) now exist; `WatchDefinition` and a concrete `WatchState`/`Transition<WatchState>` product model still do not exist and must not be implemented until a frontier establishes canonical ownership (SCORPION_SDD.md §5.2). |
+| WATCH/MONITOR | **BLOCKED** | `WatchId` identity (`features/identity.rs`), the generic state/transition semantics (`features/domain_state.rs`), and the generic persistence seam (`features/domain_persistence.rs`) now exist; `WatchDefinition` and a concrete `WatchState`/`Transition<WatchState>` product model still do not exist and must not be implemented until a frontier establishes canonical ownership (SCORPION_SDD.md §5.2). |
 
 ### 3.9 Identity
 
@@ -177,6 +177,36 @@ instead; `Snapshot` remains split between `VitalsSnapshot`,
 use naming a future watch-specific transition *input* — this module
 never defines a bare `Snapshot` type. `Fingerprint` is a known, separate
 naming collision deliberately left unreconciled; it belongs to Track 6.
+
+### 3.11 Persistence Mechanism
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Persisted-domain persistence mechanism | `spider/src/features/domain_persistence.rs` | `std`, `sqlx`/SQLite (reused, `disk` feature) | Network, transport, `features/identity.rs`, `features/domain_state.rs`, any concrete domain/product-model type | `DomainPersistence` | None |
+
+**Clarification on `domain_persistence.rs`:** This module owns the
+mechanism only — one SQLite-backed store, gated behind the existing
+`disk` feature so no second, always-on persistence stack is introduced.
+It never imports `features/identity.rs` or `features/domain_state.rs`;
+every identity is an opaque `&str` (any identity's `Display` form), every
+state is opaque `&[u8]`. Current-state writes
+(`DomainPersistence::write_current`) are compare-and-swap only — the
+caller supplies the revision it expects is currently stored, and the
+write is rejected with nothing changed if that does not match; there is
+no unconditional-overwrite method. Historical-record appends
+(`DomainPersistence::append_history`) fail closed on a duplicate
+`(identity, revision)` key via the table's own `PRIMARY KEY` constraint,
+not application-level convention — an existing record can never be
+silently replaced. It owns its own tables and connection pool, separate
+from `features/disk.rs`'s `DatabaseHandler` (Spider's upstream
+crawl-resume/dedup mechanism — a different, non-transition-aware,
+freely-overwritable schema serving a different purpose). Per this
+frontier's explicit scope, it implements no Evidence Ledger product
+semantics, no authenticated-session lifecycle, no `WatchDefinition`/
+`WatchState`, no Fingerprint/Lineage, no scheduling, no change detection,
+no health, no event sourcing, and no generic Job/Operation persistence —
+it is a mechanism two future capabilities will call into, not a
+capability itself.
 
 ---
 
@@ -359,7 +389,10 @@ interface (`spider_cli`, `spider_mcp`, or otherwise) may define its own
 identity type for either concept. `CurrentState`, `HistoryEntry`,
 `HistoryLog`, and `Transition` are only defined in
 `spider/src/features/domain_state.rs`; no bare `Observation` or `Snapshot`
-type may be introduced anywhere (see §3.10).
+type may be introduced anywhere (see §3.10). `DomainPersistence` is only
+defined in `spider/src/features/domain_persistence.rs` (see §3.11 and
+§7.11) — no interface, and no other module, may define a second
+persistence seam for canonical domain state.
 
 ### 7.7 THIN INTERFACES
 
@@ -389,6 +422,18 @@ temporary code is unavoidable, it must have:
 - bounded scope
 - removal condition
 - no automatic fallback role
+
+### 7.11 NO BLIND PERSISTENCE WRITES
+
+Canonical domain current-state persistence must be compare-and-swap
+(caller states the expected prior revision; a mismatch fails closed with
+nothing written) — never blind/unconditional overwrite. Canonical
+historical-record persistence must be append-only; writing an
+already-recorded historical key must fail closed, enforced at the storage
+layer (a database constraint), not merely by application-level
+convention. Persistence stores canonical domain state; it must never
+decide whether a transition is valid, invent lifecycle state, or import a
+concrete domain/product-model type.
 
 ---
 
@@ -484,5 +529,16 @@ The following are intentionally not refactored in this frontier:
   transition contract signature, are not shadowed by
   `spider_cli`/`spider_mcp`, and introduce no bare `Observation`/`Snapshot`
   type anywhere in `spider/src`
+- `DomainPersistence` is defined in exactly one canonical module
+  (`features/domain_persistence.rs`), gated behind the existing `disk`
+  feature (no second storage stack), never imports
+  `features/identity.rs`/`features/domain_state.rs`, decides no domain
+  semantics (no `Transition`, no `WatchState`/`WatchDefinition`, no
+  lifecycle status, no scheduling, no event sourcing), exposes
+  current-state writes only as compare-and-swap (no unconditional
+  overwrite method), enforces historical-append fail-closed-on-duplicate
+  at the database constraint level (never an `UPDATE`/`DELETE`/`INSERT OR
+  REPLACE`/`INSERT OR IGNORE` on the history table), and is not shadowed
+  by `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

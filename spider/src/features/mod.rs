@@ -90,6 +90,14 @@ pub mod artifact_reference;
 /// robots_sitemap `PlanningInput` variants are individually gated behind
 /// their respective existing features.
 pub mod discovery_target;
+/// Canonical persistence seam for Scorpion domain state: `DomainPersistence`.
+/// Stores opaque identity-keyed state — compare-and-swap current state,
+/// append-only historical records — and decides no domain semantics.
+/// Reuses the crate's existing `sqlx`/SQLite dependency (`features/disk.rs`);
+/// gated behind the same `disk` feature, no new storage stack. See
+/// `SCORPION_SDD.md` §5.2.
+#[cfg(feature = "disk")]
+pub mod domain_persistence;
 /// Canonical state/transition semantics for persisted Scorpion domain
 /// objects: `CurrentState`, `HistoryEntry`, `HistoryLog`, `Transition`.
 /// Semantics only — no persistence, no concrete state machine, no product

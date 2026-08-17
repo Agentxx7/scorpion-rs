@@ -2938,3 +2938,234 @@ fn no_shadow_domain_state_types_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_PERSISTENCE_MECHANISM_001 ---
+//
+// Track 3 of the frozen roadmap: one canonical persistence seam for the
+// domain state Track 2 defines. `DomainPersistence` is defined exactly
+// once, in `spider/src/features/domain_persistence.rs`, gated behind the
+// existing `disk` feature (reusing the crate's sqlx/SQLite dependency
+// rather than introducing a second persistence stack). It stores opaque
+// identity-keyed bytes only: current-state writes are compare-and-swap
+// (no unconditional overwrite method exists), and historical-record
+// appends fail closed on a duplicate `(identity, revision)` key (the
+// database's own primary-key constraint enforces this). The module never
+// imports `EvidenceId`/`WatchId`/`CurrentState`/`Transition` and defines
+// no domain product model, no lifecycle status, no scheduling, no event
+// sourcing.
+
+#[test]
+fn domain_persistence_type_is_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "struct DomainPersistence",
+            "DomainPersistence must only be defined in the canonical domain_persistence module",
+        ),
+        (
+            "enum PersistenceError",
+            "PersistenceError must only be defined in the canonical domain_persistence module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/domain_persistence.rs"], description);
+    }
+}
+
+#[test]
+fn domain_persistence_module_gated_behind_disk_feature() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod domain_persistence;")
+        .expect("domain_persistence module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    let gate_line = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .expect("expected a line before the module declaration");
+    assert_eq!(
+        gate_line.trim(),
+        "#[cfg(feature = \"disk\")]",
+        "domain_persistence must be gated behind the existing disk feature — \
+         it must not introduce a second, always-on storage stack"
+    );
+}
+
+#[test]
+fn domain_persistence_never_imports_domain_state_or_identity_types() {
+    let domain_persistence =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_persistence.rs"))
+            .unwrap();
+    // A storage mechanism that had to import a concrete domain type to
+    // compile would already be deciding something about that domain —
+    // this module takes only opaque `&str`/`&[u8]`. Checked as actual
+    // `use` import lines, not bare prose mentions (the module's own doc
+    // comments legitimately *name* EvidenceId/WatchId/CurrentState/
+    // Transition in English, including as intra-doc links, to explain
+    // the decoupling).
+    for forbidden in [
+        "use crate::features::identity",
+        "use crate::features::domain_state",
+        "use super::identity",
+        "use super::domain_state",
+    ] {
+        assert!(
+            !domain_persistence.contains(forbidden),
+            "domain_persistence must stay decoupled from Track 1/2 Rust types: \
+             found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn domain_persistence_decides_no_domain_semantics() {
+    let domain_persistence =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_persistence.rs"))
+            .unwrap();
+    for forbidden in [
+        "trait Transition",
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+        "struct AuthSessionId",
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "struct Fingerprint",
+        "struct Lineage",
+        "fn schedule",
+        "struct Scheduler",
+        "EventSourc",
+        "struct Job",
+        "struct Operation",
+        "reqwest::",
+        "chromiumoxide::",
+    ] {
+        assert!(
+            !domain_persistence.contains(forbidden),
+            "domain_persistence must stay a pure storage mechanism: \
+             found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn current_state_writes_are_compare_and_swap_with_no_unconditional_overwrite() {
+    let domain_persistence =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_persistence.rs"))
+            .unwrap();
+    assert!(
+        domain_persistence.contains("pub async fn write_current("),
+        "expected the canonical current-state write method"
+    );
+    assert!(
+        domain_persistence.contains("expected_revision: Option<u64>"),
+        "write_current must require the caller's expected prior revision — \
+         no blind overwrite"
+    );
+    assert!(
+        domain_persistence.contains("if actual != expected_revision {")
+            && domain_persistence.contains("CurrentStateConflict"),
+        "write_current must fail closed when the expected revision does not match"
+    );
+    // No second, unconditional write path.
+    for forbidden in [
+        "pub async fn set_current(",
+        "pub async fn overwrite_current(",
+        "pub async fn force_write_current(",
+        "pub async fn put_current(",
+    ] {
+        assert!(
+            !domain_persistence.contains(forbidden),
+            "found an unconditional current-state overwrite method: {forbidden:?} — \
+             current state must only ever be written through compare-and-swap"
+        );
+    }
+}
+
+#[test]
+fn historical_append_fails_closed_on_duplicate_key() {
+    let domain_persistence =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_persistence.rs"))
+            .unwrap();
+    assert!(
+        domain_persistence.contains("pub async fn append_history("),
+        "expected the canonical historical-append method"
+    );
+    assert!(
+        domain_persistence.contains("PRIMARY KEY (identity, revision)"),
+        "the history table must enforce uniqueness by (identity, revision) at the \
+         database level, not merely in application logic"
+    );
+    assert!(
+        domain_persistence.contains("is_unique_violation()")
+            && domain_persistence.contains("HistoryAlreadyExists"),
+        "a duplicate-key insert must be mapped to a fail-closed HistoryAlreadyExists error"
+    );
+    // No update/delete/replace path for history at all.
+    for forbidden in [
+        "UPDATE scorpion_domain_history",
+        "DELETE FROM scorpion_domain_history",
+        "INSERT OR REPLACE INTO scorpion_domain_history",
+        "INSERT OR IGNORE INTO scorpion_domain_history",
+    ] {
+        assert!(
+            !domain_persistence.contains(forbidden),
+            "found a mutating/silently-replacing history query: {forbidden:?} — \
+             historical records must be plain INSERT-or-fail"
+        );
+    }
+}
+
+#[test]
+fn domain_persistence_reuses_existing_sqlite_stack_not_a_second_architecture() {
+    let domain_persistence =
+        fs::read_to_string(workspace_root().join("spider/src/features/domain_persistence.rs"))
+            .unwrap();
+    assert!(
+        domain_persistence.contains("use sqlx::sqlite::"),
+        "domain_persistence must reuse the crate's existing sqlx/SQLite dependency"
+    );
+    // It owns its own tables/pool rather than reusing disk.rs's
+    // DatabaseHandler/resources/signatures schema (a different, upstream
+    // crawl-resume mechanism with non-transition-aware semantics) — but it
+    // must not define a second DatabaseHandler-shaped type either.
+    assert!(!domain_persistence.contains("struct DatabaseHandler"));
+    let cargo_toml = fs::read_to_string(workspace_root().join("spider/Cargo.toml")).unwrap();
+    assert_eq!(
+        cargo_toml.matches("dep:sqlx").count(),
+        1,
+        "expected exactly one sqlx dependency declaration — no second database crate introduced"
+    );
+}
+
+#[test]
+fn no_shadow_persistence_seam_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct DomainPersistence",
+                "enum PersistenceError",
+                "scorpion_domain_current_state",
+                "scorpion_domain_history",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     persistence seam is owned exclusively by \
+                     spider::features::domain_persistence",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

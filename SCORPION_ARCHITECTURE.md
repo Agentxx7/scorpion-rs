@@ -128,7 +128,24 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **BLOCKED** | No canonical model/seam exists yet; must not be implemented until a frontier establishes canonical ownership. |
+| WATCH/MONITOR | **BLOCKED** | `WatchId` identity now exists (`features/identity.rs`); `WatchDefinition`/`WatchState`/`Snapshot`/`Transition`/the canonical state model/seam still do not exist and must not be implemented until a frontier establishes canonical ownership (SCORPION_SDD.md §5.2). |
+
+### 3.9 Identity
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Persisted-domain identity | `spider/src/features/identity.rs` | `std`, `ahash` (entropy mixing only) | Network, transport, persistence, state/lifecycle, the domain object types themselves | `EvidenceId`, `WatchId` | None |
+
+**Clarification on `identity.rs`:** This module owns identity only —
+explicit type, deterministic serialization, validating parse, and value
+equality/hash/ordering per identity kind. It owns no persistence, no
+state/lifecycle, and no domain object. `EvidenceId` realizes the concept
+locked in `SCORPION.md` §3; `WatchId` realizes the first link of the
+state-driven capability chain locked in `SCORPION_SDD.md` §5.2. Only these
+two identity types exist — `ResearchId`, `CrawlId`, `FetchId`, `SessionId`,
+`AuthSessionId`, `JobId`, `OperationId`, and any other identity type each
+require their own frontier scoped to an actually-locked, actually-needed
+concept; none may be added "for symmetry" with these two.
 
 ---
 
@@ -305,7 +322,10 @@ shim, or hidden alternate path.
 
 Do not create alternative versions of canonical domain models.
 `ArtifactReference`, `ArtifactDownloadBinding`, `ArtifactDownloadExecutionError`,
-`AcquiredArtifact` are only defined in their canonical modules.
+`AcquiredArtifact` are only defined in their canonical modules. `EvidenceId`
+and `WatchId` are only defined in `spider/src/features/identity.rs` — no
+interface (`spider_cli`, `spider_mcp`, or otherwise) may define its own
+identity type for either concept.
 
 ### 7.7 THIN INTERFACES
 
@@ -417,5 +437,10 @@ The following are intentionally not refactored in this frontier:
 - Thin interfaces: `spider_cli`/`spider_mcp` define no shadow canonical models
 - Negative scanner proofs: synthetic violations in every guarded class are
   proven detected (see `scanner_detects_every_violation_class`)
+- `EvidenceId`/`WatchId` are each defined in exactly one canonical module
+  (`features/identity.rs`), declared unconditionally (no feature gate),
+  implement deterministic serialization/validation, and are not shadowed
+  by `spider_cli`/`spider_mcp`; the identity module contains no
+  persistence or state/lifecycle implementation
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

@@ -99,6 +99,11 @@ pub mod github_source_provider;
 /// Provider-native Hugging Face model discovery through the official Hub API.
 #[cfg(feature = "source_hugging_face")]
 pub mod hugging_face_source_provider;
+/// Canonical identity for persisted Scorpion domain objects: `EvidenceId`,
+/// `WatchId`. Identity only — no persistence, no state/lifecycle, no
+/// domain object. Always available; no feature gate. See
+/// `SCORPION.md` §3 (`EvidenceId`) and `SCORPION_SDD.md` §5.2 (`WatchId`).
+pub mod identity;
 /// Provider-neutral immutable local multi-file model installation, identity,
 /// qualification and offline runtime lifecycle contract.
 pub mod local_model;

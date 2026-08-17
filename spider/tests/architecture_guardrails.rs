@@ -2620,3 +2620,134 @@ fn canonical_executor_scope_established_at_every_chrome_crawl_entry_point() {
          now that the chrome-error fallback genuinely can reach this client"
     );
 }
+
+// --- SECTION: SCORPION_PERSISTED_DOMAIN_IDENTITY_001 ---
+//
+// Track 1 of the frozen roadmap: identity for persisted domain objects.
+// `EvidenceId` (SCORPION.md §3) and `WatchId` (SCORPION_SDD.md §5.2) are
+// defined exactly once, in `spider/src/features/identity.rs` — identity
+// only: explicit type, deterministic serialization, validating parse,
+// value equality/hash/ordering. No persistence, no state/lifecycle, no
+// domain object, no interface-local shadow type. WATCH/MONITOR's actual
+// state model (`WatchDefinition`/`WatchState`/`Snapshot`/`Transition`)
+// remains BLOCKED per SCORPION_SDD.md §5.2 — only identity exists.
+
+#[test]
+fn evidence_id_and_watch_id_are_defined_exactly_once() {
+    assert_pattern_only_in_files(
+        "struct EvidenceId",
+        &["features/identity.rs"],
+        "EvidenceId must only be defined in the canonical identity module",
+    );
+    assert_pattern_only_in_files(
+        "struct WatchId",
+        &["features/identity.rs"],
+        "WatchId must only be defined in the canonical identity module",
+    );
+}
+
+#[test]
+fn identity_module_declared_unconditionally_in_features_mod() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod identity;")
+        .expect("identity module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    // Walk backward past this declaration's own doc comment (if any) to the
+    // line immediately above it — that is the only line that could gate
+    // *this* declaration. Looking further back would hit the previous,
+    // unrelated module's own gate/doc comment instead.
+    let gated = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .is_some_and(|line| line.trim_start().starts_with("#[cfg("));
+    assert!(
+        !gated,
+        "identity module must be declared unconditionally — persisted-domain \
+         identity must not depend on optional cargo features"
+    );
+}
+
+#[test]
+fn identity_module_has_no_persistence_or_lifecycle_implementation() {
+    let identity =
+        fs::read_to_string(workspace_root().join("spider/src/features/identity.rs")).unwrap();
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+        "struct Snapshot",
+        "struct Transition",
+        "enum Transition",
+        "sqlx::",
+        "cacache::",
+        "CACACHE_MANAGER",
+        "tokio::fs::",
+        "std::fs::File",
+        "std::fs::write",
+        "reqwest::",
+        "chromiumoxide::",
+    ] {
+        assert!(
+            !identity.contains(forbidden),
+            "identity module must stay identity-only: found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn identity_types_have_deterministic_serialization_and_validation() {
+    let identity =
+        fs::read_to_string(workspace_root().join("spider/src/features/identity.rs")).unwrap();
+    for marker in [
+        "impl fmt::Display for EvidenceId",
+        "impl FromStr for EvidenceId",
+        "impl fmt::Display for WatchId",
+        "impl FromStr for WatchId",
+        "pub const PREFIX",
+        "IdentityParseError",
+    ] {
+        assert!(
+            identity.contains(marker),
+            "identity module missing expected canonical marker: {marker:?}"
+        );
+    }
+    // Distinct wire prefixes are the hard type boundary between the two
+    // identity kinds — an EvidenceId string must never be a valid WatchId
+    // string, and vice versa.
+    assert!(identity.contains("\"evid_\""));
+    assert!(identity.contains("\"watch_\""));
+}
+
+#[test]
+fn no_shadow_ids_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct EvidenceId",
+                "enum EvidenceId",
+                "struct WatchId",
+                "enum WatchId",
+                "type EvidenceId",
+                "type WatchId",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — EvidenceId/WatchId \
+                     are owned exclusively by spider::features::identity",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

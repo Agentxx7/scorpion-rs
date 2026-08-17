@@ -1637,6 +1637,36 @@ impl Drop for ProxyDnsAbortGuard {
     }
 }
 
+tokio::task_local! {
+    /// The resolved canonical transport executor for the crawl currently
+    /// executing, when `ExecutionMode::Canonical`/`CanonicalWreq` was
+    /// resolved. Scoped once around each canonical entry point's actual
+    /// fetch work — mirrors `spider_transport::ACQUISITION_TRANSPORT_SCOPE`'s
+    /// established pattern for threading execution-authority context
+    /// through the deep `Website` -> `Page` -> `utils::fetch_page_html*`
+    /// chrome call graph without adding a parameter to every layer in
+    /// between (that graph fans out across dozens of call sites; see
+    /// `SCORPION_CANONICAL_EXECUTION_RAW_HTTP_ESCAPE_CONVERGENCE_001`).
+    ///
+    /// `None` outside any scope, or when the enclosing crawl resolved a
+    /// genuinely noncanonical execution mode (remote fetcher / fetch
+    /// engine / decentralized) — those keep their existing
+    /// upstream-compatibility raw-client fallback unchanged.
+    pub(crate) static CANONICAL_EXECUTOR_SCOPE: Option<Arc<CanonicalExecutor>>;
+}
+
+/// The canonical executor of the enclosing [`CANONICAL_EXECUTOR_SCOPE`],
+/// or `None` outside any scope / under a noncanonical execution mode.
+/// `utils::fetch_page_html`'s chrome-error fallback consults this instead
+/// of unconditionally escaping through the raw compatibility client.
+#[cfg(feature = "chrome")]
+pub(crate) fn current_canonical_executor() -> Option<Arc<CanonicalExecutor>> {
+    CANONICAL_EXECUTOR_SCOPE
+        .try_with(|value| value.clone())
+        .ok()
+        .flatten()
+}
+
 impl Website {
     /// Resolve the crawl's execution authority before any target request.
     fn resolve_execution_mode(&mut self) -> ExecutionMode {
@@ -4188,7 +4218,16 @@ impl Website {
             Some(ExecutionMode::Canonical | ExecutionMode::CanonicalWreq)
         ) {
             // Compatibility placeholder for browser/noncanonical helper
-            // signatures. Canonical Page execution never consults it.
+            // signatures only. Canonical Page execution (plain HTTP) never
+            // consults it — see `Page::new_page_for_mode`'s
+            // executor-preferred branch. The one path that used to reach a
+            // raw, unvalidated `.get().send()` through this exact client —
+            // chrome's post-navigation-error HTTP fallback in
+            // `utils::fetch_page_html` — now consults
+            // `CANONICAL_EXECUTOR_SCOPE` first and routes through
+            // `fetch_page_html_with_executor` whenever this crawl resolved
+            // a canonical executor, so this client stays a placeholder in
+            // that path too.
             self.configure_http_client()
         } else {
             self.client
@@ -7548,21 +7587,28 @@ impl Website {
                         };
                         let crawl_timeout = self.configuration.crawl_timeout;
                         let url = self.url.inner().to_string();
-                        run_with_crawl_timeout(crawl_timeout, &url, async {
-                            if tor_active {
-                                // Force the audited raw HTTP path even
-                                // when Chrome/WebDriver features are
-                                // compiled — smart/browser escalation is
-                                // never audited for Tor pinning (see
-                                // `Self::with_transport`).
-                                self.crawl_concurrent_raw(&client, &handle).await;
-                                self.sitemap_crawl_chain_raw(&client, &handle, false).await;
-                            } else {
-                                self.crawl_concurrent(&client, &handle).await;
-                                self.sitemap_crawl_chain(&client, &handle, false).await;
-                            }
-                        })
-                        .await;
+                        // Canonical-executor context for the deep chrome
+                        // fetch call graph — see `CANONICAL_EXECUTOR_SCOPE`.
+                        let canonical_executor = self.resolved_executor.clone();
+                        CANONICAL_EXECUTOR_SCOPE
+                            .scope(
+                                canonical_executor,
+                                run_with_crawl_timeout(crawl_timeout, &url, async {
+                                    if tor_active {
+                                        // Force the audited raw HTTP path even
+                                        // when Chrome/WebDriver features are
+                                        // compiled — smart/browser escalation is
+                                        // never audited for Tor pinning (see
+                                        // `Self::with_transport`).
+                                        self.crawl_concurrent_raw(&client, &handle).await;
+                                        self.sitemap_crawl_chain_raw(&client, &handle, false).await;
+                                    } else {
+                                        self.crawl_concurrent(&client, &handle).await;
+                                        self.sitemap_crawl_chain(&client, &handle, false).await;
+                                    }
+                                }),
+                            )
+                            .await;
                         self.set_crawl_status();
                         if let Some(h) = join_handle {
                             h.abort()
@@ -7653,10 +7699,17 @@ impl Website {
                 };
                 let crawl_timeout = self.configuration.crawl_timeout;
                 let url = self.url.inner().to_string();
-                run_with_crawl_timeout(crawl_timeout, &url, async {
-                    self.sitemap_crawl_chrome(&client, &handle, false).await;
-                })
-                .await;
+                // Canonical-executor context for the deep chrome fetch
+                // call graph — see `CANONICAL_EXECUTOR_SCOPE`.
+                let canonical_executor = self.resolved_executor.clone();
+                CANONICAL_EXECUTOR_SCOPE
+                    .scope(
+                        canonical_executor,
+                        run_with_crawl_timeout(crawl_timeout, &url, async {
+                            self.sitemap_crawl_chrome(&client, &handle, false).await;
+                        }),
+                    )
+                    .await;
                 self.set_crawl_status();
                 if let Some(h) = join_handle {
                     h.abort()
@@ -7868,10 +7921,17 @@ impl Website {
                 };
                 let crawl_timeout = self.configuration.crawl_timeout;
                 let url = self.url.inner().to_string();
-                run_with_crawl_timeout(crawl_timeout, &url, async {
-                    self.crawl_concurrent_smart(&client, &handle).await;
-                })
-                .await;
+                // Canonical-executor context for the deep chrome fetch
+                // call graph — see `CANONICAL_EXECUTOR_SCOPE`.
+                let canonical_executor = self.resolved_executor.clone();
+                CANONICAL_EXECUTOR_SCOPE
+                    .scope(
+                        canonical_executor,
+                        run_with_crawl_timeout(crawl_timeout, &url, async {
+                            self.crawl_concurrent_smart(&client, &handle).await;
+                        }),
+                    )
+                    .await;
                 self.set_crawl_status();
                 if let Some(h) = join_handle {
                     h.abort()
@@ -16600,6 +16660,49 @@ async fn test_cache_shortcircuit_crawl_smart() {
 
 #[cfg(test)]
 mod tests {
+
+    /// `CANONICAL_EXECUTOR_SCOPE`/`current_canonical_executor()` round-trip
+    /// exactly like `spider_transport::ACQUISITION_TRANSPORT_SCOPE`: unset
+    /// outside any scope, and readable as `Some` for the duration of the
+    /// scoped future only. `utils::fetch_page_html`'s chrome-error
+    /// fallback depends on this to route through
+    /// `fetch_page_html_with_executor` instead of a raw client escape —
+    /// this test does not require a live Chrome/network to exercise the
+    /// scoping mechanism itself.
+    #[cfg(all(feature = "chrome", not(feature = "decentralized")))]
+    #[tokio::test]
+    async fn canonical_executor_scope_round_trips_through_task_local() {
+        assert!(
+            super::current_canonical_executor().is_none(),
+            "no executor should be visible outside any scope"
+        );
+
+        let mut website = super::Website::new("https://example.com");
+        assert!(
+            website.prepare_execution(),
+            "prepare_execution should resolve a canonical executor for a plain Website"
+        );
+        let executor = website.resolved_executor.clone();
+        assert!(
+            executor.is_some(),
+            "resolve_canonical_executor should have populated resolved_executor"
+        );
+
+        let seen_inside = super::CANONICAL_EXECUTOR_SCOPE
+            .scope(executor.clone(), async {
+                super::current_canonical_executor()
+            })
+            .await;
+        assert!(
+            seen_inside.is_some(),
+            "current_canonical_executor() should see the scoped value"
+        );
+
+        assert!(
+            super::current_canonical_executor().is_none(),
+            "the scope must not leak past its own future"
+        );
+    }
 
     /// Redirect SSRF guard must refuse loopback, link-local (cloud
     /// metadata), private, unique-local, reserved, IPv6 / IPv4-mapped,

@@ -2460,3 +2460,163 @@ fn legacy_chrome_cache_paths_never_embed_credentials_in_cache_identity() {
         "expected a fail-closed auth guard in each legacy chrome cache read/write path"
     );
 }
+
+// --- SECTION: SCORPION_CANONICAL_EXECUTION_RAW_HTTP_ESCAPE_CONVERGENCE_001 ---
+//
+// `utils::fetch_page_html`'s chrome-error recovery fallback (both the
+// `fs`+`chrome` and `not(fs)`+`chrome` builds) used to unconditionally
+// escape through a raw `client.get(url).send()` / `fetch_page_html_raw`
+// call on any chrome navigation error — bypassing `ResolvedExecutor`
+// entirely (no Tor/SSRF policy, no truthful BackendProvenance/
+// ResponseOrigin, and silently swallowing invalid proxy configuration via
+// `configure_http_client_builder`'s `if let Ok(proxy) = ...` skip) even
+// when `ExecutionMode::Canonical`/`CanonicalWreq` was active — despite a
+// comment in `Website::setup()` claiming "Canonical Page execution never
+// consults it". Both sites now check
+// `crate::website::current_canonical_executor()` first and route through
+// `fetch_page_html_with_executor` whenever a canonical executor is in
+// scope, keeping the raw-client recovery path for genuinely noncanonical
+// execution only. `CANONICAL_EXECUTOR_SCOPE` is established at every
+// chrome-touching top-level crawl entry point (`crawl`,
+// `crawl_sitemap_chrome`, `crawl_smart`).
+
+/// Slice `haystack` starting at the byte offset of `anchor`, up to (and
+/// including) the first occurrence of `needle` found after it. Panics
+/// with a descriptive message if either is missing — used to prove one
+/// specific, textually-identified fallback site is gated, without being
+/// confused by unrelated occurrences of the same short substrings
+/// elsewhere in a 12k-line file.
+fn assert_anchor_precedes(haystack: &str, anchor: &str, needle: &str, max_gap: usize) {
+    let anchor_pos = haystack
+        .find(anchor)
+        .unwrap_or_else(|| panic!("expected anchor present: {anchor:?}"));
+    let after_anchor = &haystack[anchor_pos..];
+    let needle_pos = after_anchor
+        .find(needle)
+        .unwrap_or_else(|| panic!("expected {needle:?} after anchor {anchor:?}"));
+    assert!(
+        needle_pos < max_gap,
+        "expected {needle:?} within {max_gap} bytes after anchor {anchor:?}, found at {needle_pos}"
+    );
+}
+
+#[test]
+fn chrome_error_recovery_fetch_checks_canonical_executor_before_raw_client() {
+    let utils = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+
+    // Both fallback sites must route through the canonical executor
+    // seam — exactly once each, in the fs+chrome and not(fs)+chrome
+    // builds of `fetch_page_html`.
+    let route_marker =
+        "Some(executor) => fetch_page_html_with_executor(target_url, &executor).await";
+    assert_eq!(
+        utils.matches(route_marker).count(),
+        2,
+        "expected the chrome-error recovery fetch to route through \
+         fetch_page_html_with_executor in both the fs+chrome and \
+         not(fs)+chrome builds of fetch_page_html"
+    );
+
+    // fs+chrome site (`fetch_page_html`): its own comment (unique text,
+    // distinct from the not(fs)+chrome site's) must be immediately
+    // followed by a canonical-executor check, itself immediately followed
+    // by the raw `client.get(...).send()` escape it guards.
+    let fs_chrome_anchor = "// Chrome-error recovery fetch. Canonical execution (a\n";
+    assert_anchor_precedes(
+        &utils,
+        fs_chrome_anchor,
+        "current_canonical_executor()",
+        800,
+    );
+    assert_anchor_precedes(
+        &utils,
+        fs_chrome_anchor,
+        "client.get(target_url).send().await",
+        1_500,
+    );
+
+    // not(fs)+chrome site (`fetch_page_html_base`): same shape, guarding
+    // `fetch_page_html_raw(target_url, client).await` instead. This is
+    // NOT the same raw-fallback text as the legitimate, always-unguarded
+    // not(fs)+not(chrome) build (chrome isn't even compiled there, so no
+    // executor could ever exist) — the anchor disambiguates which call
+    // site is under test.
+    let not_fs_chrome_anchor = "// Chrome-error recovery fetch. Canonical execution (a resolved\n";
+    assert_anchor_precedes(
+        &utils,
+        not_fs_chrome_anchor,
+        "current_canonical_executor()",
+        800,
+    );
+    assert_anchor_precedes(
+        &utils,
+        not_fs_chrome_anchor,
+        "fetch_page_html_raw(target_url, client).await",
+        1_000,
+    );
+}
+
+#[test]
+fn chrome_html_direct_api_has_no_internal_caller() {
+    // `_fetch_page_html_chrome` (and its public wrappers
+    // `fetch_page_html_chrome` / `fetch_page_html_chrome_seeded`) keep the
+    // legacy unconditional raw-client chrome-error fallback — acceptable
+    // ONLY because nothing in this workspace's `Website`/`Page` canonical
+    // crawl graph calls them. If that ever changes, the new caller
+    // reintroduces exactly the raw-HTTP-escape-from-canonical-execution
+    // bug this frontier closed for `fetch_page_html`/`fetch_page_html_base`.
+    let utils = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+    assert!(
+        utils.contains("UPSTREAM_COMPATIBILITY_BOUNDARY: this (and its public wrappers"),
+        "_fetch_page_html_chrome must stay explicitly classified as an \
+         upstream-compatibility, direct-API-only boundary"
+    );
+
+    for file in ["website.rs", "page.rs"] {
+        let source = fs::read_to_string(workspace_root().join("spider/src").join(file)).unwrap();
+        for callee in ["fetch_page_html_chrome(", "fetch_page_html_chrome_seeded("] {
+            assert!(
+                !source.contains(callee),
+                "{file} must not call {callee} — Website's canonical crawl entry points use \
+                 fetch_page_html/fetch_page_html_base instead, which route their chrome-error \
+                 recovery fetch through current_canonical_executor(); wiring this direct-API \
+                 function into Website would bypass that convergence"
+            );
+        }
+    }
+}
+
+#[test]
+fn canonical_executor_scope_established_at_every_chrome_crawl_entry_point() {
+    let website = fs::read_to_string(workspace_root().join("spider/src/website.rs")).unwrap();
+
+    assert!(
+        website.contains("tokio::task_local! {")
+            && website.contains("pub(crate) static CANONICAL_EXECUTOR_SCOPE:"),
+        "CANONICAL_EXECUTOR_SCOPE task-local must be declared in website.rs"
+    );
+    assert!(
+        website.contains("pub(crate) fn current_canonical_executor()"),
+        "current_canonical_executor() reader must be declared in website.rs"
+    );
+
+    // One `.scope(canonical_executor, ...)` establishment per chrome-touching
+    // top-level crawl entry point: `crawl`, `crawl_sitemap_chrome`,
+    // `crawl_smart`. A regression here silently reopens the raw-client
+    // escape for whichever entry point stops establishing the scope.
+    let establishments = website
+        .matches("let canonical_executor = self.resolved_executor.clone();")
+        .count();
+    assert!(
+        establishments >= 3,
+        "expected CANONICAL_EXECUTOR_SCOPE to be established at crawl, \
+         crawl_sitemap_chrome, and crawl_smart; found {establishments} site(s)"
+    );
+
+    // The historical false claim must not reappear verbatim.
+    assert!(
+        !website.contains("// signatures. Canonical Page execution never consults it."),
+        "the false 'Canonical Page execution never consults it' comment must not reappear \
+         now that the chrome-error fallback genuinely can reach this client"
+    );
+}

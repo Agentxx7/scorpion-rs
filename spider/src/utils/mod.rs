@@ -8348,131 +8348,147 @@ pub async fn fetch_page_html<'h>(
             .await
             {
                 Ok(page) => page,
-                _ => {
-                    log::info!(
-                        "- error fetching chrome page defaulting to raw http request {}",
-                        &target_url,
-                    );
+                // Chrome-error recovery fetch. Canonical execution (a
+                // resolved executor in `CANONICAL_EXECUTOR_SCOPE`) routes
+                // through the same transport seam a plain-HTTP canonical
+                // fetch would use, instead of the raw compatibility
+                // `client` — preserves truthful BackendProvenance/
+                // ResponseOrigin and canonical proxy/Tor/SSRF policy
+                // (including fail-closed invalid proxy handling) on this
+                // recovery path too. `None` means a genuinely noncanonical
+                // execution mode, which keeps the legacy raw-client
+                // recovery fallback below unchanged.
+                _ => match crate::website::current_canonical_executor() {
+                    Some(executor) => fetch_page_html_with_executor(target_url, &executor).await,
+                    None => {
+                        log::info!(
+                            "- error fetching chrome page defaulting to raw http request {}",
+                            &target_url,
+                        );
 
-                    match client.get(target_url).send().await {
-                        Ok(res) if valid_parsing_status(&res) => {
-                            let headers = res.headers().clone();
-                            let cookies = get_cookies(&res);
-                            let status_code = res.status();
-                            #[cfg(feature = "remote_addr")]
-                            let remote_addr = res.remote_addr();
-                            let mut stream = res.bytes_stream();
-                            let mut data = Vec::new();
+                        match client.get(target_url).send().await {
+                            Ok(res) if valid_parsing_status(&res) => {
+                                let headers = res.headers().clone();
+                                let cookies = get_cookies(&res);
+                                let status_code = res.status();
+                                #[cfg(feature = "remote_addr")]
+                                let remote_addr = res.remote_addr();
+                                let mut stream = res.bytes_stream();
+                                let mut data = Vec::new();
 
-                            let mut writer: Option<uring_fs::StreamingWriter> = None;
-                            let mut file_path = String::new();
+                                let mut writer: Option<uring_fs::StreamingWriter> = None;
+                                let mut file_path = String::new();
 
-                            while let Some(item) = stream.next().await {
-                                match item {
-                                    Ok(text) => {
-                                        let wrote_disk = writer.is_some();
+                                while let Some(item) = stream.next().await {
+                                    match item {
+                                        Ok(text) => {
+                                            let wrote_disk = writer.is_some();
 
-                                        // perform operations entire in memory to build resource
-                                        if !wrote_disk && data.capacity() < 8192 {
-                                            data.extend_from_slice(&text);
-                                        } else if !wrote_disk {
-                                            file_path = string_concat!(
-                                                TMP_DIR,
-                                                &utf8_percent_encode(target_url, NON_ALPHANUMERIC)
+                                            // perform operations entire in memory to build resource
+                                            if !wrote_disk && data.capacity() < 8192 {
+                                                data.extend_from_slice(&text);
+                                            } else if !wrote_disk {
+                                                file_path = string_concat!(
+                                                    TMP_DIR,
+                                                    &utf8_percent_encode(
+                                                        target_url,
+                                                        NON_ALPHANUMERIC
+                                                    )
                                                     .to_string()
-                                            );
-                                            match uring_fs::StreamingWriter::create(
-                                                file_path.clone(),
-                                            )
-                                            .await
-                                            {
-                                                Ok(w) => {
-                                                    data.extend_from_slice(&text);
+                                                );
+                                                match uring_fs::StreamingWriter::create(
+                                                    file_path.clone(),
+                                                )
+                                                .await
+                                                {
+                                                    Ok(w) => {
+                                                        data.extend_from_slice(&text);
 
-                                                    if w.write(data.as_ref()).await.is_ok() {
-                                                        data.clear();
+                                                        if w.write(data.as_ref()).await.is_ok() {
+                                                            data.clear();
+                                                        }
+                                                        writer = Some(w);
                                                     }
-                                                    writer = Some(w);
+                                                    _ => data.extend_from_slice(&text),
+                                                };
+                                            } else if let Some(w) = writer.as_ref() {
+                                                if w.write(&text).await.is_ok() {
+                                                    data.extend_from_slice(&text)
                                                 }
-                                                _ => data.extend_from_slice(&text),
-                                            };
-                                        } else if let Some(w) = writer.as_ref() {
-                                            if w.write(&text).await.is_ok() {
-                                                data.extend_from_slice(&text)
                                             }
                                         }
+                                        Err(e) => {
+                                            log::error!("{e} in {}", target_url);
+                                            break;
+                                        }
                                     }
-                                    Err(e) => {
-                                        log::error!("{e} in {}", target_url);
-                                        break;
-                                    }
+                                }
+
+                                if let Some(w) = writer.take() {
+                                    let _ = w.close().await;
+                                }
+
+                                PageResponse {
+                                    #[cfg(feature = "headers")]
+                                    headers: Some(headers),
+                                    #[cfg(feature = "remote_addr")]
+                                    remote_addr,
+                                    #[cfg(feature = "cookies")]
+                                    cookies,
+                                    content: Some(if !file_path.is_empty() {
+                                        let buffer = if let Ok(b) =
+                                            uring_fs::read_file(file_path.clone()).await
+                                        {
+                                            let _ = uring_fs::remove_file(file_path).await;
+                                            b
+                                        } else {
+                                            vec![]
+                                        };
+
+                                        buffer
+                                    } else {
+                                        data
+                                    }),
+                                    status_code,
+                                    ..Default::default()
                                 }
                             }
 
-                            if let Some(w) = writer.take() {
-                                let _ = w.close().await;
-                            }
-
-                            PageResponse {
+                            Ok(res) => PageResponse {
                                 #[cfg(feature = "headers")]
-                                headers: Some(headers),
+                                headers: Some(res.headers().clone()),
                                 #[cfg(feature = "remote_addr")]
-                                remote_addr,
+                                remote_addr: res.remote_addr(),
                                 #[cfg(feature = "cookies")]
-                                cookies,
-                                content: Some(if !file_path.is_empty() {
-                                    let buffer = if let Ok(b) =
-                                        uring_fs::read_file(file_path.clone()).await
-                                    {
-                                        let _ = uring_fs::remove_file(file_path).await;
-                                        b
-                                    } else {
-                                        vec![]
-                                    };
-
-                                    buffer
-                                } else {
-                                    data
-                                }),
-                                status_code,
+                                cookies: get_cookies(&res),
+                                status_code: res.status(),
                                 ..Default::default()
+                            },
+                            Err(err) => {
+                                log::info!("error fetching {}", target_url);
+                                let mut page_response = PageResponse::default();
+
+                                let initial_status = if let Some(status_code) = err.status() {
+                                    status_code
+                                } else {
+                                    crate::page::get_error_http_status_code(&err)
+                                };
+                                page_response.status_code =
+                                    crate::page::confirm_tunnel_failure_with_local_dns(
+                                        initial_status,
+                                        &err,
+                                        target_url,
+                                        std::time::Duration::from_millis(1_500),
+                                    )
+                                    .await;
+
+                                page_response.failure =
+                                    Some(crate::page::request_error_to_failure(err));
+                                page_response
                             }
-                        }
-
-                        Ok(res) => PageResponse {
-                            #[cfg(feature = "headers")]
-                            headers: Some(res.headers().clone()),
-                            #[cfg(feature = "remote_addr")]
-                            remote_addr: res.remote_addr(),
-                            #[cfg(feature = "cookies")]
-                            cookies: get_cookies(&res),
-                            status_code: res.status(),
-                            ..Default::default()
-                        },
-                        Err(err) => {
-                            log::info!("error fetching {}", target_url);
-                            let mut page_response = PageResponse::default();
-
-                            let initial_status = if let Some(status_code) = err.status() {
-                                status_code
-                            } else {
-                                crate::page::get_error_http_status_code(&err)
-                            };
-                            page_response.status_code =
-                                crate::page::confirm_tunnel_failure_with_local_dns(
-                                    initial_status,
-                                    &err,
-                                    target_url,
-                                    std::time::Duration::from_millis(1_500),
-                                )
-                                .await;
-
-                            page_response.failure =
-                                Some(crate::page::request_error_to_failure(err));
-                            page_response
                         }
                     }
-                }
+                },
             }
         }
     };
@@ -9001,8 +9017,22 @@ pub async fn fetch_page_html_base<'h>(
     {
         Ok(page) => page,
         Err(err) => {
-            log::error!("{:?}", err);
-            fetch_page_html_raw(target_url, client).await
+            // Chrome-error recovery fetch. Canonical execution (a resolved
+            // executor in `CANONICAL_EXECUTOR_SCOPE`) routes through the
+            // same transport seam a plain-HTTP canonical fetch would use,
+            // instead of the raw compatibility `client` — preserves
+            // truthful BackendProvenance/ResponseOrigin and canonical
+            // proxy/Tor/SSRF policy (including fail-closed invalid proxy
+            // handling) on this recovery path too. `None` means a
+            // genuinely noncanonical execution mode, which keeps the
+            // legacy raw-client recovery fallback unchanged.
+            match crate::website::current_canonical_executor() {
+                Some(executor) => fetch_page_html_with_executor(target_url, &executor).await,
+                None => {
+                    log::error!("{:?}", err);
+                    fetch_page_html_raw(target_url, client).await
+                }
+            }
         }
     }
 }
@@ -9075,6 +9105,20 @@ pub async fn fetch_page_html_seeded<'h>(
 
 #[cfg(feature = "chrome")]
 /// Perform a network request to a resource extracting all content as text streaming via chrome.
+///
+/// UPSTREAM_COMPATIBILITY_BOUNDARY: this (and its public wrappers
+/// [`fetch_page_html_chrome`] / [`fetch_page_html_chrome_seeded`]) is a
+/// direct-API convenience for callers who supply their own `client` and
+/// bypass `Website` entirely — it has no internal caller anywhere in this
+/// workspace (`Website`'s canonical crawl entry points call
+/// `fetch_page_html`/`fetch_page_html_base` instead, both of which route
+/// their own chrome-error recovery fetch through
+/// `current_canonical_executor()`). Its inline raw `client.get(...)`
+/// recovery fallback below is therefore never reachable from
+/// `ExecutionMode::Canonical`/`CanonicalWreq` — see
+/// `chrome_html_direct_api_has_no_internal_caller` in
+/// `architecture_guardrails.rs`, which fails if that ever changes without
+/// this function also being converged.
 async fn _fetch_page_html_chrome<'h>(
     target_url: &str,
     client: &Client,

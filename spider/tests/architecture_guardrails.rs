@@ -3791,3 +3791,235 @@ fn no_shadow_transform_lineage_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_WATCH_MODEL_001 ---
+//
+// Track 7 of the frozen roadmap: the canonical Watch model
+// (`WatchDefinition`/`WatchState`, in `features/watch.rs`), reusing the
+// existing `WatchId` (identity.rs) and the existing `DiscoveryTarget`
+// (discovery_target.rs) rather than inventing `WatchTarget`/`WatchSpec`.
+// `WatchState` is built on Track 2's unmodified `CurrentState`/
+// `Transition` contract and persisted through Track 3's
+// `DomainPersistence` (compare-and-swap current state, append-only
+// history) — no scheduler, no `ChangeResult`/`ChangeEvent`, no health,
+// no notifications, no generic `Job` model.
+
+#[test]
+fn watch_definition_and_watch_state_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "struct WatchDefinition",
+            "WatchDefinition must only be defined in the canonical watch module",
+        ),
+        (
+            "enum WatchState",
+            "WatchState must only be defined in the canonical watch module",
+        ),
+        (
+            "enum WatchTransitionRejected",
+            "WatchTransitionRejected must only be defined in the canonical watch module",
+        ),
+        (
+            "enum WatchError",
+            "WatchError must only be defined in the canonical watch module",
+        ),
+        (
+            "struct ObserveEvidence",
+            "ObserveEvidence must only be defined in the canonical watch module",
+        ),
+        (
+            "struct StopWatch",
+            "StopWatch must only be defined in the canonical watch module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/watch.rs"], description);
+    }
+}
+
+#[test]
+fn watch_id_is_reused_not_duplicated() {
+    // WatchId must remain defined exactly once, in identity.rs — this
+    // frontier reuses it, it does not redefine or shadow it.
+    assert_pattern_only_in_files(
+        "struct WatchId",
+        &["features/identity.rs"],
+        "WatchId must only be defined in the canonical identity module — Track 7 reuses it, \
+         it does not redefine it",
+    );
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    assert!(
+        watch.contains("use crate::features::identity::WatchId"),
+        "watch.rs must import the existing WatchId rather than defining its own"
+    );
+}
+
+#[test]
+fn watch_definition_and_watch_state_remain_separate() {
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    // WatchDefinition owns the target; WatchState owns lifecycle only —
+    // it must never carry a target/DiscoveryTarget field of its own,
+    // which would blur the definition/state separation this frontier
+    // requires.
+    assert!(watch.contains("pub struct WatchDefinition {\n    /// The pointer this watch observes.\n    pub target: DiscoveryTarget,\n}"));
+    let state_block_start = watch
+        .find("pub enum WatchState {")
+        .expect("WatchState must be defined");
+    let state_block_end = watch[state_block_start..]
+        .find("\nimpl WatchState")
+        .map(|offset| state_block_start + offset)
+        .expect("expected an impl WatchState block after the enum");
+    let state_block = &watch[state_block_start..state_block_end];
+    assert!(
+        !state_block.contains("DiscoveryTarget") && !state_block.contains("target:"),
+        "WatchState must not carry a target/DiscoveryTarget field — that belongs to \
+         WatchDefinition alone"
+    );
+}
+
+#[test]
+fn watch_reuses_discovery_target_not_a_new_watch_target_type() {
+    for forbidden in [
+        "struct WatchTarget",
+        "enum WatchTarget",
+        "struct WatchSpec",
+        "enum WatchSpec",
+    ] {
+        assert_pattern_only_in_files(
+            forbidden,
+            &[],
+            "Track 7 must reuse the existing DiscoveryTarget — no WatchTarget/WatchSpec may \
+             be introduced anywhere in spider/src",
+        );
+    }
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    assert!(watch.contains("use crate::features::discovery_target::DiscoveryTarget"));
+}
+
+#[test]
+fn watch_state_uses_domain_state_transition_contract() {
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    assert!(
+        watch.contains("use crate::features::domain_state::{Applied, CurrentState, Transition};")
+    );
+    // Exactly the two transitions the lifecycle vocabulary justifies —
+    // no bare "Paused"/"Resumed" state, no invented transitions.
+    assert_eq!(
+        watch.matches("impl Transition<WatchState> for").count(),
+        2,
+        "expected exactly 2 Transition<WatchState> impls: ObserveEvidence, StopWatch"
+    );
+    assert!(watch.contains("impl Transition<WatchState> for ObserveEvidence"));
+    assert!(watch.contains("impl Transition<WatchState> for StopWatch"));
+}
+
+#[test]
+fn watch_persists_via_both_domain_persistence_primitives_with_cas() {
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    assert!(watch.contains(
+        "use crate::features::domain_persistence::{DomainPersistence, PersistenceError};"
+    ));
+    assert!(watch.contains(".write_current("));
+    assert!(watch.contains(".append_history("));
+    // The current-state write is compare-and-swap, not a blind
+    // overwrite: it passes the just-read revision as the expected
+    // revision, and a conflict surfaces as a genuine error rather than
+    // being silently dropped.
+    assert!(watch.contains(".write_current(&id.to_string(), Some(revision), &new_payload)"));
+    assert!(watch.contains(
+        "PersistenceError::CurrentStateConflict { .. } => WatchError::ConcurrentModification"
+    ));
+    for forbidden in [
+        "set_current(",
+        "overwrite_current(",
+        "sqlx::query",
+        "struct DomainPersistence",
+    ] {
+        assert!(
+            !watch.contains(forbidden),
+            "watch.rs must not construct its own persistence mechanism: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn watch_evidence_ref_is_reused_by_reference_not_duplicated() {
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    assert!(watch.contains("use crate::utils::evidence::EvidenceRef"));
+    // Stored as a plain Option<EvidenceRef> pointer — never a field
+    // holding evidence content or a redefinition of the evidence types
+    // themselves.
+    assert!(watch.contains("last_evidence: Option<EvidenceRef>"));
+    for forbidden in [
+        "struct EvidenceBundle",
+        "struct EvidenceRef",
+        "struct EvidenceId",
+    ] {
+        assert!(
+            !watch.contains(forbidden),
+            "watch.rs must reuse EvidenceRef by reference, never redefine the evidence \
+             types: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn watch_never_implements_out_of_scope_capabilities() {
+    let watch = fs::read_to_string(workspace_root().join("spider/src/features/watch.rs")).unwrap();
+    for forbidden in [
+        "struct WatchTarget",
+        "struct WatchSpec",
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "fn schedule",
+        "struct Scheduler",
+        "EventSourc",
+        "struct Job",
+        "enum Job",
+        "struct Health",
+        "enum Health",
+        "struct Notification",
+        "enum Notification",
+        "struct AuthSessionId",
+        "struct EvidenceBundle",
+        "cron_str",
+    ] {
+        assert!(
+            !watch.contains(forbidden),
+            "watch.rs must stay scoped to WatchDefinition/WatchState/identity/persistence: \
+             found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_watch_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct WatchDefinition",
+                "enum WatchState",
+                "struct WatchTarget",
+                "struct WatchSpec",
+                "enum WatchTransitionRejected",
+                "struct ObserveEvidence",
+                "struct StopWatch",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     Watch model is owned exclusively by spider::features::watch",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

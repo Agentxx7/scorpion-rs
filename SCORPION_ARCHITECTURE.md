@@ -131,7 +131,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **BLOCKED** | `WatchId` identity (`features/identity.rs`), the generic state/transition semantics (`features/domain_state.rs`), and the generic persistence seam (`features/domain_persistence.rs`) now exist; `WatchDefinition` and a concrete `WatchState`/`Transition<WatchState>` product model still do not exist and must not be implemented until a frontier establishes canonical ownership (SCORPION_SDD.md §5.2). |
+| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` now exist and are canonically owned (§3.14) — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted. Still blocked, pending their own future frontiers: a scheduler deciding *when* a watch is checked, change detection (`ChangeResult`/`ChangeEvent`), health, and a notification system. |
 
 ### 3.9 Identity
 
@@ -294,6 +294,51 @@ evidence — never a duplicate of the evidence payload. Implements no
 `WatchDefinition`/`WatchState`, no scheduling, no
 `ChangeResult`/`ChangeEvent`, no health, and does not redesign
 `EvidenceBundle` or transport.
+
+### 3.14 Watch Model
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Watch identity | `spider/src/features/identity.rs` | `std`, `ahash` (entropy mixing only) | Network, transport, persistence, target/lifecycle types | `WatchId` | None |
+| Watch model | `spider/src/features/watch.rs` | `features/identity.rs` (`WatchId`), `features/discovery_target.rs` (`DiscoveryTarget`), `features/domain_state.rs` (`Transition`/`CurrentState`), `features/domain_persistence.rs` (`disk`+`serde`), `utils/evidence.rs` (`EvidenceRef`) | A scheduler, change detection (`ChangeResult`/`ChangeEvent`), health, notifications, a generic `Job` model, a new `WatchTarget`/`WatchSpec`, a second persistence or evidence mechanism | `WatchDefinition`, `WatchState`, `ObserveEvidence`/`StopWatch`, `define_watch()`, `apply_watch_transition()` | None |
+
+**Clarification on `watch.rs`:** Realizes exactly the locked chain
+`SCORPION_SDD.md` §5.2 named — `WatchId → WatchDefinition → WatchState →
+Snapshot → Transition → ...` — and no further. `WatchDefinition` wraps
+the existing `DiscoveryTarget` (`{ url, kind, discovered_via }`) rather
+than inventing `WatchTarget`/`WatchSpec`: `DiscoveryTarget`'s own module
+doc already distinguishes it from `SourceItem` ("a pointer... never a
+content candidate"), which is exactly what a watch target is, and
+`DiscoveryTargetKind::Requested` already names what a caller defining a
+new watch supplies. `WatchDefinition` owns no execution history and no
+mutable lifecycle state — `define_watch()` is the only way to create one,
+persisted once through `DomainPersistence::append_history` at a
+namespaced key (`"<id>#definition"`), immutable thereafter.
+`WatchState` is the canonical current lifecycle state, built entirely on
+Track 2's unmodified `CurrentState`/`Transition` contract: exactly two
+states, `Active`/`Stopped` (terminal) — the minimum any watch can have at
+all once scheduling, change detection, health, and notifications are
+correctly out of scope, source-justified rather than invented for
+symmetry with `AuthSessionState`'s three. `ObserveEvidence` realizes the
+locked chain's "Snapshot" step exactly as `domain_state.rs`'s own doc
+comment prescribed: a watch-specific input type (an `EvidenceRef`) to its
+own `Transition<WatchState>` impl, updating the single current-evidence
+pointer (not execution history — every superseded `WatchState` is
+preserved separately via `HistoryLog`/`DomainPersistence`'s append-only
+records). `StopWatch` is terminal, mirroring the precedent
+`AuthSessionState::Invalidated` already set: a caller who wants to watch
+again defines a new `WatchId`. `apply_watch_transition()` mirrors
+`apply_session_transition()` exactly — compare-and-swap
+(`DomainPersistence::write_current`, rejecting a concurrent writer rather
+than silently losing it) for the new current state, plus an immutable
+append (`DomainPersistence::append_history`) of the just-superseded
+state; no blind overwrite exists anywhere in this path. `EvidenceRef` is
+held by reference only (`Option<EvidenceRef>`, `Copy`, 16 bytes) — never
+duplicating `EvidenceBundle`'s payload, realizing the "later Watch...
+frontiers" use `EvidenceRef`'s own module doc anticipated. No scheduler,
+no `ChangeResult`/`ChangeEvent`, no health, no notification system, and
+no generic `Job` model are implemented here — those remain later,
+separate frontiers.
 
 ---
 
@@ -496,7 +541,11 @@ only re-exported from `configuration.rs`; `TransformLineageId`,
 `TransformationIdentity`, `TransformLineageRecord`, and
 `TransformLineageError` are only defined in
 `spider/src/features/transform_lineage.rs` (see §3.13) — no interface may
-define its own content/transform lineage model.
+define its own content/transform lineage model. `WatchDefinition`,
+`WatchState`, `WatchTransitionRejected`, `WatchError`, `ObserveEvidence`,
+and `StopWatch` are only defined in `spider/src/features/watch.rs` (see
+§3.14) — no interface may define its own Watch model, and no
+`WatchTarget`/`WatchSpec` may be introduced anywhere.
 
 ### 7.7 THIN INTERFACES
 
@@ -677,5 +726,21 @@ The following are intentionally not refactored in this frontier:
   raw SQL); `EvidenceRef` is stored by reference, never duplicated; and
   none of `transform_lineage.rs`'s types are shadowed by
   `spider_cli`/`spider_mcp`
+- `WatchDefinition`/`WatchState`/`WatchTransitionRejected`/`WatchError`/
+  `ObserveEvidence`/`StopWatch` are each defined in exactly one canonical
+  module (`features/watch.rs`); `WatchId` is reused (imported), never
+  redefined, and remains defined in exactly one module
+  (`features/identity.rs`); `WatchState` carries no `DiscoveryTarget`/
+  target field of its own (definition/state separation); exactly 2
+  `Transition<WatchState>` impls exist (`ObserveEvidence`, `StopWatch`);
+  persistence uses both `DomainPersistence::write_current`
+  (compare-and-swap against the just-read revision, surfacing a conflict
+  as `WatchError::ConcurrentModification` rather than silently dropping
+  it) and `::append_history` (never a second persistence mechanism, never
+  raw SQL); `EvidenceRef` is held by reference only
+  (`Option<EvidenceRef>`), never duplicated; no `WatchTarget`/`WatchSpec`
+  exists anywhere in `spider/src`; no scheduler/`ChangeResult`/
+  `ChangeEvent`/health/notification/generic-`Job` capability is
+  implemented; and none of it is shadowed by `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

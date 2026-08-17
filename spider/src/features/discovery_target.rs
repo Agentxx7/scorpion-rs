@@ -65,8 +65,12 @@
 
 use crate::features::transport::is_onion_url;
 
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
+
 /// What produced a [`DiscoveryTarget`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum DiscoveryTargetKind {
     /// A caller/request-supplied URL, declared directly — no containing
     /// document. Not restricted to `.onion` (unlike
@@ -127,6 +131,7 @@ impl std::error::Error for DiscoveryTargetError {}
 /// A single, not-yet-fetched acquisition target — planning only. Never
 /// evidence, never an acquisition attempt, never a content candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct DiscoveryTarget {
     /// The canonical URL to acquire later.
     pub url: String,

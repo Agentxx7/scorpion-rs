@@ -207,6 +207,18 @@ pub mod transform_lineage;
 /// fail-closed `.onion` protection and transport-pinned redirects.
 pub mod transport;
 
+/// The canonical Watch model: `WatchDefinition` (wraps the existing
+/// `DiscoveryTarget` — no new `WatchTarget`/`WatchSpec`) and `WatchState`
+/// (`Active`/`Stopped`, built on `domain_state::CurrentState`/
+/// `Transition`), using the existing `WatchId`. Persists through
+/// `DomainPersistence`: the definition immutably (`append_history`), the
+/// current lifecycle state via compare-and-swap (`write_current`) plus
+/// an immutable historical record of each superseded state
+/// (`append_history`). Requires `evidence` (for `EvidenceRef`) and `disk`
+/// (for `DomainPersistence`). See `SCORPION_SDD.md` §5.2.
+#[cfg(all(feature = "evidence", feature = "disk"))]
+pub mod watch;
+
 #[cfg(all(not(feature = "simd"), feature = "openai"))]
 pub(crate) use serde_json;
 #[cfg(all(feature = "simd", feature = "openai"))]

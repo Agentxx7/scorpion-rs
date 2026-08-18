@@ -261,6 +261,78 @@ fn response_origin_label(origin: spider_transport::ResponseOrigin) -> &'static s
 }
 
 // ---------------------------------------------------------------------------
+// Canonical content classification (SCORPION_CANONICAL_PUBLIC_SURFACE_
+// OWNERSHIP_CONVERGENCE_001). Was previously reimplemented independently
+// inside spider_mcp's scrape tool (`route_auto_http`/`declared_mime`) —
+// provider/interface-neutral "what kind of content is this" classification
+// is exactly what `build_evidence` above already partially derives
+// (`detected_content_type` via `infer::get`); these two primitives make
+// that reconciliation canonical too, so no interface need reimplement it.
+// Deliberately scoped to only the two genuinely provider/interface-neutral,
+// self-contained pieces: normalizing a declared header, and categorizing a
+// byte-signature match. The remaining decision — what to do when *no*
+// byte-signature was found at all (declared-header fallback branching, the
+// safely-textual-bytes heuristic, which output format/error message to
+// produce) — stays caller/interface-owned: it is tool-contract policy
+// (e.g. MCP's own `return_format="auto"` semantics), not a universal fact
+// about the bytes, and a different interface could reasonably choose
+// differently.
+// ---------------------------------------------------------------------------
+
+/// Normalize a declared `Content-Type` header value down to its base MIME
+/// type: strips parameters (e.g. `; charset=utf-8`), trims whitespace,
+/// lowercases. `None` for an absent or empty header. Never rewrites or
+/// second-guesses the header's own value — purely mechanical extraction of
+/// the base type token.
+pub fn declared_mime(content_type: Option<&str>) -> Option<String> {
+    content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+/// Coarse category for a positive byte-signature match (via `infer`).
+/// `None` from [`classify_detected_content`] means no signature was found
+/// at all — not a claim that the content is one of these categories by
+/// elimination; the caller decides its own fallback policy for that case
+/// (e.g. consulting the declared header, or [`declared_mime`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedContentClass {
+    /// Byte-signature identifies HTML.
+    Html,
+    /// Byte-signature identifies XML.
+    Xml,
+    /// Byte-signature identifies PDF.
+    Pdf,
+    /// Byte-signature identifies image content.
+    Image,
+    /// Byte-signature identifies audio or video content.
+    AudioVideo,
+    /// A byte-signature was found but names a binary format with no more
+    /// specific category above.
+    UnclassifiedBinary,
+}
+
+/// Classify `bytes` by byte-signature alone (via `infer::get`) —
+/// independent of any declared header, and independent of any interface's
+/// chosen output representation. Pure classification only: never decodes,
+/// transforms, or extracts the bytes, and never dictates an output format
+/// or error message.
+pub fn classify_detected_content(bytes: &[u8]) -> Option<DetectedContentClass> {
+    infer::get(bytes).map(|kind| match kind.mime_type() {
+        "text/html" => DetectedContentClass::Html,
+        "text/xml" | "application/xml" => DetectedContentClass::Xml,
+        "application/pdf" => DetectedContentClass::Pdf,
+        mime if mime.starts_with("image/") => DetectedContentClass::Image,
+        mime if mime.starts_with("video/") || mime.starts_with("audio/") => {
+            DetectedContentClass::AudioVideo
+        }
+        _ => DetectedContentClass::UnclassifiedBinary,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Durable evidence ledger (Track 4:
 // SCORPION_DURABLE_EVIDENCE_LEDGER_001). Extends this module's existing
 // EvidenceBundle/build_evidence/sha256_hex ownership rather than starting a
@@ -688,6 +760,72 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    mod content_classification {
+        use super::*;
+
+        #[test]
+        fn detected_html_classifies_as_html() {
+            assert_eq!(
+                classify_detected_content(b"<!DOCTYPE html><html><body>Hello</body></html>"),
+                Some(DetectedContentClass::Html)
+            );
+        }
+
+        #[test]
+        fn detected_xml_classifies_as_xml() {
+            let xml = b"<?xml version=\"1.0\"?><root><item>value</item></root>";
+            assert_eq!(
+                classify_detected_content(xml),
+                Some(DetectedContentClass::Xml)
+            );
+        }
+
+        #[test]
+        fn detected_pdf_classifies_as_pdf() {
+            assert_eq!(
+                classify_detected_content(b"%PDF-1.7\nbody"),
+                Some(DetectedContentClass::Pdf)
+            );
+        }
+
+        #[test]
+        fn detected_image_and_audio_video_classify_distinctly() {
+            assert_eq!(
+                classify_detected_content(b"\x89PNG\r\n\x1a\nbytes"),
+                Some(DetectedContentClass::Image)
+            );
+            assert_eq!(
+                classify_detected_content(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"),
+                Some(DetectedContentClass::AudioVideo)
+            );
+        }
+
+        #[test]
+        fn detected_but_unmapped_signature_is_unclassified_binary() {
+            // A known signature (zip) with no dedicated category falls
+            // through the detected-binary catch-all.
+            assert_eq!(
+                classify_detected_content(b"PK\x03\x04\x14\x00\x00\x00\x00\x00known-archive"),
+                Some(DetectedContentClass::UnclassifiedBinary)
+            );
+        }
+
+        #[test]
+        fn no_signature_is_none_never_a_guessed_category() {
+            assert_eq!(classify_detected_content(b"mystery bytes"), None);
+        }
+
+        #[test]
+        fn declared_mime_strips_parameters_trims_and_lowercases() {
+            assert_eq!(
+                declared_mime(Some(" Application/JSON; charset=utf-8 ")),
+                Some("application/json".to_string())
+            );
+            assert_eq!(declared_mime(Some("")), None);
+            assert_eq!(declared_mime(None), None);
+        }
     }
 
     #[cfg(feature = "disk")]

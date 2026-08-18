@@ -54,14 +54,6 @@ enum AutoRoute {
     Pdf,
 }
 
-fn declared_mime(content_type: Option<&str>) -> Option<String> {
-    content_type
-        .and_then(|value| value.split(';').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
 fn auto_error(
     content_type: Option<&str>,
     detected_content_type: Option<&str>,
@@ -79,28 +71,37 @@ fn auto_error(
 /// Decide how `return_format="auto"` handles the original HTTP bytes.
 /// Byte-signature MIME is authoritative when available; the declared header
 /// remains an independent fallback signal and is never rewritten.
+///
+/// Byte-signature classification and declared-header normalization reuse
+/// the canonical, interface-neutral primitives in
+/// `spider::utils::evidence` (`classify_detected_content`/`declared_mime`)
+/// — this tool owns only the auto-mode *policy* on top of them (which
+/// output format/error message a given classification produces), not the
+/// classification itself.
 fn route_auto_http(bytes: &[u8], content_type: Option<&str>) -> Result<AutoRoute, String> {
+    use spider::utils::evidence::{classify_detected_content, declared_mime, DetectedContentClass};
+
     let detected = infer::get(bytes).map(|kind| kind.mime_type());
     let declared = declared_mime(content_type);
 
-    if let Some(mime) = detected {
-        return match mime {
-            "text/html" => Ok(AutoRoute::Markdown),
-            "text/xml" | "application/xml" => std::str::from_utf8(bytes)
+    if let Some(class) = classify_detected_content(bytes) {
+        return match class {
+            DetectedContentClass::Html => Ok(AutoRoute::Markdown),
+            DetectedContentClass::Xml => std::str::from_utf8(bytes)
                 .map(|text| AutoRoute::Xml(text.to_owned()))
                 .map_err(|_| auto_error(content_type, detected, "detected XML is not valid UTF-8")),
-            "application/pdf" => Ok(AutoRoute::Pdf),
-            mime if mime.starts_with("image/") => Err(auto_error(
+            DetectedContentClass::Pdf => Ok(AutoRoute::Pdf),
+            DetectedContentClass::Image => Err(auto_error(
                 content_type,
                 detected,
                 "image text extraction is not available",
             )),
-            mime if mime.starts_with("video/") || mime.starts_with("audio/") => Err(auto_error(
+            DetectedContentClass::AudioVideo => Err(auto_error(
                 content_type,
                 detected,
                 "audio/video text extraction is not available",
             )),
-            _ => Err(auto_error(
+            DetectedContentClass::UnclassifiedBinary => Err(auto_error(
                 content_type,
                 detected,
                 "the detected binary format has no auto extractor",

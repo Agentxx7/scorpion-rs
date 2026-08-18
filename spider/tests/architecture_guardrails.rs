@@ -4971,3 +4971,89 @@ fn no_shadow_captcha_dispatch_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_PUBLIC_SURFACE_OWNERSHIP_CONVERGENCE_001 ---
+//
+// Audit of CLI/MCP-owned production logic against canonical core, with
+// particular attention to the MCP scrape path's content classification.
+// Finding: `spider_mcp/src/tools/scrape.rs`'s `route_auto_http` reimplemented
+// byte-signature/declared-header MIME classification independently of
+// `utils/evidence.rs`'s existing `detected_content_type` derivation —
+// category C (canonical core logic incorrectly owned by the interface).
+// Moved: declared-header normalization (`declared_mime`) and byte-signature
+// classification (`classify_detected_content`/`DetectedContentClass`) into
+// `spider::utils::evidence`, the same seam that already owns
+// `detected_content_type`/`build_evidence`. PDF text extraction and the
+// undetermined-bytes safely-textual heuristic remain MCP-owned (category
+// B — content *transformation*, the same category the existing "spider has
+// no dependency on spider_transformations" doctrine already places in the
+// interface layer) — not moved, not duplicated elsewhere.
+
+#[test]
+fn content_classification_primitives_are_defined_exactly_once_in_canonical_core() {
+    for (pattern, description) in [
+        (
+            "pub fn declared_mime(",
+            "declared_mime must only be defined in the canonical utils::evidence module",
+        ),
+        (
+            "pub fn classify_detected_content(",
+            "classify_detected_content must only be defined in the canonical utils::evidence module",
+        ),
+        (
+            "enum DetectedContentClass",
+            "DetectedContentClass must only be defined in the canonical utils::evidence module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["utils/evidence.rs"], description);
+    }
+}
+
+#[test]
+fn mcp_scrape_no_longer_reimplements_mime_classification() {
+    let scrape =
+        fs::read_to_string(workspace_root().join("spider_mcp/src/tools/scrape.rs")).unwrap();
+    // The classification call sites are present...
+    assert!(scrape.contains("classify_detected_content(bytes)"));
+    assert!(scrape.contains("declared_mime(content_type)"));
+    assert!(scrape.contains("use spider::utils::evidence::{classify_detected_content, declared_mime, DetectedContentClass};"));
+    // ...and the function bodies that used to live here do not.
+    for forbidden in [
+        "fn declared_mime(",
+        "fn classify_detected_content(",
+        "enum DetectedContentClass",
+    ] {
+        assert!(
+            !scrape.contains(forbidden),
+            "spider_mcp/src/tools/scrape.rs must not redefine {forbidden:?} — it must call \
+             the canonical spider::utils::evidence primitive instead"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_content_classification_anywhere_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "fn declared_mime(",
+                "fn classify_detected_content(",
+                "enum DetectedContentClass",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — canonical content \
+                     classification is owned exclusively by spider::utils::evidence",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

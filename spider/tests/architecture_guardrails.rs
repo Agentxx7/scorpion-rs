@@ -4023,3 +4023,250 @@ fn no_shadow_watch_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_SCHEDULING_AND_WATCH_EXECUTION_001 ---
+//
+// Track 8 of the frozen roadmap: canonical scheduling semantics for
+// WatchDefinition (`WatchSchedule`, in `features/watch_schedule.rs`) and
+// the execution path for one scheduled watch run
+// (`execute_scheduled_watch_run`). Cadence syntax reuses the existing
+// `async_job::Schedule` primitive `Website`'s own cron feature already
+// depends on — never `website::CronType` (a what-to-run selector, not
+// cadence syntax) and never `async_job::Job`/`async_job::Runner` (a
+// separate, `Website`-owned scheduler daemon abstraction). Execution
+// reuses `acquisition_binding` for acquisition and `utils::evidence` for
+// the durable `EvidenceRef`; `WatchState` remains owned exclusively by
+// Track 7 — this module only ever calls into
+// `features::watch::apply_watch_transition`, never redefining or
+// mutating `WatchState` itself.
+
+#[test]
+fn watch_schedule_and_execution_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "struct WatchSchedule",
+            "WatchSchedule must only be defined in the canonical watch_schedule module",
+        ),
+        (
+            "enum WatchScheduleError",
+            "WatchScheduleError must only be defined in the canonical watch_schedule module",
+        ),
+        (
+            "enum WatchExecutionError",
+            "WatchExecutionError must only be defined in the canonical watch_schedule module",
+        ),
+        (
+            "enum ScheduledRunRecord",
+            "ScheduledRunRecord must only be defined in the canonical watch_schedule module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/watch_schedule.rs"], description);
+    }
+}
+
+#[test]
+fn watch_schedule_module_gated_behind_evidence_disk_and_cron() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod watch_schedule;")
+        .expect("watch_schedule module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    let gate_line = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .expect("expected a line before the module declaration");
+    assert_eq!(
+        gate_line.trim(),
+        "#[cfg(all(feature = \"evidence\", feature = \"disk\", feature = \"cron\"))]",
+        "watch_schedule must be gated behind evidence+disk (like watch) plus cron (for the \
+         cadence primitive) — it must not introduce a second cadence-parsing stack"
+    );
+}
+
+#[test]
+fn watch_schedule_reuses_async_job_schedule_not_website_crontype() {
+    let watch_schedule =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_schedule.rs")).unwrap();
+    assert!(watch_schedule.contains("cron_str.parse::<async_job::Schedule>()"));
+    // Never the Website-owned scheduler daemon abstraction (Job/Runner),
+    // and never website::CronType (what-to-run, not cadence syntax).
+    // Checked as actual code forms, not prose — this module's own doc
+    // comment legitimately *names* both in English to explain why
+    // neither is reused.
+    for forbidden in [
+        "impl Job for",
+        "async_job::Runner::new",
+        "Runner::new(",
+        "async_job::async_trait",
+        "use crate::website::CronType",
+        "CronType::Crawl",
+        "CronType::Scrape",
+        ": CronType",
+    ] {
+        assert!(
+            !watch_schedule.contains(forbidden),
+            "watch_schedule.rs must adapt async_job::Schedule's parser only — never adopt \
+             the async_job::Job/Runner scheduler daemon, and never reuse website::CronType \
+             (a what-to-run selector, not cadence syntax): found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn watch_execution_reuses_watch_definition_and_never_redefines_watch_state() {
+    let watch_schedule =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_schedule.rs")).unwrap();
+    assert!(
+        watch_schedule.contains("use crate::features::watch::{self, ObserveEvidence, WatchError};")
+    );
+    assert!(watch_schedule.contains("watch::read_watch_definition("));
+    assert!(watch_schedule.contains("watch::apply_watch_transition("));
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+    ] {
+        assert!(
+            !watch_schedule.contains(forbidden),
+            "watch_schedule.rs must reuse WatchDefinition/WatchState by reference, never \
+             redefine them — WatchState remains owned exclusively by Track 7: found \
+             {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn watch_execution_reuses_canonical_acquisition_binding() {
+    let watch_schedule =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_schedule.rs")).unwrap();
+    assert!(watch_schedule
+        .contains("use crate::features::acquisition_binding::{self, AcquisitionBindingError};"));
+    assert!(watch_schedule.contains("acquisition_binding::bind("));
+    assert!(watch_schedule.contains("acquisition_binding::execute("));
+    for forbidden in [
+        "reqwest::Client::new",
+        "reqwest::Client::builder",
+        "Website::new",
+        ".crawl()",
+        ".scrape()",
+        "TorTransportConfig::new",
+    ] {
+        assert!(
+            !watch_schedule.contains(forbidden),
+            "watch_schedule.rs must reuse the existing acquisition_binding seam — no second \
+             fetch/crawl/transport architecture: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn watch_execution_produces_durable_evidence_via_canonical_ledger() {
+    let watch_schedule =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_schedule.rs")).unwrap();
+    assert!(watch_schedule.contains(
+        "use crate::utils::evidence::{build_evidence, record_evidence, EvidenceLedgerError, EvidenceRef};"
+    ));
+    assert!(watch_schedule.contains("build_evidence(page, content, false, false)"));
+    assert!(watch_schedule.contains("record_evidence(store, bundle)"));
+    for forbidden in [
+        "struct EvidenceBundle",
+        "struct EvidenceRef",
+        "fn build_evidence",
+        "fn record_evidence",
+    ] {
+        assert!(
+            !watch_schedule.contains(forbidden),
+            "watch_schedule.rs must reuse the existing evidence ledger, never redefine it: \
+             found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn watch_execution_claims_run_identity_before_any_side_effect() {
+    let watch_schedule =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_schedule.rs")).unwrap();
+    let claim_index = watch_schedule
+        .find(".write_current(&run_key, None, &claim_payload)")
+        .expect("expected an initial CAS claim of the run identity");
+    let acquisition_index = watch_schedule
+        .find("acquisition_binding::bind(")
+        .expect("expected a canonical acquisition call");
+    let finalize_index = watch_schedule
+        .find(".write_current(&run_key, Some(claim_revision), &completed_payload)")
+        .expect("expected a CAS finalize of the run identity");
+    assert!(
+        claim_index < acquisition_index,
+        "the run identity must be claimed (compare-and-swap) before acquisition begins — \
+         otherwise a concurrent retry could duplicate the fetch/evidence/transition"
+    );
+    assert!(
+        acquisition_index < finalize_index,
+        "the run identity must only be finalized after acquisition/evidence/transition \
+         complete"
+    );
+    assert!(watch_schedule.contains("PersistenceError::CurrentStateConflict { .. }) =>"));
+    assert!(watch_schedule.contains("WatchExecutionError::RunAlreadyInProgress"));
+}
+
+#[test]
+fn watch_schedule_never_implements_out_of_scope_capabilities() {
+    let watch_schedule =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_schedule.rs")).unwrap();
+    for forbidden in [
+        "struct ChangeResult",
+        "enum ChangeResult",
+        "struct ChangeEvent",
+        "enum ChangeEvent",
+        "struct Health",
+        "enum Health",
+        "struct Notification",
+        "enum Notification",
+        "struct Job",
+        "enum Job",
+        "struct Operation",
+        "enum Operation",
+        "struct Scheduler",
+        "EventSourc",
+        "struct WatchTarget",
+        "struct WatchSpec",
+    ] {
+        assert!(
+            !watch_schedule.contains(forbidden),
+            "watch_schedule.rs must stay scoped to scheduling/execution: found forbidden \
+             pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_watch_schedule_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct WatchSchedule",
+                "enum WatchScheduleError",
+                "enum WatchExecutionError",
+                "enum ScheduledRunRecord",
+                "fn execute_scheduled_watch_run",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     scheduling/execution model is owned exclusively by \
+                     spider::features::watch_schedule",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

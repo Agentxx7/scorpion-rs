@@ -131,7 +131,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` now exist and are canonically owned (§3.14) — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted. Still blocked, pending their own future frontiers: a scheduler deciding *when* a watch is checked, change detection (`ChangeResult`/`ChangeEvent`), health, and a notification system. |
+| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14) and cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, and a scheduled run executes through the canonical acquisition/evidence/transition path idempotently. Still blocked, pending their own future frontiers: a background scheduler daemon deciding *when* a trigger fires, change detection (`ChangeResult`/`ChangeEvent`), health, and a notification system. |
 
 ### 3.9 Identity
 
@@ -340,6 +340,52 @@ no `ChangeResult`/`ChangeEvent`, no health, no notification system, and
 no generic `Job` model are implemented here — those remain later,
 separate frontiers.
 
+### 3.15 Watch Scheduling / Execution
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Watch scheduling / execution | `spider/src/features/watch_schedule.rs` | `features/watch.rs` (`WatchDefinition` read-only, `apply_watch_transition`), `features/acquisition_binding.rs`, `features/domain_persistence.rs`, `features/transport.rs` (`TransportRequest`), `utils/evidence.rs` (`build_evidence`/`record_evidence`/`EvidenceRef`), `async_job::Schedule` (`cron` feature, cadence parsing only) | `website::CronType`, `async_job::Job`/`async_job::Runner`, a new fetch/crawl/transport path, `ChangeResult`/`ChangeEvent`, health, notifications, a generic `Job`/`Operation` model, redefining `WatchState` | `WatchSchedule`, `define_watch_schedule()`, `read_watch_schedule()`, `execute_scheduled_watch_run()` | None |
+
+**Clarification on `watch_schedule.rs`:** Track 8 — the successor
+boundary Track 7's own closure explicitly deferred ("a scheduler
+deciding *when* a watch is checked... remain later, separate
+frontiers"). Realizes cadence and one scheduled run's execution only, and
+no scheduling daemon: `WatchSchedule { cron_str }` validates cadence
+syntax via the exact primitive `Website`'s own cron feature already
+depends on (`cron_str.parse::<async_job::Schedule>()`), never
+`website::CronType` (a *what-to-run* selector, `Crawl`/`Scrape` — no
+cadence syntax at all) and never `async_job::Job`/`async_job::Runner`
+(the `Website`-owned always-running scheduler daemon abstraction) —
+"adapt an existing primitive cleanly" means adopting the parser, not the
+daemon. `WatchSchedule` is persisted immutably via `append_history` at a
+namespaced key (`"<id>#schedule"`), exactly like `WatchDefinition`'s own
+pattern. `execute_scheduled_watch_run(store, id, scheduled_at,
+transport_request)` realizes `WatchDefinition → scheduled trigger →
+canonical acquisition → durable EvidenceRef → WatchState transition`:
+reads (never redefines) the watch's `WatchDefinition` via
+`watch::read_watch_definition`; acquires through
+`acquisition_binding::bind`/`::execute` — the same seam CLI/MCP fetch
+already uses, no second fetch/crawl/transport architecture; builds and
+durably records evidence through the unmodified `utils::evidence`
+ledger; and applies the resulting transition through
+`watch::apply_watch_transition` with Track 7's own `ObserveEvidence` —
+`WatchState`'s variants, transitions, and persistence rules remain owned
+exclusively by Track 7, never touched here. Idempotency: "the same
+scheduled run" is identified by `(WatchId, scheduled_at)` and claimed
+*before* any side effect via `DomainPersistence::write_current`'s
+compare-and-swap (`expected_revision: None`) at a namespaced run key
+(`"<id>#run#<unix_seconds>"`) — a caller that loses the claim never
+touches acquisition/evidence/`WatchState` at all: a `Completed` record is
+replayed (the already-produced `EvidenceRef` returned, no new work), a
+`Claimed`-but-incomplete record (concurrent or crashed) is rejected fail
+closed as `WatchExecutionError::RunAlreadyInProgress` rather than risking
+duplicate work. Durable scheduler-owned state is kept to exactly what
+this requires — the cadence record plus one claim/completion record per
+run identity — no generic `Job`/`Task`/`Operation` table. No
+`ChangeResult`/`ChangeEvent`, no health, no notification system, and no
+background scheduling daemon are implemented here — those remain later,
+separate frontiers.
+
 ---
 
 ## 4. Canonical Path Map
@@ -545,7 +591,11 @@ define its own content/transform lineage model. `WatchDefinition`,
 `WatchState`, `WatchTransitionRejected`, `WatchError`, `ObserveEvidence`,
 and `StopWatch` are only defined in `spider/src/features/watch.rs` (see
 §3.14) — no interface may define its own Watch model, and no
-`WatchTarget`/`WatchSpec` may be introduced anywhere.
+`WatchTarget`/`WatchSpec` may be introduced anywhere. `WatchSchedule`,
+`WatchScheduleError`, `WatchExecutionError`, and `ScheduledRunRecord` are
+only defined in `spider/src/features/watch_schedule.rs` (see §3.15) — no
+interface may define its own scheduling/execution model, and no
+`Job`/`Operation`/`Scheduler` daemon model may be introduced anywhere.
 
 ### 7.7 THIN INTERFACES
 
@@ -741,6 +791,25 @@ The following are intentionally not refactored in this frontier:
   (`Option<EvidenceRef>`), never duplicated; no `WatchTarget`/`WatchSpec`
   exists anywhere in `spider/src`; no scheduler/`ChangeResult`/
   `ChangeEvent`/health/notification/generic-`Job` capability is
+  implemented; and none of it is shadowed by `spider_cli`/`spider_mcp`
+- `WatchSchedule`/`WatchScheduleError`/`WatchExecutionError`/
+  `ScheduledRunRecord` are each defined in exactly one canonical module
+  (`features/watch_schedule.rs`), gated behind `evidence`+`disk`+`cron`;
+  cadence is validated via `cron_str.parse::<async_job::Schedule>()` —
+  never `website::CronType` (a what-to-run selector) and never
+  `async_job::Job`/`async_job::Runner` (the `Website`-owned scheduler
+  daemon); execution reuses `watch::read_watch_definition` and
+  `watch::apply_watch_transition` without redefining `WatchDefinition`/
+  `WatchState`; acquisition reuses `acquisition_binding::bind`/`::execute`
+  (no new `reqwest::Client`, `Website::new`, `.crawl()`/`.scrape()`, or
+  Tor client construction); evidence reuses `build_evidence`/
+  `record_evidence` (no redefinition of `EvidenceBundle`/`EvidenceRef`);
+  the run identity is claimed via `DomainPersistence::write_current`
+  compare-and-swap strictly before acquisition begins and finalized
+  strictly after the `WatchState` transition completes (proven by source
+  position), so a losing concurrent/retried claim never duplicates a
+  fetch, evidence record, or transition; no `ChangeResult`/`ChangeEvent`/
+  health/notification/`Job`/`Operation`/`Scheduler` capability is
   implemented; and none of it is shadowed by `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

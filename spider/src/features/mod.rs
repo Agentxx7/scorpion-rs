@@ -219,6 +219,19 @@ pub mod transport;
 #[cfg(all(feature = "evidence", feature = "disk"))]
 pub mod watch;
 
+/// Canonical scheduling semantics for `WatchDefinition` and the execution
+/// path for one scheduled watch run: `WatchSchedule` (cadence, validated
+/// via the existing `async_job::Schedule` cron primitive — never
+/// `website::CronType`, which is a what-to-run selector, not cadence
+/// syntax), plus `execute_scheduled_watch_run`, which reuses
+/// `acquisition_binding` for acquisition, `utils::evidence` for the
+/// durable `EvidenceRef`, and `features::watch::apply_watch_transition`
+/// for the resulting `WatchState` transition — `WatchState` itself
+/// remains owned exclusively by Track 7. Requires `evidence` and `disk`
+/// (like `watch`) plus `cron` (for the cadence primitive).
+#[cfg(all(feature = "evidence", feature = "disk", feature = "cron"))]
+pub mod watch_schedule;
+
 #[cfg(all(not(feature = "simd"), feature = "openai"))]
 pub(crate) use serde_json;
 #[cfg(all(feature = "simd", feature = "openai"))]

@@ -4270,3 +4270,246 @@ fn no_shadow_watch_schedule_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_CHANGE_DETECTION_001 ---
+//
+// Track 9 of the frozen roadmap: canonical change detection
+// (`ChangeResult`/`ChangeEvent`, in `features/change_detection.rs`).
+// Compares only evidence a watch's own history already associates with
+// it; never reduces an uncomparable pair to "unchanged"; reuses
+// `EvidenceBundle`'s existing sha256_hex-derived hash fields and Track
+// 6's content-addressed idempotent-append persistence pattern rather
+// than inventing a second fingerprint/hashing architecture; persists
+// through Track 3's append-only history only. Track 8
+// (`features/watch_schedule.rs`) remains the sole scheduler/execution
+// owner — this module never defines scheduling of its own.
+
+#[test]
+fn change_result_and_change_event_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "enum ChangeResult",
+            "ChangeResult must only be defined in the canonical change_detection module",
+        ),
+        (
+            "struct ChangeEvent",
+            "ChangeEvent must only be defined in the canonical change_detection module",
+        ),
+        (
+            "struct ChangeEventId",
+            "ChangeEventId must only be defined in the canonical change_detection module",
+        ),
+        (
+            "enum ChangeDetectionError",
+            "ChangeDetectionError must only be defined in the canonical change_detection module",
+        ),
+        (
+            "enum ComparisonBasis",
+            "ComparisonBasis must only be defined in the canonical change_detection module",
+        ),
+        (
+            "enum UncomparableReason",
+            "UncomparableReason must only be defined in the canonical change_detection module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/change_detection.rs"], description);
+    }
+}
+
+#[test]
+fn change_detection_module_gated_behind_evidence_and_disk() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod change_detection;")
+        .expect("change_detection module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    let gate_line = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .expect("expected a line before the module declaration");
+    assert_eq!(
+        gate_line.trim(),
+        "#[cfg(all(feature = \"evidence\", feature = \"disk\"))]",
+        "change_detection must be gated behind evidence+disk, like watch.rs (which it reads) \
+         — it must not introduce a third persistence/hashing stack"
+    );
+}
+
+#[test]
+fn change_detection_only_compares_same_watch_evidence() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    assert!(change_detection.contains("fn watch_evidence_refs("));
+    assert!(change_detection.contains("fn ensure_evidence_belongs_to_watch("));
+    assert!(change_detection.contains("ChangeDetectionError::EvidenceNotAssociatedWithWatch"));
+    // Both refs are validated against the watch's own history before any
+    // comparison is attempted.
+    let ensure_calls = change_detection
+        .matches("ensure_evidence_belongs_to_watch(store, watch,")
+        .count();
+    assert_eq!(
+        ensure_calls, 2,
+        "both previous_evidence and current_evidence must be validated against watch's own \
+         history before any comparison is attempted"
+    );
+}
+
+#[test]
+fn change_result_never_reduces_uncomparable_evidence_to_unchanged() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    assert!(change_detection.contains("ChangeResult::Uncomparable"));
+    assert!(change_detection.contains("ChangeDetectionError::PreviousEvidenceUnresolvable"));
+    assert!(change_detection.contains("ChangeDetectionError::CurrentEvidenceUnresolvable"));
+    // The uncomparable branch is reached whenever the two bases differ or
+    // either side has no usable hash — never silently defaulted to
+    // Unchanged.
+    assert!(change_detection.contains("if previous_basis == current_basis"));
+}
+
+#[test]
+fn change_detection_reuses_evidence_bundle_hashes_not_a_new_fingerprint() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    assert!(change_detection.contains(".response_body_hash"));
+    assert!(change_detection.contains(".transformed_content_hash"));
+    assert!(change_detection
+        .contains("use crate::utils::evidence::{sha256_hex, EvidenceBundle, EvidenceLedgerError, EvidenceRef};"));
+    for forbidden in [
+        "struct EvidenceBundle",
+        "fn sha256_hex",
+        "struct Fingerprint",
+        "spider_fingerprint",
+        "use crate::configuration::Fingerprint",
+    ] {
+        assert!(
+            !change_detection.contains(forbidden),
+            "change_detection.rs must reuse EvidenceBundle's existing hash fields and \
+             sha256_hex, never redefine them or introduce a second fingerprint \
+             architecture: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn change_event_persists_append_only_and_is_content_addressed_idempotent() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    assert!(change_detection.contains(".append_history("));
+    assert!(!change_detection.contains(".write_current("));
+    // Content-addressed from (watch, previous_evidence, current_evidence)
+    // only — never from the computed result or a timestamp — so a
+    // duplicate recording of the identical fact is idempotent, not a
+    // conflict, mirroring Track 6's own precedent verbatim.
+    assert!(change_detection.contains("change-v1|{watch}|"));
+    assert!(change_detection.contains("Err(PersistenceError::HistoryAlreadyExists) => Ok(event)"));
+    for forbidden in ["sqlx::query", "struct DomainPersistence"] {
+        assert!(
+            !change_detection.contains(forbidden),
+            "change_detection.rs must not construct its own persistence mechanism: found \
+             {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn change_result_computation_is_separate_from_change_event_persistence() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    // compute_change_result is a plain (non-async) function — it cannot
+    // perform any DomainPersistence I/O.
+    assert!(change_detection.contains(
+        "pub fn compute_change_result(previous: &EvidenceBundle, current: &EvidenceBundle) -> ChangeResult {"
+    ));
+    assert!(change_detection
+        .contains("pub async fn detect_and_record_change(\n    store: &DomainPersistence,"));
+}
+
+#[test]
+fn track_8_remains_sole_scheduler_and_is_only_read_by_change_detection() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    for forbidden in [
+        "struct WatchSchedule",
+        "enum WatchSchedule",
+        "fn execute_scheduled_watch_run",
+        "fn define_watch_schedule",
+        "async_job::Schedule",
+        "struct WatchState",
+        "enum WatchState",
+        "struct WatchDefinition",
+        "enum WatchDefinition",
+    ] {
+        assert!(
+            !change_detection.contains(forbidden),
+            "change_detection.rs must never define scheduling or redefine Watch types — \
+             Track 8 remains the sole scheduler/execution owner and Track 7 remains the \
+             sole Watch owner: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn change_detection_never_implements_out_of_scope_capabilities() {
+    let change_detection =
+        fs::read_to_string(workspace_root().join("spider/src/features/change_detection.rs"))
+            .unwrap();
+    for forbidden in [
+        "struct Health",
+        "enum Health",
+        "struct Notification",
+        "enum Notification",
+        "struct Job",
+        "enum Job",
+        "struct Operation",
+        "enum Operation",
+        "struct Scheduler",
+        "EventSourc",
+        "struct GenericEvent",
+        "trait Event",
+    ] {
+        assert!(
+            !change_detection.contains(forbidden),
+            "change_detection.rs must stay scoped to ChangeResult/ChangeEvent computation \
+             and persistence: found forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_change_detection_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "enum ChangeResult",
+                "struct ChangeEvent",
+                "struct ChangeEventId",
+                "enum ChangeDetectionError",
+                "fn detect_and_record_change",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     change detection model is owned exclusively by \
+                     spider::features::change_detection",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

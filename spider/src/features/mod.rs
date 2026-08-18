@@ -90,6 +90,20 @@ pub mod artifact_reference;
 /// available; no feature gate on the state/transition vocabulary itself.
 /// See `SCORPION.md` §5.
 pub mod auth_session;
+/// Canonical change detection: `ChangeResult` (the truthful outcome of
+/// comparing two durable evidence records for the same watch) and
+/// `ChangeEvent` (the durable, append-only historical record of a
+/// detected comparison). Compares only evidence a watch's own history
+/// (`features/watch.rs`) actually associates with it; never reduces an
+/// uncomparable pair to "unchanged". Reuses `sha256_hex`-derived hash
+/// fields already present on `EvidenceBundle` and Track 6's
+/// content-addressed idempotent-append persistence pattern — no new
+/// hashing/fingerprint architecture, no second Evidence/Watch model, no
+/// scheduler of its own (`features/watch_schedule.rs` remains the sole
+/// scheduler/execution owner). Requires `evidence` and `disk` (like
+/// `watch`, which it reads). See `SCORPION_SDD.md` §5.2.
+#[cfg(all(feature = "evidence", feature = "disk"))]
+pub mod change_detection;
 /// `DiscoveryTarget`: the smallest canonical planning boundary for
 /// discovery pointers (sitemap index child sitemaps, robots.txt-declared
 /// sitemaps, caller/request-supplied URLs) — URLs to acquire *later*,

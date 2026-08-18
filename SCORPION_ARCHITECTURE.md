@@ -131,7 +131,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14) and cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, and a scheduled run executes through the canonical acquisition/evidence/transition path idempotently. Still blocked, pending their own future frontiers: a background scheduler daemon deciding *when* a trigger fires, change detection (`ChangeResult`/`ChangeEvent`), health, and a notification system. |
+| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14), cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15), and change detection (`ChangeResult`/`ChangeEvent`, §3.16) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, a scheduled run executes through the canonical acquisition/evidence/transition path idempotently, and two of a watch's own durable evidence records can be truthfully compared and durably recorded. Still blocked, pending their own future frontiers: a background scheduler daemon deciding *when* a trigger fires, health, and a notification system. |
 
 ### 3.9 Identity
 
@@ -386,6 +386,59 @@ run identity — no generic `Job`/`Task`/`Operation` table. No
 background scheduling daemon are implemented here — those remain later,
 separate frontiers.
 
+### 3.16 Change Detection
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Change detection | `spider/src/features/change_detection.rs` | `features/watch.rs` (`WatchState`/`read_current_watch_state` read-only), `features/domain_persistence.rs`, `utils/evidence.rs` (`sha256_hex`, `EvidenceBundle`, `EvidenceRef`) | A scheduler of its own, health, notifications, a generic event framework, `Job`/`Operation`, a second `Evidence`/`Watch` model, a new acquisition path, a new hashing/fingerprint architecture | `ChangeResult`, `ChangeEvent`, `compute_change_result()`, `detect_and_record_change()`, `read_change_event()` | None |
+
+**Clarification on `change_detection.rs`:** Track 9 — the successor
+boundary Track 7's own closure deferred alongside scheduling
+(`ChangeResult`/`ChangeEvent`, health, notifications). Realizes exactly
+the first two, and no further. Same-watch-only: `detect_and_record_change`
+never trusts a caller-supplied `EvidenceRef` pairing blindly — it reads
+`watch`'s own current `WatchState` plus every superseded historical value
+(Track 7's `HistoryLog`/`DomainPersistence::read_history`, reused
+unmodified, at the exact plain key `apply_watch_transition` already
+writes to) and confirms both the previous and current evidence actually
+appear as a `last_evidence` value in that specific watch's own history —
+an unrelated watch's evidence is rejected
+(`ChangeDetectionError::EvidenceNotAssociatedWithWatch`) before any
+comparison is attempted. Truthful comparison: `compute_change_result` is
+a pure function of two already-resolved `EvidenceBundle`s that reuses
+exactly the SHA-256 hash fields `build_evidence` already computed
+(`response_body_hash` preferred, `transformed_content_hash` only as a
+fallback) — two hashes are only ever compared when both bundles produced
+the *same* basis; a mismatched or entirely absent basis produces
+`ChangeResult::Uncomparable`, never a silently defaulted `Unchanged`.
+Evidence that cannot even be resolved is rejected before comparison is
+attempted at all (`PreviousEvidenceUnresolvable`/
+`CurrentEvidenceUnresolvable`), never treated as "no change." Lineage/
+fingerprint reuse: `TransformLineageId`/`TransformLineageRecord` (Track
+6) model a different fact (input → transformation → output) and are not
+reused as a type here; what is reused is `sha256_hex` itself (no new
+hashing logic anywhere) and Track 6's content-addressed,
+idempotent-duplicate-append persistence pattern — `ChangeEventId` is a
+deterministic SHA-256 of `(watch, previous_evidence, current_evidence)`,
+so recording an identical fact twice collapses to the same id
+(`Err(PersistenceError::HistoryAlreadyExists) => Ok(event)`, Track 6's
+own precedent reused verbatim) rather than conflicting or duplicating.
+Persisted through `DomainPersistence::append_history` only (never
+`write_current` — a change-detection fact has no current state to
+replace), exactly like Track 6's lineage ledger. `ChangeResult`
+computation is kept separate from `ChangeEvent` persistence:
+`compute_change_result` is a plain, synchronous, non-`DomainPersistence`-
+touching function; `detect_and_record_change` is the only function that
+performs I/O. Track 8 (`features/watch_schedule.rs`) remains the sole
+scheduler/execution owner — this module never defines scheduling of its
+own and only ever *reads* the evidence Track 8's execution path already
+produced, proven directly by a dedicated test suite that drives change
+detection over two real `execute_scheduled_watch_run` calls against a
+local HTTP fixture (not hand-built `EvidenceBundle` values). No health,
+no notification system, no generic event framework, and no `Job`/
+`Operation` model are implemented here — those remain later, separate
+frontiers.
+
 ---
 
 ## 4. Canonical Path Map
@@ -596,6 +649,10 @@ and `StopWatch` are only defined in `spider/src/features/watch.rs` (see
 only defined in `spider/src/features/watch_schedule.rs` (see §3.15) — no
 interface may define its own scheduling/execution model, and no
 `Job`/`Operation`/`Scheduler` daemon model may be introduced anywhere.
+`ChangeResult`, `ChangeEvent`, `ChangeEventId`, `ChangeDetectionError`,
+`ComparisonBasis`, and `UncomparableReason` are only defined in
+`spider/src/features/change_detection.rs` (see §3.16) — no interface may
+define its own change detection model.
 
 ### 7.7 THIN INTERFACES
 
@@ -810,6 +867,31 @@ The following are intentionally not refactored in this frontier:
   position), so a losing concurrent/retried claim never duplicates a
   fetch, evidence record, or transition; no `ChangeResult`/`ChangeEvent`/
   health/notification/`Job`/`Operation`/`Scheduler` capability is
+  implemented; and none of it is shadowed by `spider_cli`/`spider_mcp`
+- `ChangeResult`/`ChangeEvent`/`ChangeEventId`/`ChangeDetectionError`/
+  `ComparisonBasis`/`UncomparableReason` are each defined in exactly one
+  canonical module (`features/change_detection.rs`), gated behind
+  `evidence`+`disk`; both `previous_evidence` and `current_evidence` are
+  validated against the watch's own current + historical `WatchState`
+  evidence (via `watch_evidence_refs`/`ensure_evidence_belongs_to_watch`)
+  before any comparison is attempted, rejecting an unrelated watch's
+  evidence; a mismatched or absent hash basis produces
+  `ChangeResult::Uncomparable`, never a silently defaulted `Unchanged`
+  (proven by the `if previous_basis == current_basis` guard); hashing
+  reuses `EvidenceBundle`'s existing `response_body_hash`/
+  `transformed_content_hash` fields and `sha256_hex` — no redefinition of
+  either and no new fingerprint architecture; persistence uses
+  `DomainPersistence::append_history` only (never `write_current`), keyed
+  by a `ChangeEventId` content-addressed from `(watch, previous_evidence,
+  current_evidence)`, so a duplicate recording is idempotent
+  (`Err(PersistenceError::HistoryAlreadyExists) => Ok(event)`) rather than
+  a conflict; `compute_change_result` is a plain synchronous function kept
+  separate from `detect_and_record_change`'s persistence I/O; Track 8
+  (`features/watch_schedule.rs`) remains the sole scheduler/execution
+  owner (no `WatchSchedule`/scheduling type or `async_job::Schedule`
+  reference exists in `change_detection.rs`), verified against two real
+  `execute_scheduled_watch_run` calls, not hand-built evidence; no
+  health/notification/generic-event/`Job`/`Operation` capability is
   implemented; and none of it is shadowed by `spider_cli`/`spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

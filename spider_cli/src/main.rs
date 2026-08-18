@@ -165,6 +165,23 @@ fn handle_remote_address(_res: &Page, mut _json: Value) -> Value {
     _json
 }
 
+/// Surface truthful acquisition provenance already captured on the page
+/// (`spider::utils::evidence::page_provenance`) — never recomputed or
+/// reinterpreted here. Gated on `fetch`, the same CLI feature that
+/// already enables `spider/evidence` for `spider fetch`.
+#[cfg(feature = "fetch")]
+fn handle_provenance(res: &Page, mut json: Value) -> Value {
+    json["provenance"] = json!(spider::utils::evidence::page_provenance(res));
+    json
+}
+
+/// No `spider/evidence` available without `fetch` — provenance stays
+/// absent rather than fabricated.
+#[cfg(not(feature = "fetch"))]
+fn handle_provenance(_res: &Page, mut _json: Value) -> Value {
+    _json
+}
+
 /// Log the website status.
 fn log_website_status(website: &Website) {
     use CrawlStatus::*;
@@ -846,6 +863,7 @@ async fn main() {
                         let page_json = handle_time(&res, page_json);
                         let page_json = handle_status_code(&res, page_json);
                         let page_json = handle_remote_address(&res, page_json);
+                        let page_json = handle_provenance(&res, page_json);
 
                         match serde_json::to_string_pretty(&page_json) {
                             Ok(j) => {

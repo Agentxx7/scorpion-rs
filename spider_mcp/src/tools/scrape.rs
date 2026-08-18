@@ -386,6 +386,7 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
                 "status_code": page.status_code.as_u16(),
                 "content": content,
                 "links": links,
+                "provenance": spider::utils::evidence::page_provenance(&page),
             })
         };
 

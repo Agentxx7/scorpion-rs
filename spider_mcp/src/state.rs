@@ -163,6 +163,10 @@ pub struct CrawlPageResult {
     pub content: String,
     pub status_code: u16,
     pub links: Vec<String>,
+    /// Truthful acquisition provenance already captured on the `Page`
+    /// this result came from (`spider::utils::evidence::page_provenance`)
+    /// — never recomputed or reinterpreted here.
+    pub provenance: spider::utils::evidence::PageProvenance,
 }
 
 #[cfg(test)]

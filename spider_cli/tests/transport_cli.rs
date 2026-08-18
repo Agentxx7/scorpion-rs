@@ -502,6 +502,20 @@ fn fetch_evidence_says_default() {
     assert_eq!(value["dns"], serde_json::Value::Null);
 }
 
+/// `spider scrape` surfaces the same truthful acquisition provenance
+/// `spider fetch` does — via the canonical `page_provenance` seam, not a
+/// second, independently-reimplemented notion of it.
+#[test]
+fn scrape_output_surfaces_page_provenance() {
+    let http = HttpFixture::start("<html><body>scrape provenance fixture</body></html>");
+    let url = format!("http://{}/", http.addr);
+    let output = scorpion().args(["--url", &url, "scrape"]).output().unwrap();
+    assert!(output.status.success(), "{:?}", output);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["provenance"]["transport"], "default");
+    assert_eq!(value["provenance"]["dns"], serde_json::Value::Null);
+}
+
 /// T17: a genuine Tor crawl preflight rejection (Tor + legacy proxy, in
 /// this case) is a nonzero exit with a stderr message — never a
 /// successful command with empty stdout.

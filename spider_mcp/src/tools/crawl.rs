@@ -184,6 +184,7 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
                 "status_code": page.status_code.as_u16(),
                 "content": content,
                 "links": links,
+                "provenance": spider::utils::evidence::page_provenance(&page),
             }));
         }
 
@@ -257,12 +258,14 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
                     .map(|s| s.iter().map(|l| l.inner().to_string()).collect())
                     .unwrap_or_default();
 
+                let provenance = spider::utils::evidence::page_provenance(&page);
                 if let Some(mut session) = state2.sessions.get_mut(&id2) {
                     session.pages.push(CrawlPageResult {
                         url: page.get_url().to_string(),
                         content,
                         status_code: page.status_code.as_u16(),
                         links,
+                        provenance,
                     });
                 }
             }

@@ -146,6 +146,7 @@ mod tests {
             content: "# hello".to_string(),
             status_code: 200,
             links: vec!["http://example.test/a".to_string()],
+            provenance: spider::utils::evidence::PageProvenance::default(),
         }];
         state.sessions.insert(
             "done-1".into(),

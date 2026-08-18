@@ -5057,3 +5057,113 @@ fn no_shadow_content_classification_anywhere_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_EVIDENCE_PROVENANCE_SURFACING_001 ---
+//
+// Audit of the primary canonical crawl/scrape result paths against
+// already-captured Page/EvidenceBundle provenance. Finding: MCP's default
+// (non-evidence) scrape output, MCP's crawl output (inline and
+// background/CrawlPageResult), and CLI's scrape output all discarded
+// `Page::transport()`/`backend_provenance()`/`response_origin()`/
+// `observed_status_code` even though every one of those facts was already
+// captured and reachable on the `Page` object each path already holds.
+// `spider::utils::evidence::page_provenance`/`PageProvenance` (factored
+// directly out of `build_evidence`, which now calls it — a single source
+// of truth, not a second provenance model) closes that gap; CLI/MCP call
+// it as a thin, reused primitive.
+
+#[test]
+fn page_provenance_primitives_are_defined_exactly_once_in_canonical_core() {
+    for (pattern, description) in [
+        (
+            "pub struct PageProvenance",
+            "PageProvenance must only be defined in the canonical utils::evidence module",
+        ),
+        (
+            "pub fn page_provenance(",
+            "page_provenance must only be defined in the canonical utils::evidence module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["utils/evidence.rs"], description);
+    }
+}
+
+#[test]
+fn build_evidence_reuses_page_provenance_as_the_single_source_of_truth() {
+    let evidence =
+        fs::read_to_string(workspace_root().join("spider/src/utils/evidence.rs")).unwrap();
+    // build_evidence must derive its provenance fields from
+    // page_provenance() — never re-derive the same facts independently,
+    // which would let the two drift apart.
+    let build_evidence_start = evidence
+        .find("pub fn build_evidence(")
+        .expect("expected build_evidence");
+    let page_provenance_fn_start = evidence
+        .find("pub fn page_provenance(")
+        .expect("expected page_provenance");
+    let build_evidence_body = &evidence[build_evidence_start..page_provenance_fn_start];
+    assert!(build_evidence_body.contains("let provenance = page_provenance(page);"));
+    assert!(build_evidence_body.contains("transport: provenance.transport,"));
+    assert!(build_evidence_body.contains("dns: provenance.dns,"));
+    assert!(build_evidence_body.contains("backend_provenance: provenance.backend_provenance,"));
+    assert!(build_evidence_body.contains("response_origin: provenance.response_origin,"));
+    assert!(build_evidence_body.contains("observed_status_code: provenance.observed_status_code,"));
+}
+
+#[test]
+fn primary_crawl_and_scrape_paths_surface_page_provenance() {
+    // Reachability proof: every primary production result path that
+    // previously dropped provenance now calls the canonical primitive.
+    let mcp_scrape =
+        fs::read_to_string(workspace_root().join("spider_mcp/src/tools/scrape.rs")).unwrap();
+    assert!(mcp_scrape.contains("spider::utils::evidence::page_provenance(&page)"));
+
+    let mcp_crawl =
+        fs::read_to_string(workspace_root().join("spider_mcp/src/tools/crawl.rs")).unwrap();
+    assert_eq!(
+        mcp_crawl
+            .matches("spider::utils::evidence::page_provenance(&page)")
+            .count(),
+        2,
+        "both the inline and background crawl paths must surface provenance"
+    );
+
+    let mcp_state = fs::read_to_string(workspace_root().join("spider_mcp/src/state.rs")).unwrap();
+    assert!(mcp_state.contains("pub provenance: spider::utils::evidence::PageProvenance,"));
+
+    let cli_main = fs::read_to_string(workspace_root().join("spider_cli/src/main.rs")).unwrap();
+    assert!(cli_main.contains("fn handle_provenance(res: &Page, mut json: Value) -> Value {"));
+    assert!(cli_main.contains("spider::utils::evidence::page_provenance(res)"));
+    assert!(cli_main.contains("let page_json = handle_provenance(&res, page_json);"));
+}
+
+#[test]
+fn no_shadow_provenance_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "struct PageProvenance",
+                "fn page_provenance(",
+                // No interface may re-derive the same backend/response-
+                // origin label strings independently of build_evidence/
+                // page_provenance's own private label functions.
+                "fn backend_provenance_label(",
+                "fn response_origin_label(",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — canonical provenance \
+                     is owned exclusively by spider::utils::evidence",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

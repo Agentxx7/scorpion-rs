@@ -197,7 +197,7 @@ pub fn build_evidence(
             .map(|link| link.inner().to_string())
             .collect::<Vec<_>>()
     });
-    let observed_transport = page.transport();
+    let provenance = page_provenance(page);
 
     EvidenceBundle {
         id: None,
@@ -205,7 +205,7 @@ pub fn build_evidence(
         final_url: Some(page.get_url_final().to_string()),
         retrieved_at: page.get_retrieved_at(),
         status_code: Some(page.status_code.as_u16()),
-        observed_status_code: page.observed_status_code.map(|status| status.as_u16()),
+        observed_status_code: provenance.observed_status_code,
         content_type,
         detected_content_type,
         response_body_hash,
@@ -218,6 +218,50 @@ pub fn build_evidence(
         screenshot: wants_screenshot.then_some(content).flatten(),
         screenshot_hash,
         metadata: None,
+        transport: provenance.transport,
+        dns: provenance.dns,
+        backend_provenance: provenance.backend_provenance,
+        response_origin: provenance.response_origin,
+    }
+}
+
+/// The subset of [`EvidenceBundle`]'s provenance fields derivable
+/// directly from a [`Page`], without any content/hashing work — the
+/// exact same facts and label conventions [`build_evidence`] itself
+/// uses (this function *is* that shared derivation; `build_evidence`
+/// calls it rather than duplicating it), factored out so a caller that
+/// wants only truthful acquisition provenance — not a full
+/// content-hashing `EvidenceBundle` — can get it cheaply. `None` for any
+/// field the acquisition path never stamped; unknown is never guessed
+/// or fabricated. Never a second provenance model: every field name and
+/// label string here is identical to `EvidenceBundle`'s own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PageProvenance {
+    /// Which audited transport actually acquired this page — `"default"`
+    /// or `"tor"`. See [`EvidenceBundle::transport`].
+    pub transport: Option<String>,
+    /// How target-hostname DNS resolution was performed. See
+    /// [`EvidenceBundle::dns`].
+    pub dns: Option<String>,
+    /// Which backend observed or reconstructed this response. See
+    /// [`EvidenceBundle::backend_provenance`].
+    pub backend_provenance: Option<String>,
+    /// Neutral origin of this response representation. See
+    /// [`EvidenceBundle::response_origin`].
+    pub response_origin: Option<String>,
+    /// HTTP status actually observed from a response or trusted relay,
+    /// independent of Spider's effective/crawler `status_code` — a
+    /// truthful signal that a page was reclassified (retry policy,
+    /// operational recovery) even when the final status looks ordinary.
+    /// See [`EvidenceBundle::observed_status_code`].
+    pub observed_status_code: Option<u16>,
+}
+
+/// Derive [`PageProvenance`] for `page`. See that type's own doc comment.
+pub fn page_provenance(page: &Page) -> PageProvenance {
+    let observed_transport = page.transport();
+    PageProvenance {
         transport: observed_transport.map(|transport| transport.label().to_string()),
         dns: match observed_transport {
             Some(transport::AcquisitionTransport::Tor) => Some("proxy".to_string()),
@@ -229,6 +273,7 @@ pub fn build_evidence(
         response_origin: page
             .response_origin()
             .map(|origin| response_origin_label(origin).to_string()),
+        observed_status_code: page.observed_status_code.map(|status| status.as_u16()),
     }
 }
 
@@ -760,6 +805,86 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    mod page_provenance_tests {
+        use super::*;
+        use crate::features::transport::AcquisitionTransport;
+        use crate::page::build;
+        use crate::utils::PageResponse;
+
+        #[test]
+        fn unstamped_page_reports_all_provenance_as_none() {
+            let page = Page::default();
+            let provenance = page_provenance(&page);
+            assert_eq!(provenance, PageProvenance::default());
+        }
+
+        #[test]
+        fn default_transport_reports_default_label_and_no_dns_proxy_fact() {
+            let mut page = Page::default();
+            page.transport = Some(AcquisitionTransport::Default);
+            let provenance = page_provenance(&page);
+            assert_eq!(provenance.transport.as_deref(), Some("default"));
+            assert_eq!(provenance.dns, None);
+        }
+
+        #[test]
+        fn tor_transport_reports_tor_label_and_proxy_dns_fact() {
+            let mut page = Page::default();
+            page.transport = Some(AcquisitionTransport::Tor);
+            let provenance = page_provenance(&page);
+            assert_eq!(provenance.transport.as_deref(), Some("tor"));
+            assert_eq!(provenance.dns.as_deref(), Some("proxy"));
+        }
+
+        #[test]
+        fn backend_and_response_origin_are_read_through_not_fabricated() {
+            let mut page = Page::default();
+            page.backend = Some(spider_transport::BackendProvenance::Wreq);
+            page.response_origin = Some(spider_transport::ResponseOrigin::ReconstructedCache);
+            let provenance = page_provenance(&page);
+            assert_eq!(provenance.backend_provenance.as_deref(), Some("wreq"));
+            assert_eq!(
+                provenance.response_origin.as_deref(),
+                Some("reconstructed_cache")
+            );
+        }
+
+        #[test]
+        fn observed_status_code_survives_effective_reclassification() {
+            let page = build(
+                "https://example.test/",
+                PageResponse {
+                    content: Some(Vec::new()),
+                    status_code: reqwest::StatusCode::OK,
+                    observed_status_code: Some(reqwest::StatusCode::OK),
+                    ..Default::default()
+                },
+            );
+            // Truthful even when Spider's own effective status differs —
+            // this is exactly the signal EvidenceBundle::observed_status_code
+            // already preserves; page_provenance must not drop it.
+            let provenance = page_provenance(&page);
+            assert_eq!(provenance.observed_status_code, Some(200));
+        }
+
+        #[test]
+        fn build_evidence_and_page_provenance_agree_exactly() {
+            let mut page = Page::default();
+            page.transport = Some(AcquisitionTransport::Tor);
+            page.backend = Some(spider_transport::BackendProvenance::CacheLayer);
+            page.response_origin = Some(spider_transport::ResponseOrigin::Synthetic);
+
+            let provenance = page_provenance(&page);
+            let bundle = build_evidence(&page, None, false, false);
+
+            assert_eq!(bundle.transport, provenance.transport);
+            assert_eq!(bundle.dns, provenance.dns);
+            assert_eq!(bundle.backend_provenance, provenance.backend_provenance);
+            assert_eq!(bundle.response_origin, provenance.response_origin);
+            assert_eq!(bundle.observed_status_code, provenance.observed_status_code);
+        }
     }
 
     mod content_classification {

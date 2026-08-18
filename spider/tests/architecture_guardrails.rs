@@ -4745,3 +4745,229 @@ fn no_shadow_watch_health_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_001 ---
+//
+// Audit of the live production CAPTCHA path (utils/mod.rs's solver gate,
+// under `real_browser`) against the already-closed canonical CAPTCHA
+// architecture (`features/captcha.rs`'s `CaptchaProviderRegistry`/
+// `CaptchaRouteAttempts`, `features/captcha_browser.rs`'s
+// `execute_browser_captcha_attempt`). Finding: `cf_handle`/
+// `imperva_handle` invoke no CAPTCHA provider at all (pure DOM
+// click/drag/wait heuristics — genuinely out of scope for provider
+// convergence); `recaptcha_handle`/`geetest_handle`/`lemin_handle`
+// already dispatch through the canonical registry/route-attempts seam,
+// but their surrounding browser image-capture/action-application layer
+// remains bespoke rather than `BrowserChallengeSnapshot`/
+// `execute_browser_captcha_attempt` — deferred (not this frontier)
+// because it would change the production pixel source and cannot be
+// validated against real challenge pages here. One confirmed bug fixed:
+// `solve_enterprise_with_browser_gemini` no longer returns a fabricated
+// `Ok(Vec::new())` "nothing to click" success when the local provider is
+// unavailable and no `GEMINI_API_KEY` is set — it now fails closed with a
+// truthful error. See
+// `docs/frontier/CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_SDD.md`.
+
+#[test]
+fn production_solver_gate_reaches_every_vendor_handler() {
+    // Reachability proof: the live production fetch path (not a test, not
+    // an example) is the one and only caller that gates on real-time
+    // detection and dispatches to each vendor handler.
+    let utils_mod = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+    for handler in [
+        "crate::features::solvers::cf_handle(",
+        "crate::features::solvers::imperva_handle(",
+        "crate::features::solvers::recaptcha_handle(",
+        "crate::features::solvers::geetest_handle(",
+        "crate::features::solvers::lemin_handle(",
+    ] {
+        assert!(
+            utils_mod.contains(handler),
+            "production solver gate (spider/src/utils/mod.rs) must reach {handler:?} — if it \
+             no longer does, this frontier's reachability audit is stale and must be redone"
+        );
+    }
+}
+
+#[test]
+fn dom_heuristic_handlers_are_explicitly_classified_and_invoke_no_provider() {
+    let solvers =
+        fs::read_to_string(workspace_root().join("spider/src/features/solvers.rs")).unwrap();
+    for handler_doc_anchor in ["pub async fn cf_handle(", "pub async fn imperva_handle("] {
+        let index = solvers
+            .find(handler_doc_anchor)
+            .unwrap_or_else(|| panic!("expected to find {handler_doc_anchor:?}"));
+        let preceding = &solvers[..index];
+        let doc_start = preceding
+            .rfind("/// Handle")
+            .expect("expected a doc comment block starting with '/// Handle'");
+        let doc_block = &solvers[doc_start..index];
+        assert!(
+            doc_block.contains("LEGACY_DOM_HEURISTIC"),
+            "{handler_doc_anchor} must carry an explicit LEGACY_DOM_HEURISTIC classification \
+             — it invokes no CAPTCHA provider and must never be presented as canonical \
+             provider dispatch"
+        );
+        // Checked as an actual dispatch call form, not a bare type-name
+        // mention — the classification doc legitimately *names*
+        // CaptchaProviderRegistry in English to explain why this handler
+        // does not use it.
+        assert!(
+            !doc_block.contains("CaptchaProviderRegistry::new()")
+                && !doc_block.contains(".execute_explicit_attempt("),
+            "{handler_doc_anchor}'s own classification must not claim provider dispatch"
+        );
+    }
+}
+
+#[test]
+fn provider_dispatch_handlers_are_explicitly_classified_and_reuse_canonical_dispatch() {
+    let solvers =
+        fs::read_to_string(workspace_root().join("spider/src/features/solvers.rs")).unwrap();
+    for (handler_doc_anchor, dispatch_fn) in [
+        (
+            "pub async fn recaptcha_handle(",
+            "solve_enterprise_with_browser_gemini",
+        ),
+        (
+            "pub async fn lemin_handle(",
+            "solve_point_with_legacy_routing",
+        ),
+        (
+            "pub async fn geetest_handle(",
+            "solve_horizontal_offset_with_legacy_routing",
+        ),
+    ] {
+        let index = solvers
+            .find(handler_doc_anchor)
+            .unwrap_or_else(|| panic!("expected to find {handler_doc_anchor:?}"));
+        let preceding = &solvers[..index];
+        let doc_start = preceding
+            .rfind("/// CANONICAL_PROVIDER_DISPATCH_LEGACY_BINDING")
+            .or_else(|| preceding.rfind("/// Lemin solve handler."))
+            .expect("expected a classification doc comment immediately before this handler");
+        let doc_block = &solvers[doc_start..index];
+        assert!(
+            doc_block.contains("CANONICAL_PROVIDER_DISPATCH_LEGACY_BINDING"),
+            "{handler_doc_anchor} must carry an explicit CANONICAL_PROVIDER_DISPATCH_LEGACY_BINDING \
+             classification — it does reach the canonical provider dispatch seam, but browser \
+             binding around it remains bespoke"
+        );
+        assert!(doc_block.contains(dispatch_fn));
+    }
+
+    // Each named dispatch function genuinely uses the canonical registry
+    // and route-attempts ledger — not a raw/ad-hoc provider call.
+    for dispatch_fn_signature in [
+        "async fn solve_enterprise_with_browser_gemini(",
+        "async fn solve_point_with_legacy_routing(",
+        "async fn solve_horizontal_offset_with_legacy_routing(",
+    ] {
+        let index = solvers
+            .find(dispatch_fn_signature)
+            .unwrap_or_else(|| panic!("expected to find {dispatch_fn_signature:?}"));
+        // Scan a bounded window after the signature rather than to EOF or
+        // the next `fn`, so this stays robust to unrelated edits.
+        let window = &solvers[index..(index + 3000).min(solvers.len())];
+        assert!(
+            window.contains("CaptchaProviderRegistry::new()"),
+            "{dispatch_fn_signature} must construct a real CaptchaProviderRegistry"
+        );
+        assert!(
+            window.contains("CaptchaRouteAttempts::new()")
+                && window.contains(".execute_explicit_attempt("),
+            "{dispatch_fn_signature} must dispatch through CaptchaRouteAttempts::execute_explicit_attempt \
+             — the canonical capability-prevalidated dispatch primitive"
+        );
+    }
+}
+
+#[test]
+fn provider_unavailable_never_becomes_a_fabricated_empty_success() {
+    let solvers =
+        fs::read_to_string(workspace_root().join("spider/src/features/solvers.rs")).unwrap();
+    // The specific fixed bug must never reappear: a provider-unavailable
+    // branch silently returning a fabricated "nothing to click" success.
+    assert!(
+        !solvers.contains("Err(_) => return Ok(Vec::new())"),
+        "provider-unavailable must never be converted into a fabricated empty-selection \
+         success — CaptchaSolution::SelectedChoices(vec![]) is a legitimate answer only when \
+         a provider actually examined the challenge, never a stand-in for 'no provider ran'"
+    );
+    // solve_enterprise_with_browser_gemini specifically now fails closed.
+    let anchor = solvers
+        .find("async fn solve_enterprise_with_browser_gemini(")
+        .expect("expected to find solve_enterprise_with_browser_gemini");
+    let window = &solvers[anchor..(anchor + 4000).min(solvers.len())];
+    assert!(window.contains("return Err(CdpError::msg("));
+    assert!(window.contains("local CAPTCHA provider unavailable"));
+}
+
+#[test]
+fn canonical_captcha_execution_seam_is_not_reimplemented_in_solvers() {
+    // The composed materialize -> route -> revalidate -> apply seam
+    // remains defined exactly once, in captcha_browser.rs — solvers.rs
+    // must never grow its own duplicate.
+    assert_pattern_only_in_files(
+        "async fn execute_browser_captcha_attempt(",
+        &["features/captcha_browser.rs"],
+        "execute_browser_captcha_attempt must only be defined in the canonical \
+         captcha_browser module",
+    );
+    assert_pattern_only_in_files(
+        "async fn execute_browser_captcha_attempt_in_frame(",
+        &["features/captcha_browser.rs"],
+        "execute_browser_captcha_attempt_in_frame must only be defined in the canonical \
+         captcha_browser module",
+    );
+    // Checked as actual code forms (a real capture/import/struct-literal
+    // use), not prose — this frontier's own classification doc comments
+    // legitimately *name* BrowserChallengeSnapshot in English to explain
+    // why solvers.rs's browser binding does not yet use it.
+    let solvers =
+        fs::read_to_string(workspace_root().join("spider/src/features/solvers.rs")).unwrap();
+    for forbidden in [
+        "BrowserChallengeSnapshot::capture",
+        "use crate::features::browser_challenge::BrowserChallengeSnapshot",
+        "BrowserChallengeSnapshot {",
+    ] {
+        assert!(
+            !solvers.contains(forbidden),
+            "solvers.rs must not reimplement the canonical snapshot capture/revalidate/apply \
+             seam — it may only reuse CaptchaProviderRegistry/CaptchaRouteAttempts dispatch: \
+             found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_captcha_dispatch_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "CaptchaProviderRegistry::new()",
+                "solvers::cf_handle",
+                "solvers::imperva_handle",
+                "solvers::recaptcha_handle",
+                "solvers::geetest_handle",
+                "solvers::lemin_handle",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not construct its own CAPTCHA dispatch or call \
+                     production solver-gate internals directly — production CAPTCHA \
+                     execution is owned exclusively by the canonical seam plus the \
+                     classified solvers.rs handlers",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

@@ -1581,6 +1581,17 @@ pub fn contains_verification(text: &Vec<u8>) -> bool {
 }
 
 /// Handle protected pages via chrome. This does nothing without the real_browser feature enabled.
+///
+/// LEGACY_DOM_HEURISTIC (SCORPION_CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_001):
+/// no CAPTCHA provider is ever invoked here. This is DOM click/wait
+/// automation for Cloudflare Turnstile's non-interactive/managed mode
+/// (find the widget, click it, poll until it clears) — there is no
+/// visual challenge to reason about, so it is not a task the canonical
+/// `CaptchaProvider`/`CaptchaProviderRegistry` seam (`features/captcha.rs`,
+/// `features/captcha_browser.rs`) applies to. Retained as-is; see
+/// `docs/frontier/CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_SDD.md`
+/// for the full classification. Guardrailed: never claims canonical
+/// provider dispatch.
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 #[inline(always)]
 pub async fn cf_handle(
@@ -1726,6 +1737,15 @@ pub async fn cf_handle(
 }
 
 /// Handle imperva protected pages via chrome. This does nothing without the real_browser feature enabled.
+///
+/// LEGACY_DOM_HEURISTIC (SCORPION_CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_001):
+/// no CAPTCHA provider is ever invoked here, in any branch (hCaptcha
+/// checkbox click, native slider drag-to-edge, or generic interstitial
+/// wait). None of these require visual reasoning about challenge
+/// content, so none are a task the canonical `CaptchaProvider`/
+/// `CaptchaProviderRegistry` seam applies to. Retained as-is; see
+/// `docs/frontier/CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_SDD.md`.
+/// Guardrailed: never claims canonical provider dispatch.
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 #[inline(always)]
 pub async fn imperva_handle(
@@ -2206,7 +2226,19 @@ pub async fn solve_enterprise_with_browser_gemini(
         } => {
             let api_key = match std::env::var("GEMINI_API_KEY") {
                 Ok(api_key) => api_key,
-                Err(_) => return Ok(Vec::new()),
+                // Capability unavailable — never presented as a truthful
+                // empty selection. `CaptchaSolution::SelectedChoices(vec![])`
+                // is a legitimate answer only when a provider actually
+                // examined the tiles and concluded none apply (see
+                // `captcha.rs`'s own contract); no provider ran here at
+                // all, so returning `Ok(Vec::new())` would fabricate that
+                // claim. Fail closed instead.
+                Err(_) => {
+                    return Err(CdpError::msg(
+                        "recaptcha enterprise grid: local CAPTCHA provider unavailable and \
+                         GEMINI_API_KEY not set",
+                    ))
+                }
             };
             let permits = challenge
                 .tiles
@@ -2373,6 +2405,20 @@ pub async fn warm_gemini_model(page: &Page) -> Result<(), CdpError> {
 /// Handle reCAPTCHA checkbox (anchor iframe) via chrome.
 /// This does nothing without the real_browser feature enabled.
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
+/// CANONICAL_PROVIDER_DISPATCH_LEGACY_BINDING
+/// (SCORPION_CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_001): the
+/// enterprise-grid solve step (`solve_enterprise_with_browser_gemini`)
+/// already routes through the canonical `CaptchaProviderRegistry`/
+/// `CaptchaRouteAttempts::execute_explicit_attempt` (real capability
+/// prevalidation, no silent fallback). What is *not* yet canonical is the
+/// image capture and click/action application immediately around it —
+/// tile bytes come from an in-page `<canvas>` draw, and solved tile IDs
+/// are applied via direct DOM `click_smooth()`, not the canonical
+/// snapshot-capture/execution-seam pair (`captcha_browser.rs`).
+/// That migration is deliberately deferred — see
+/// `docs/frontier/CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_SDD.md`
+/// for why. Guardrailed: the provider-dispatch call remains present and
+/// unmodified.
 #[inline(always)]
 pub async fn recaptcha_handle(
     b: &mut Vec<u8>,
@@ -2847,6 +2893,17 @@ async fn solve_point_with_legacy_routing(
 
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 /// Lemin solve handler.
+///
+/// CANONICAL_PROVIDER_DISPATCH_LEGACY_BINDING
+/// (SCORPION_CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_001):
+/// the point solve step (`solve_point_with_legacy_routing`) already
+/// routes through the canonical `CaptchaProviderRegistry`/
+/// `CaptchaRouteAttempts::execute_explicit_attempt`. Image capture and
+/// click application immediately around it remain bespoke, not
+/// `BrowserChallengeSnapshot`/`execute_browser_captcha_attempt` — see
+/// `docs/frontier/CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_SDD.md`
+/// for why that migration is deferred. Guardrailed: the provider-dispatch
+/// call remains present and unmodified.
 pub async fn lemin_handle(
     b: &mut Vec<u8>,
     page: &Page,
@@ -3393,6 +3450,16 @@ async fn solve_geetest_with_local_language_model(
 
 /// Geetest solving
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
+/// CANONICAL_PROVIDER_DISPATCH_LEGACY_BINDING
+/// (SCORPION_CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_001): the
+/// horizontal-offset solve step (`solve_horizontal_offset_with_legacy_routing`)
+/// already routes through the canonical `CaptchaProviderRegistry`/
+/// `CaptchaRouteAttempts::execute_explicit_attempt`. Image capture and
+/// slider-drag application immediately around it remain bespoke, not
+/// `BrowserChallengeSnapshot`/`execute_browser_captcha_attempt` — see
+/// `docs/frontier/CANONICAL_PRODUCTION_CAPTCHA_EXECUTION_CONVERGENCE_SDD.md`
+/// for why that migration is deferred. Guardrailed: the provider-dispatch
+/// call remains present and unmodified.
 #[inline(always)]
 pub async fn geetest_handle(
     b: &mut Vec<u8>,

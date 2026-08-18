@@ -131,7 +131,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Status | Rule |
 |---|---|---|
-| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14), cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15), and change detection (`ChangeResult`/`ChangeEvent`, §3.16) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, a scheduled run executes through the canonical acquisition/evidence/transition path idempotently, and two of a watch's own durable evidence records can be truthfully compared and durably recorded. Still blocked, pending their own future frontiers: a background scheduler daemon deciding *when* a trigger fires, health, and a notification system. |
+| WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14), cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15), change detection (`ChangeResult`/`ChangeEvent`, §3.16), and operational health (`HealthStatus`/`ChangeDetectionReadiness`, §3.17) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, a scheduled run executes through the canonical acquisition/evidence/transition path idempotently, two of a watch's own durable evidence records can be truthfully compared and durably recorded, and the complete pipeline's truthful operational status can be read back without owning any of it. Still blocked, pending its own future frontier: a background scheduler daemon deciding *when* a trigger fires, and a notification system. |
 
 ### 3.9 Identity
 
@@ -439,6 +439,52 @@ no notification system, no generic event framework, and no `Job`/
 `Operation` model are implemented here — those remain later, separate
 frontiers.
 
+### 3.17 Watch Health / Operational Reconciliation
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Watch health | `spider/src/features/watch_health.rs` | `features/watch.rs` (read-only), `features/watch_schedule.rs` (read-only), `features/change_detection.rs` (read-only), `features/domain_persistence.rs`, `utils/evidence.rs` (`EvidenceRef::resolve`) | Scheduling, `WatchState` transitions, change computation, acquisition, retries, notifications, a generic monitoring framework, `Job`/`Operation`, a second `Watch`/`Evidence`/`Change` model, a second provider-health architecture | `HealthStatus`, `ChangeDetectionReadiness`, `WatchHealthReport`, `assess_watch_health()` | None |
+
+**Clarification on `watch_health.rs`:** Track 10 — the last of the
+health/notification pair Track 7's closure deferred (notifications
+remain out of scope). Purely observational: `assess_watch_health` calls
+only read functions — `watch::read_watch_definition`,
+`watch::read_current_watch_state`,
+`DomainPersistence::read_history`, `watch_schedule::read_watch_schedule`,
+`EvidenceRef::resolve`, `change_detection::read_change_event` — and never
+`apply_watch_transition`, `execute_scheduled_watch_run`,
+`define_watch_schedule`, or `detect_and_record_change`; it owns none of
+scheduling, `WatchState` transitions, change computation, acquisition, or
+retries (guardrailed: every write/mutation call form is proven absent
+from the module's own production code, distinct from its test fixtures).
+`HealthStatus` (`Unknown`/`Healthy`/`Degraded`/`Failed`) is applied only
+where each variant is truthfully, observationally reachable per
+dimension — scheduling and execution never claim `Degraded`/`Failed`
+purely because no durable, purely-observational signal for either exists
+without reaching into Track 8's private per-run claim bookkeeping, which
+this module deliberately does not do; evidence production is the one
+dimension where all four are genuinely reachable, since evidence
+resolution is directly, durably checkable. Type-level readiness is never
+confused with production exercise (rule #4): `ChangeDetectionReadiness`
+represents the two as structurally distinct enum variants —
+`TypeLevelReady` (the logic exists and would work, but no real
+`ChangeEvent` was found for this watch's most recent evidence pair) vs.
+`ProductionExercised` (one was actually found) — never a shared bare
+status field a caller could collapse into "the same thing."
+`ChangeEventId::derive` was made `pub(crate)` by this frontier
+specifically so this check can be made without recomputing a comparison
+(which would mean owning change computation) or duplicating its hashing
+formula. No duplication (rule #5): `WatchHealthReport` never embeds a
+`WatchState`, `EvidenceBundle`, or `ChangeEvent` — the most recent
+recorded comparison is referenced by `ChangeEventId` only. Provider-
+health reconciliation (rule #2): `ProviderDescriptor`/
+`ProviderCapabilities` were inspected and found to be pure declarative
+metadata with no runtime/health state of their own — the wrong shape to
+route watch-pipeline health through — and remain untouched; no
+`ProviderHealth`/`SourceHealth` type is introduced anywhere. No
+notifications, no generic monitoring framework, and no `Job`/`Operation`
+model are implemented here.
+
 ---
 
 ## 4. Canonical Path Map
@@ -652,7 +698,11 @@ interface may define its own scheduling/execution model, and no
 `ChangeResult`, `ChangeEvent`, `ChangeEventId`, `ChangeDetectionError`,
 `ComparisonBasis`, and `UncomparableReason` are only defined in
 `spider/src/features/change_detection.rs` (see §3.16) — no interface may
-define its own change detection model.
+define its own change detection model. `HealthStatus`,
+`ChangeDetectionReadiness`, `WatchHealthReport`, and `WatchHealthError`
+are only defined in `spider/src/features/watch_health.rs` (see §3.17) —
+no interface may define its own health model, and no
+`ProviderHealth`/`SourceHealth` type may be introduced anywhere.
 
 ### 7.7 THIN INTERFACES
 
@@ -893,5 +943,26 @@ The following are intentionally not refactored in this frontier:
   `execute_scheduled_watch_run` calls, not hand-built evidence; no
   health/notification/generic-event/`Job`/`Operation` capability is
   implemented; and none of it is shadowed by `spider_cli`/`spider_mcp`
+
+- `HealthStatus`/`ChangeDetectionReadiness`/`WatchHealthReport`/
+  `WatchHealthError` are each defined in exactly one canonical module
+  (`features/watch_health.rs`), gated behind `evidence`+`disk`+`cron`
+  (the same triple as `watch_schedule`, which it reads); the module's
+  own production code (excluding its test fixtures) never calls
+  `apply_watch_transition`/`execute_scheduled_watch_run`/
+  `define_watch_schedule`/`define_watch`/`detect_and_record_change`/
+  `record_evidence`/`append_history`/`write_current`, proving it owns no
+  scheduling, transition, computation, acquisition, or persistence-write
+  capability; `ChangeDetectionReadiness::ProductionExercised` is only
+  ever constructed inside the branch that actually found a durable
+  `ChangeEvent` via `read_change_event` — never inferred from a schedule
+  or evidence existing alone — keeping type-level readiness and
+  production exercise structurally unconflatable;
+  `WatchHealthReport` references its most recent comparison by
+  `ChangeEventId` only, never an embedded `WatchState`/`EvidenceBundle`/
+  `ChangeEvent`; no `ProviderHealth`/`SourceHealth` type exists anywhere
+  in `spider/src`, and `ProviderDescriptor` itself defines no `Health`
+  field or method; and none of it is shadowed by `spider_cli`/
+  `spider_mcp`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

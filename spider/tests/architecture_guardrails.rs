@@ -4513,3 +4513,235 @@ fn no_shadow_change_detection_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_HEALTH_AND_OPERATIONAL_RECONCILIATION_001 ---
+//
+// Track 10 of the frozen roadmap: canonical, purely observational health
+// for the complete watch pipeline (`HealthStatus`/
+// `ChangeDetectionReadiness`, in `features/watch_health.rs`). Reads only
+// — never calls apply_watch_transition/execute_scheduled_watch_run/
+// define_watch_schedule/detect_and_record_change. Keeps type-level
+// change-detection readiness structurally distinct from real production
+// exercise. No second provider-health architecture; `ProviderDescriptor`
+// remains untouched.
+
+#[test]
+fn health_types_are_defined_exactly_once() {
+    for (pattern, description) in [
+        (
+            "enum HealthStatus",
+            "HealthStatus must only be defined in the canonical watch_health module",
+        ),
+        (
+            "enum ChangeDetectionReadiness",
+            "ChangeDetectionReadiness must only be defined in the canonical watch_health module",
+        ),
+        (
+            "struct WatchHealthReport",
+            "WatchHealthReport must only be defined in the canonical watch_health module",
+        ),
+        (
+            "enum WatchHealthError",
+            "WatchHealthError must only be defined in the canonical watch_health module",
+        ),
+    ] {
+        assert_pattern_only_in_files(pattern, &["features/watch_health.rs"], description);
+    }
+}
+
+#[test]
+fn watch_health_module_gated_behind_evidence_disk_and_cron() {
+    let features_mod =
+        fs::read_to_string(workspace_root().join("spider/src/features/mod.rs")).unwrap();
+    let decl_index = features_mod
+        .find("pub mod watch_health;")
+        .expect("watch_health module not declared in features/mod.rs");
+    let preceding = &features_mod[..decl_index];
+    let gate_line = preceding
+        .lines()
+        .rev()
+        .find(|line| !line.trim_start().starts_with("///"))
+        .expect("expected a line before the module declaration");
+    assert_eq!(
+        gate_line.trim(),
+        "#[cfg(all(feature = \"evidence\", feature = \"disk\", feature = \"cron\"))]",
+        "watch_health must be gated exactly like watch_schedule (which it reads)"
+    );
+}
+
+#[test]
+fn watch_health_is_observational_only_never_a_write_owner() {
+    let full_source =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_health.rs")).unwrap();
+    // Scan production code only — `#[cfg(test)] mod tests` legitimately
+    // calls these same functions to set up fixtures (e.g. defining a
+    // watch and driving a real scheduled run to exercise health against
+    // real data), which is not this module itself owning them.
+    let watch_health = full_source
+        .split_once("#[cfg(test)]")
+        .map(|(production, _)| production)
+        .expect("expected a #[cfg(test)] module marker");
+    // Every canonical write/mutation entry point across Tracks 7-9 must
+    // never be called from this module — checked as real call forms
+    // (with the opening paren), not bare prose, since this module's own
+    // doc comment legitimately *names* every one of them in English to
+    // explain why they are absent.
+    for forbidden_call in [
+        "apply_watch_transition(",
+        "execute_scheduled_watch_run(",
+        "define_watch_schedule(",
+        "define_watch(",
+        "detect_and_record_change(",
+        "record_evidence(",
+        "append_history(",
+        "write_current(",
+    ] {
+        assert!(
+            !watch_health.contains(forbidden_call),
+            "watch_health.rs must be purely observational — it must never call a canonical \
+             write/mutation entry point: found {forbidden_call:?}"
+        );
+    }
+    // And it does call the canonical read entry points it depends on.
+    for required_call in [
+        "watch::read_watch_definition(",
+        "watch::read_current_watch_state(",
+        "watch_schedule::read_watch_schedule(",
+        "change_detection::read_change_event(",
+        ".resolve(store)",
+        ".read_history(",
+    ] {
+        assert!(
+            watch_health.contains(required_call),
+            "watch_health.rs must derive health from the canonical read seams: missing \
+             {required_call:?}"
+        );
+    }
+}
+
+#[test]
+fn change_detection_readiness_cannot_conflate_type_level_and_production_exercise() {
+    let watch_health =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_health.rs")).unwrap();
+    // The two states are separate enum variants, not two values of one
+    // bare HealthStatus field — structurally impossible to conflate.
+    assert!(watch_health.contains("enum ChangeDetectionReadiness"));
+    assert!(watch_health.contains("TypeLevelReady,"));
+    assert!(watch_health.contains("ProductionExercised {"));
+    // ProductionExercised is only ever constructed inside the branch that
+    // actually found a durable ChangeEvent — never inferred from evidence
+    // or schedule presence alone.
+    let match_index = watch_health
+        .find("match change_detection::read_change_event(store, &id)")
+        .expect("expected a read_change_event match");
+    let some_arm_index = watch_health[match_index..]
+        .find("Some(event) => {")
+        .expect("expected a Some(event) arm after the read_change_event match");
+    let production_exercised_index = watch_health[match_index..]
+        .find("Ok(ChangeDetectionReadiness::ProductionExercised {")
+        .expect("expected a ProductionExercised construction site");
+    assert!(
+        some_arm_index < production_exercised_index,
+        "ProductionExercised must only be constructed inside the Some(event) arm of the \
+         read_change_event match — never before a real ChangeEvent was actually found"
+    );
+}
+
+#[test]
+fn watch_health_never_duplicates_watch_state_evidence_bundle_or_change_event() {
+    let watch_health =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_health.rs")).unwrap();
+    for forbidden in [
+        "struct WatchState",
+        "enum WatchState",
+        "struct EvidenceBundle",
+        "struct ChangeEvent",
+    ] {
+        assert!(
+            !watch_health.contains(forbidden),
+            "watch_health.rs must reference WatchState/EvidenceBundle/ChangeEvent by reading \
+             them, never redefine or embed a duplicate: found {forbidden:?}"
+        );
+    }
+    // WatchHealthReport references the most recent comparison by
+    // ChangeEventId only, never a full ChangeEvent field.
+    assert!(watch_health.contains("most_recent_change_event: ChangeEventId,"));
+    assert!(!watch_health.contains("most_recent_change_event: ChangeEvent,"));
+}
+
+#[test]
+fn no_second_provider_health_architecture() {
+    for pattern in [
+        "struct ProviderHealth",
+        "enum ProviderHealth",
+        "struct SourceHealth",
+        "enum SourceHealth",
+    ] {
+        assert_pattern_only_in_files(
+            pattern,
+            &[],
+            "no second provider/source-health architecture may be introduced anywhere in \
+             spider/src — ProviderDescriptor/ProviderCapabilities remain the sole \
+             capability-declaration vocabulary for source providers",
+        );
+    }
+    let source_provider =
+        fs::read_to_string(workspace_root().join("spider/src/features/source_provider.rs"))
+            .unwrap();
+    assert!(source_provider.contains("pub struct ProviderDescriptor {"));
+    assert!(!source_provider.contains("Health"));
+}
+
+#[test]
+fn watch_health_never_implements_out_of_scope_capabilities() {
+    let watch_health =
+        fs::read_to_string(workspace_root().join("spider/src/features/watch_health.rs")).unwrap();
+    for forbidden in [
+        "struct Notification",
+        "enum Notification",
+        "struct Job",
+        "enum Job",
+        "struct Operation",
+        "enum Operation",
+        "struct Scheduler",
+        "struct WatchTarget",
+        "struct WatchSpec",
+        "EventSourc",
+        "struct MonitoringFramework",
+    ] {
+        assert!(
+            !watch_health.contains(forbidden),
+            "watch_health.rs must stay scoped to observational health assessment: found \
+             forbidden pattern {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn no_shadow_watch_health_model_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "enum HealthStatus",
+                "enum ChangeDetectionReadiness",
+                "struct WatchHealthReport",
+                "enum WatchHealthError",
+                "fn assess_watch_health",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — the canonical \
+                     health model is owned exclusively by spider::features::watch_health",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

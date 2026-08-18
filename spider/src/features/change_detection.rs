@@ -217,7 +217,15 @@ impl ChangeEventId {
     /// Wire-format prefix.
     pub const PREFIX: &'static str = "change_";
 
-    fn derive(
+    /// `pub(crate)` (not module-private) so a read-only, purely
+    /// observational caller — namely Track 10's `watch_health` — can
+    /// check "was this exact evidence pair ever actually compared"
+    /// (via [`read_change_event`]) without recomputing a comparison
+    /// itself, which would mean owning change computation rather than
+    /// only reading its already-durable result. This exposes no new
+    /// behavior: the formula is unchanged, and no crate-external caller
+    /// gains access to it.
+    pub(crate) fn derive(
         watch: WatchId,
         previous_evidence: EvidenceRef,
         current_evidence: EvidenceRef,

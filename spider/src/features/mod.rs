@@ -246,6 +246,19 @@ pub mod watch;
 #[cfg(all(feature = "evidence", feature = "disk", feature = "cron"))]
 pub mod watch_schedule;
 
+/// Canonical, purely observational health for the complete watch
+/// pipeline (`WatchDefinition → Scheduling → acquisition → EvidenceRef →
+/// WatchState → ChangeResult/ChangeEvent`): `HealthStatus`
+/// (Unknown/Healthy/Degraded/Failed, source-justified per dimension) and
+/// `ChangeDetectionReadiness` (structurally distinct `TypeLevelReady`
+/// vs. `ProductionExercised` variants, so the two can never be
+/// conflated). Reads only — never calls `apply_watch_transition`,
+/// `execute_scheduled_watch_run`, `define_watch_schedule`, or
+/// `detect_and_record_change`. Requires `evidence`+`disk`+`cron` (it
+/// reads `watch_schedule`). See `SCORPION_SDD.md` §5.2.
+#[cfg(all(feature = "evidence", feature = "disk", feature = "cron"))]
+pub mod watch_health;
+
 #[cfg(all(not(feature = "simd"), feature = "openai"))]
 pub(crate) use serde_json;
 #[cfg(all(feature = "simd", feature = "openai"))]

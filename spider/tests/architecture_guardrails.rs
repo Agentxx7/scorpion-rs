@@ -5167,3 +5167,302 @@ fn no_shadow_provenance_model_in_cli_or_mcp() {
         }
     }
 }
+
+// --- SECTION: SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001 ---
+//
+// Audit of every live path where authentication material could influence
+// cache identity, persisted cache content, or remote cache uploads.
+// Confirmed live gap: `cache_enabled()` (spider/src/utils/mod.rs) treated
+// `CacheOptions::Authorized` as cache-enabled for the Chrome/browser
+// write path (`set_document_content_if_requested_cached` ->
+// `page.spawn_cache_listener` -> chromiumoxide's CDP response listener),
+// which derived a site key from the live token, installed a remote-dump-
+// enabled listener, and never scrubbed intercepted request/response
+// headers — directly contradicting the already-fail-closed HTTP write
+// paths in the same file and `cacheable_request()`'s canonical rule in
+// `cache_request.rs`. `chromiumoxide::cache::manager::create_cache_key_raw`
+// also returned the raw, unhashed key string (only `create_site_key`
+// hashed its output) — any claim that blake3 hashing protected this
+// function was false; it now hashes too.
+
+fn read_vendor_chromey_file(relative_path: &str) -> String {
+    fs::read_to_string(workspace_root().join("vendor/chromey").join(relative_path))
+        .unwrap_or_else(|_| panic!("expected to read vendor/chromey/{relative_path}"))
+}
+
+#[test]
+fn chrome_cache_enabled_never_treats_authorized_as_cache_enabled() {
+    let utils_mod = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+    let start = utils_mod
+        .find("fn cache_enabled(cache_options: &Option<CacheOptions>) -> bool {")
+        .expect("expected to find cache_enabled");
+    let end = utils_mod[start..]
+        .find("\n}")
+        .map(|offset| start + offset)
+        .expect("expected a closing brace for cache_enabled");
+    let body = &utils_mod[start..end];
+    assert!(
+        body.contains("matches!(cache_options, Some(CacheOptions::Yes))"),
+        "cache_enabled must treat only CacheOptions::Yes as cache-enabled — Authorized/\
+         SkipBrowserAuthorized must never reach the Chrome cache-listener write path"
+    );
+    assert!(!body.contains("CacheOptions::Authorized"));
+    assert!(!body.contains("CacheOptions::SkipBrowser"));
+}
+
+#[test]
+fn legacy_write_paths_fail_closed_on_authorized_cache_options() {
+    let utils_mod = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+    // Every *implemented* occurrence of the functions named here must
+    // still contain the fail-closed match rejecting Authorized/
+    // SkipBrowserAuthorized before doing any cache work — a regression
+    // guardrail against someone removing the guard added by this
+    // frontier's prerequisite fix. Some of these functions also have a
+    // trivial no-op stub definition under a different cfg (e.g.
+    // `cache_chrome_response` without `cache_chrome_hybrid`); a stub
+    // with an empty body does no cache work at all, so it is exempt —
+    // detected here by the absence of any `create_cache_key_raw`/
+    // `create_cache_key` call, which every real implementation makes.
+    for anchor in [
+        "fn cache_chrome_response(",
+        "fn cache_http_response_skip_browser(",
+        "async fn cache_chrome_response_from_cdp_body(",
+        "async fn get_cached_url_base(",
+    ] {
+        let occurrences: Vec<_> = utils_mod.match_indices(anchor).map(|(i, _)| i).collect();
+        assert!(
+            !occurrences.is_empty(),
+            "expected to find at least one {anchor:?}"
+        );
+        let mut checked_at_least_one_real_implementation = false;
+        for start in occurrences {
+            let window = &utils_mod[start..(start + 3000).min(utils_mod.len())];
+            let is_real_implementation = window.contains("create_cache_key_raw(")
+                || window.contains("chromiumoxide::cache::remote::get_session_cache_item(");
+            if !is_real_implementation {
+                continue;
+            }
+            checked_at_least_one_real_implementation = true;
+            assert!(
+                window.contains("CacheOptions::Authorized(_)")
+                    && window.contains("CacheOptions::SkipBrowserAuthorized(_)"),
+                "{anchor} must fail closed on both CacheOptions::Authorized and \
+                 SkipBrowserAuthorized"
+            );
+        }
+        assert!(
+            checked_at_least_one_real_implementation,
+            "{anchor} — expected at least one real (non-stub) implementation to check"
+        );
+    }
+}
+
+#[test]
+fn cookie_jar_authentication_participates_in_cache_eligibility() {
+    let configuration =
+        fs::read_to_string(workspace_root().join("spider/src/configuration.rs")).unwrap();
+    let start = configuration
+        .find("pub(crate) fn get_cache_options(&self) -> Option<crate::utils::CacheOptions> {")
+        .expect("expected to find get_cache_options");
+    let end = configuration[start..]
+        .find("\n    }\n\n    /// Get the cache option to use for the run.")
+        .map(|offset| start + offset)
+        .expect("expected the end of get_cache_options");
+    let body = &configuration[start..end];
+    assert!(
+        body.contains("self.cookie_str"),
+        "get_cache_options must consider the configured cookie jar (cookie_str) — cookie-\
+         jar authentication must participate in cache eligibility exactly like an \
+         Authorization header does"
+    );
+    assert!(
+        body.contains("\"cookie\"") || body.contains("\"Cookie\""),
+        "get_cache_options must also consider an explicit Cookie request header"
+    );
+}
+
+#[test]
+fn disqualifying_secret_header_check_is_defined_once_per_crate_and_reused() {
+    // spider and chromey each keep their own copy (different feature-gate
+    // shapes prevent a shared cross-crate call in every build
+    // configuration — see the doc comment on spider's copy), but each
+    // must be defined exactly once within its own crate, and every
+    // legacy cache write path must call it.
+    assert_pattern_only_in_files(
+        "pub fn contains_disqualifying_secret_header(",
+        &["utils/mod.rs"],
+        "contains_disqualifying_secret_header must only be defined once in spider/src",
+    );
+
+    let utils_mod = fs::read_to_string(workspace_root().join("spider/src/utils/mod.rs")).unwrap();
+    for caller in [
+        "fn cache_chrome_response(",
+        "fn cache_http_response_skip_browser(",
+        "async fn cache_chrome_response_from_cdp_body(",
+    ] {
+        let start = utils_mod
+            .find(caller)
+            .unwrap_or_else(|| panic!("expected to find {caller:?}"));
+        let window = &utils_mod[start..(start + 3000).min(utils_mod.len())];
+        assert!(
+            window.contains("contains_disqualifying_secret_header("),
+            "{caller} must call contains_disqualifying_secret_header before caching \
+             or dumping anything"
+        );
+    }
+
+    let manager_rs = read_vendor_chromey_file("src/cache/manager.rs");
+    assert_eq!(
+        manager_rs
+            .matches("pub fn contains_disqualifying_secret_header(")
+            .count(),
+        1,
+        "contains_disqualifying_secret_header must only be defined once in \
+         vendor/chromey/src/cache/manager.rs"
+    );
+    for caller in [
+        "async fn handle_single_response(",
+        "pub async fn put_hybrid_cache(",
+    ] {
+        let start = manager_rs
+            .find(caller)
+            .unwrap_or_else(|| panic!("expected to find {caller:?}"));
+        let window = &manager_rs[start..(start + 3000).min(manager_rs.len())];
+        assert!(
+            window.contains("contains_disqualifying_secret_header("),
+            "{caller} must call contains_disqualifying_secret_header before caching \
+             or dumping anything"
+        );
+    }
+}
+
+#[test]
+fn vendor_chromey_cache_key_is_hashed_never_the_raw_credential() {
+    let manager_rs = read_vendor_chromey_file("src/cache/manager.rs");
+    let start = manager_rs
+        .find("pub fn create_cache_key_raw(")
+        .expect("expected to find create_cache_key_raw");
+    let end = manager_rs[start..]
+        .find("\n}")
+        .map(|offset| start + offset)
+        .expect("expected a closing brace for create_cache_key_raw");
+    let body = &manager_rs[start..end];
+    assert!(
+        body.contains("hash_key_v1(&raw)"),
+        "chromiumoxide::cache::manager::create_cache_key_raw must hash its composed key \
+         before returning it — a live Authorization/cookie-jar token must never become \
+         the literal key persisted to CACACHE_MANAGER's on-disk index or uploaded as a \
+         DumpJob::cache_key"
+    );
+    assert!(
+        !body.contains("format!(\"{method}:{uri}:{a}\")") || body.contains("let raw ="),
+        "the raw formatted string must be an intermediate value fed into the hash, never \
+         the function's direct return value"
+    );
+}
+
+#[test]
+fn canonical_cache_request_fails_closed_on_set_cookie_response() {
+    // Requirement #5 ("Authenticated responses and Set-Cookie-bearing
+    // responses must fail closed for cache persistence unless an explicit
+    // canonical policy proves them safe") applies to BOTH the legacy/
+    // vendor-chromey cache (covered above) and the canonical
+    // `cache_request.rs` executor. `cacheable_request()` only ever
+    // inspects the outgoing *request's* headers; nothing there can see a
+    // `Set-Cookie` header an origin only sends on the *response*. The fix
+    // is a response-side guard consulted by both `Middleware::policy` and
+    // `policy_with_options` — the only hooks that see the fetched
+    // response before `http-cache`'s `should_cache_response` decides
+    // storability — that forces `Cache-Control: no-store` (an absolute
+    // veto in `CachePolicy::is_storable`) whenever the response carries
+    // Set-Cookie.
+    let cache_request_rs =
+        fs::read_to_string(workspace_root().join("spider/src/cache_request.rs")).unwrap();
+
+    assert_eq!(
+        cache_request_rs
+            .matches("fn fail_closed_on_set_cookie(")
+            .count(),
+        1,
+        "the Set-Cookie response fail-closed guard must be defined exactly once"
+    );
+    let guard_start = cache_request_rs
+        .find("fn fail_closed_on_set_cookie(")
+        .expect("expected to find fail_closed_on_set_cookie");
+    let guard_window =
+        &cache_request_rs[guard_start..(guard_start + 800).min(cache_request_rs.len())];
+    assert!(
+        guard_window.contains("SET_COOKIE") && guard_window.contains("no-store"),
+        "fail_closed_on_set_cookie must check for a Set-Cookie response header and force \
+         a Cache-Control: no-store veto"
+    );
+
+    for hook in ["fn policy(", "fn policy_with_options("] {
+        let start = cache_request_rs
+            .find(hook)
+            .unwrap_or_else(|| panic!("expected to find {hook:?}"));
+        let window = &cache_request_rs[start..(start + 400).min(cache_request_rs.len())];
+        assert!(
+            window.contains("fail_closed_on_set_cookie("),
+            "{hook} must route the fetched response through fail_closed_on_set_cookie \
+             before constructing a CachePolicy — this is the only hook that sees the \
+             real response ahead of http-cache's storability decision"
+        );
+    }
+}
+
+#[test]
+fn canonical_cache_request_strips_set_cookie_from_304_revalidation_responses() {
+    // A deeper variant of the same invariant, found during this fix's own
+    // adversarial verification: `http-cache`'s 304/revalidation merge
+    // (`CachePolicy::after_response`) runs entirely outside the
+    // `Middleware::policy`/`policy_with_options` hooks and unconditionally
+    // re-persists its result via `CacheManager::put` — no
+    // `is_storable`/`should_cache_response` check in that branch at all —
+    // so `fail_closed_on_set_cookie` alone cannot close this write. The
+    // only remaining interception point is `remote_fetch`
+    // (`materialize_network_response`), which sees every raw network
+    // response, including 304s, before it re-enters http-cache's
+    // revalidation-merge internals.
+    let cache_request_rs =
+        fs::read_to_string(workspace_root().join("spider/src/cache_request.rs")).unwrap();
+    let start = cache_request_rs
+        .find("async fn materialize_network_response(")
+        .expect("expected to find materialize_network_response");
+    let window = &cache_request_rs[start..(start + 2200).min(cache_request_rs.len())];
+    assert!(
+        window.contains("304") && window.contains("SET_COOKIE"),
+        "materialize_network_response must strip Set-Cookie from 304 Not Modified \
+         responses before they can reach http-cache's unconditional revalidation \
+         re-persist"
+    );
+}
+
+#[test]
+fn no_shadow_credential_aware_cache_policy_in_cli_or_mcp() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for crate_dir in ["spider_cli/src", "spider_mcp/src"] {
+        let dir = manifest_dir.parent().unwrap().join(crate_dir);
+        if !dir.exists() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            for shadow in [
+                "fn create_cache_key_raw(",
+                "fn contains_disqualifying_secret_header(",
+                "fn cache_enabled(",
+                "fn get_cache_options(",
+            ] {
+                assert!(
+                    !file.contents.contains(shadow),
+                    "{crate_dir}/{} must not define its own {shadow:?} — canonical cache-\
+                     identity and credential-isolation policy is owned exclusively by \
+                     spider::utils and chromiumoxide::cache::manager",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}

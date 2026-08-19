@@ -2739,13 +2739,22 @@ impl Configuration {
     }
 
     /// Get the cache option to use for the run. This does nothing without the 'cache_request' feature.
+    ///
+    /// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: cookie-jar
+    /// authentication (`self.cookie_str`, or an explicit `Cookie` header)
+    /// must participate in this classification exactly like an
+    /// `Authorization` header does. A credential injected at send-time
+    /// through the cookie jar is still a credential — treating it as
+    /// "unauthenticated" here would let it silently bypass every
+    /// downstream fail-closed check keyed on `CacheOptions::Authorized`/
+    /// `SkipBrowserAuthorized`.
     #[cfg(any(feature = "cache_request", feature = "chrome_remote_cache"))]
     pub(crate) fn get_cache_options(&self) -> Option<crate::utils::CacheOptions> {
         use crate::utils::CacheOptions;
         if !self.cache {
             return None;
         }
-        let auth_token = self
+        let header_auth_token = self
             .headers
             .as_ref()
             .and_then(|headers| {
@@ -2754,7 +2763,20 @@ impl Configuration {
                     .get("authorization")
                     .or_else(|| headers.0.get("Authorization"))
             })
-            .map(|s| s.to_owned());
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
+        let cookie_auth_token = if !self.cookie_str.is_empty() {
+            Some(self.cookie_str.clone())
+        } else {
+            self.headers
+                .as_ref()
+                .and_then(|headers| headers.0.get("cookie").or_else(|| headers.0.get("Cookie")))
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+
+        let auth_token = header_auth_token.or(cookie_auth_token);
 
         // When using in-memory cache (cache_mem), auto-enable skip_browser
         // since the cached HTML was already rendered by a prior Chrome crawl
@@ -2767,16 +2789,10 @@ impl Configuration {
 
         match auth_token {
             Some(token) if !token.is_empty() => {
-                if let Ok(token_str) = token.to_str() {
-                    if skip_browser {
-                        Some(CacheOptions::SkipBrowserAuthorized(token_str.into()))
-                    } else {
-                        Some(CacheOptions::Authorized(token_str.into()))
-                    }
-                } else if skip_browser {
-                    Some(CacheOptions::SkipBrowser)
+                if skip_browser {
+                    Some(CacheOptions::SkipBrowserAuthorized(token))
                 } else {
-                    Some(CacheOptions::Yes)
+                    Some(CacheOptions::Authorized(token))
                 }
             }
             _ => {
@@ -3605,6 +3621,115 @@ mod tests {
         assert!(config.whitelist_url.is_none());
         assert!(config.proxies.is_none());
         assert!(!config.http2_prior_knowledge);
+    }
+
+    // SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001
+    #[cfg(any(feature = "cache_request", feature = "chrome_remote_cache"))]
+    mod get_cache_options_tests {
+        use super::*;
+        use crate::utils::CacheOptions;
+
+        fn config_with_cache() -> Configuration {
+            let mut config = Configuration::default();
+            config.cache = true;
+            config
+        }
+
+        #[test]
+        fn no_cache_flag_is_none_regardless_of_credentials() {
+            let mut config = Configuration::default();
+            config.cache = false;
+            config.cookie_str = "session=abc".to_string();
+            assert_eq!(config.get_cache_options(), None);
+        }
+
+        #[test]
+        fn no_credentials_and_no_cache_mem_is_plain_yes() {
+            let config = config_with_cache();
+            #[cfg(not(feature = "cache_mem"))]
+            assert_eq!(config.get_cache_options(), Some(CacheOptions::Yes));
+            #[cfg(feature = "cache_mem")]
+            assert_eq!(config.get_cache_options(), Some(CacheOptions::SkipBrowser));
+        }
+
+        #[test]
+        fn authorization_header_is_classified_authorized() {
+            let mut config = config_with_cache();
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_static("Bearer live-token"),
+            );
+            config.with_headers(Some(headers));
+            match config.get_cache_options() {
+                Some(CacheOptions::Authorized(token)) => assert_eq!(token, "Bearer live-token"),
+                #[cfg(feature = "cache_mem")]
+                Some(CacheOptions::SkipBrowserAuthorized(token)) => {
+                    assert_eq!(token, "Bearer live-token")
+                }
+                other => panic!("expected an Authorized classification, got {other:?}"),
+            }
+        }
+
+        /// The credential-cache-isolation invariant this frontier closes:
+        /// cookie-jar authentication (`cookie_str`) must participate in
+        /// cache eligibility exactly like an `Authorization` header does
+        /// — it must never be silently classified as unauthenticated.
+        #[test]
+        fn cookie_jar_authentication_is_classified_authorized() {
+            let mut config = config_with_cache();
+            config.cookie_str = "session=live-session-token".to_string();
+            match config.get_cache_options() {
+                Some(CacheOptions::Authorized(token)) => {
+                    assert_eq!(token, "session=live-session-token")
+                }
+                #[cfg(feature = "cache_mem")]
+                Some(CacheOptions::SkipBrowserAuthorized(token)) => {
+                    assert_eq!(token, "session=live-session-token")
+                }
+                other => panic!("expected an Authorized classification, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn explicit_cookie_header_is_classified_authorized() {
+            let mut config = config_with_cache();
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::COOKIE,
+                reqwest::header::HeaderValue::from_static("session=via-header"),
+            );
+            config.with_headers(Some(headers));
+            let options = config.get_cache_options();
+            assert!(
+                matches!(
+                    options,
+                    Some(CacheOptions::Authorized(_))
+                        | Some(CacheOptions::SkipBrowserAuthorized(_))
+                ),
+                "expected an Authorized classification, got {options:?}"
+            );
+        }
+
+        #[test]
+        fn authorization_header_takes_precedence_over_cookie_str() {
+            // Both signals present — the classification must still be
+            // Authorized (which signal "wins" for the embedded token is
+            // an implementation detail; what matters is that neither
+            // credential is silently dropped from consideration).
+            let mut config = config_with_cache();
+            config.cookie_str = "session=abc".to_string();
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_static("Bearer x"),
+            );
+            config.with_headers(Some(headers));
+            assert!(matches!(
+                config.get_cache_options(),
+                Some(CacheOptions::Authorized(_)) | Some(CacheOptions::SkipBrowserAuthorized(_))
+            ));
+        }
     }
 
     #[test]

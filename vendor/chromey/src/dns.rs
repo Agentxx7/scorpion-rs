@@ -134,7 +134,13 @@ fn store(k: String, addrs: Arc<[SocketAddr]>) {
         CACHE.retain(|_, e| e.at.elapsed() <= TTL);
     }
     if CACHE.len() < HARD_CAP {
-        CACHE.insert(k, Entry { addrs, at: Instant::now() });
+        CACHE.insert(
+            k,
+            Entry {
+                addrs,
+                at: Instant::now(),
+            },
+        );
     }
 }
 
@@ -144,7 +150,9 @@ async fn lookup(host: &str, port: u16) -> Result<Arc<[SocketAddr]>> {
         .map_err(CdpError::Io)?
         .collect();
     if addrs.is_empty() {
-        return Err(CdpError::msg(format!("dns: no addresses for {host}:{port}")));
+        return Err(CdpError::msg(format!(
+            "dns: no addresses for {host}:{port}"
+        )));
     }
     Ok(Arc::from(addrs.into_boxed_slice()))
 }
@@ -180,7 +188,10 @@ mod tests {
         // The port distinguishes endpoints (e.g. per-peer listeners) — caching
         // must never collapse two ports of the same host into one entry.
         assert_ne!(key("h2", 9222), key("h2", 9223));
-        store(key("h2", 9222), Arc::from(vec![sa(9222)].into_boxed_slice()));
+        store(
+            key("h2", 9222),
+            Arc::from(vec![sa(9222)].into_boxed_slice()),
+        );
         assert!(fresh(&key("h2", 9222)).is_some());
         assert!(fresh(&key("h2", 9223)).is_none());
         invalidate("h2", 9222);

@@ -2494,6 +2494,15 @@ pub async fn cache_chrome_response(
     ) {
         return;
     }
+    // Defense in depth, independent of the CacheOptions classification
+    // above: a credential this caller never classified as "auth" (a raw
+    // Cookie header, Proxy-Authorization, an origin's Set-Cookie) must
+    // still never reach the cache or a remote upload.
+    if contains_disqualifying_secret_header(&chrome_http_req_res.request_headers)
+        || contains_disqualifying_secret_header(&chrome_http_req_res.response_headers)
+    {
+        return;
+    }
     let cache_key = create_cache_key_raw(
         target_url,
         Some(&chrome_http_req_res.method),
@@ -2674,6 +2683,15 @@ pub async fn cache_http_response_skip_browser(
         })
         .unwrap_or_default();
 
+    // Defense in depth, independent of the CacheOptions classification
+    // above: an origin's Set-Cookie response must never reach the remote
+    // dump payload. `request_headers` is always empty on this path (see
+    // `DumpJob` construction below), so only the response side needs the
+    // check here.
+    if contains_disqualifying_secret_header(&response_headers) {
+        return;
+    }
+
     // Best-effort detection of HTTP version from headers; defaults to HTTP/1.1
     // since reqwest does not expose the negotiated version on `HeaderMap`.
     let http_version = spider_remote_cache::HttpVersion::Http11;
@@ -2758,6 +2776,13 @@ async fn cache_chrome_response_from_cdp_body(
         cache_options,
         Some(CacheOptions::Authorized(_)) | Some(CacheOptions::SkipBrowserAuthorized(_))
     ) {
+        return;
+    }
+    // Defense in depth, independent of the CacheOptions classification
+    // above — see `cache_chrome_response`'s identical check.
+    if contains_disqualifying_secret_header(&chrome_http_req_res.request_headers)
+        || contains_disqualifying_secret_header(&chrome_http_req_res.response_headers)
+    {
         return;
     }
 
@@ -3180,11 +3205,23 @@ async fn navigate_if_requested_cache(
 
 #[cfg(all(feature = "chrome", feature = "chrome_remote_cache"))]
 /// Is cache enabled?
+///
+/// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: `CacheOptions::Authorized`
+/// deliberately does **not** count as "enabled" here. This is the gate
+/// that decides whether `set_document_content_if_requested_cached` runs
+/// — and that function derives a cache site key from the live
+/// credential, installs a browser-side response listener, and (unless
+/// explicitly read-only) enqueues every intercepted response for remote
+/// upload. Treating an authenticated request as cache-enabled here would
+/// let a live Authorization/cookie-jar token drive real caching and
+/// remote-dump behavior, directly contradicting `cacheable_request()`'s
+/// canonical rule in `cache_request.rs` (never persist an authenticated
+/// request, full stop — not even partitioned by credential) and the
+/// fail-closed guard every other legacy write path in this module
+/// already enforces (`cache_chrome_response`, `cache_http_response_skip_browser`,
+/// `cache_chrome_response_from_cdp_body`, `get_cached_url_base`).
 fn cache_enabled(cache_options: &Option<CacheOptions>) -> bool {
-    matches!(
-        cache_options,
-        Some(CacheOptions::Yes | CacheOptions::Authorized(_))
-    )
+    matches!(cache_options, Some(CacheOptions::Yes))
 }
 
 #[cfg(all(feature = "chrome", feature = "chrome_remote_cache"))]
@@ -8547,6 +8584,24 @@ pub async fn fetch_page_html_seeded<'h>(
 /// device profile, …) never collide on the same cached bytes. Passing `None`
 /// produces the same key format as before this parameter existed, preserving
 /// backward compatibility with existing cache stores.
+///
+/// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: unlike
+/// [`chromiumoxide::cache::manager::create_cache_key_raw`] (which now
+/// hashes its output), this function still returns the raw, unhashed
+/// `format!` string — its `auth` component is never persisted through
+/// this crate's own credential-aware guards for a different reason: no
+/// production caller in this crate ever passes a real credential here at
+/// all. Every write path that calls this function
+/// (`cache_chrome_response`, `cache_http_response_skip_browser`,
+/// `cache_chrome_response_from_cdp_body`) and every read path
+/// (`get_cached_url_base`) already fails closed on
+/// `CacheOptions::Authorized`/`SkipBrowserAuthorized` *before* reaching
+/// this call, and always pass `auth: None` even when they do reach it.
+/// `auth` remains a parameter only for backward wire-format compatibility
+/// with existing on-disk cache stores keyed by this function's exact
+/// output shape — it must never be given a real token. A guardrail
+/// (`architecture_guardrails.rs`) enforces that no call site in this
+/// crate passes anything but `None` for `auth`.
 pub fn create_cache_key_raw(
     uri: &str,
     override_method: Option<&str>,
@@ -8576,6 +8631,36 @@ pub fn create_cache_key(
         auth,
         namespace,
     )
+}
+
+#[cfg(any(feature = "cache", feature = "cache_mem"))]
+/// Case-insensitive check for any header name whose *value* must never
+/// be persisted to a legacy hybrid-cache write or a remote cache dump:
+/// `Authorization`, `Cookie`, `Proxy-Authorization`, and `Set-Cookie`.
+///
+/// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: the shared
+/// disqualification check every legacy write path in this module must
+/// consult before persisting or dumping anything — independent of, and
+/// in addition to, any `CacheOptions`-level authorized/unauthorized
+/// classification, so a credential carried by a header a caller never
+/// classified as "auth" can never bypass this by construction. A
+/// structurally identical check exists in `chromiumoxide::cache::manager`
+/// (`contains_disqualifying_secret_header`) for chromey's own write
+/// paths; this crate keeps its own copy because not every feature
+/// combination that reaches these functions (`cache`/`cache_mem`/
+/// `cache_request`, independent of `chrome_remote_cache`) actually
+/// depends on the `chromey`/`_cache` feature that gates chromiumoxide's
+/// cache module at all.
+pub fn contains_disqualifying_secret_header(
+    headers: &std::collections::HashMap<String, String>,
+) -> bool {
+    headers.keys().any(|name| {
+        let lower = name.to_ascii_lowercase();
+        lower == "authorization"
+            || lower == "cookie"
+            || lower == "proxy-authorization"
+            || lower == "set-cookie"
+    })
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -12122,6 +12207,52 @@ error was encountered while trying to use an ErrorDocument to handle the request
             create_cache_key_raw("https://example.com", None, None, Some("us")),
             create_cache_key_raw("https://example.com", None, None, Some("gb")),
         );
+    }
+
+    // SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001
+    #[cfg(any(feature = "cache", feature = "cache_mem"))]
+    #[test]
+    fn test_contains_disqualifying_secret_header() {
+        for name in [
+            "Authorization",
+            "authorization",
+            "Cookie",
+            "cookie",
+            "Proxy-Authorization",
+            "proxy-authorization",
+            "Set-Cookie",
+            "set-cookie",
+        ] {
+            let mut headers = std::collections::HashMap::new();
+            headers.insert(name.to_string(), "secret-value".to_string());
+            assert!(
+                contains_disqualifying_secret_header(&headers),
+                "{name} must be detected"
+            );
+        }
+
+        let mut ordinary = std::collections::HashMap::new();
+        ordinary.insert("content-type".to_string(), "text/html".to_string());
+        ordinary.insert("x-request-id".to_string(), "abc-123".to_string());
+        assert!(!contains_disqualifying_secret_header(&ordinary));
+        assert!(!contains_disqualifying_secret_header(
+            &std::collections::HashMap::new()
+        ));
+    }
+
+    #[cfg(all(feature = "chrome", feature = "chrome_remote_cache"))]
+    #[test]
+    fn test_cache_enabled_excludes_authorized() {
+        assert!(cache_enabled(&Some(CacheOptions::Yes)));
+        assert!(!cache_enabled(&Some(CacheOptions::Authorized(
+            "live-token".to_string()
+        ))));
+        assert!(!cache_enabled(&Some(CacheOptions::SkipBrowserAuthorized(
+            "live-token".to_string()
+        ))));
+        assert!(!cache_enabled(&Some(CacheOptions::SkipBrowser)));
+        assert!(!cache_enabled(&Some(CacheOptions::No)));
+        assert!(!cache_enabled(&None));
     }
 
     #[cfg(feature = "cache_chrome_hybrid")]

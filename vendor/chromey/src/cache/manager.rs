@@ -163,22 +163,67 @@ pub async fn rewrite_base_tag(html: &[u8], base_url: Option<&str>) -> String {
     auto_encoder::auto_encode_bytes(&buffer)
 }
 
+/// Hash the key.
+fn hash_key_v1(s: &str) -> String {
+    hex::encode(blake3::hash(s.as_bytes()).as_bytes())
+}
+
 /// Create the cache key from string.
+///
+/// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: `auth`, when
+/// supplied, may be a live credential (an `Authorization` header value,
+/// a cookie-jar token, …) — the *caller's* problem to keep out of here
+/// in the first place, but this function must never re-expose it if one
+/// slips through. The composed `{method}:{uri}:{auth}` string is hashed
+/// (blake3, the same primitive [`create_site_key`] already uses) before
+/// it is returned, so the value actually persisted to `CACACHE_MANAGER`'s
+/// on-disk index metadata, or uploaded as a `DumpJob::cache_key`, is
+/// always an opaque digest — never the raw credential. Previously this
+/// returned the raw, unhashed `format!` string; only [`create_site_key`]
+/// hashed its output, which meant any doc/comment treating the two as
+/// equally protected was wrong for this function specifically. Hashing
+/// happens on every call (production and read/lookup alike) so identical
+/// inputs still produce identical keys — cache round-tripping is
+/// unaffected.
 pub fn create_cache_key_raw(
     uri: &str,
     override_method: Option<&str>,
     auth: Option<&str>,
 ) -> String {
     let method = override_method.unwrap_or("GET");
-    match auth {
+    let raw = match auth {
         Some(a) => format!("{method}:{uri}:{a}"),
         None => format!("{method}:{uri}"),
-    }
+    };
+    hash_key_v1(&raw)
 }
 
-/// Hash the key.
-fn hash_key_v1(s: &str) -> String {
-    hex::encode(blake3::hash(s.as_bytes()).as_bytes())
+/// Case-insensitive check for any header name whose *value* must never
+/// be persisted to the local cache index, uploaded to a remote cache
+/// server, or otherwise leave process memory as part of cache
+/// bookkeeping: `Authorization`, `Cookie`, `Proxy-Authorization`, and
+/// `Set-Cookie`. Applied to both request and response header maps —
+/// `Set-Cookie` is ordinarily a response header, but this checks whatever
+/// map it's given, so a caller can pass either (or both) without the
+/// check itself deciding which side it means.
+///
+/// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: this is the shared
+/// disqualification check every hybrid-cache write path in this module
+/// (and `spider`'s own legacy write paths, which call this exact
+/// function) must consult before persisting or dumping anything —
+/// independent of, and in addition to, any `CacheOptions`-level
+/// authorized/unauthorized classification, so a credential carried by a
+/// header a caller never classified as "auth" (a raw `Cookie` header set
+/// directly, a `Proxy-Authorization` header, an origin's `Set-Cookie`
+/// response) can never bypass this by construction.
+pub fn contains_disqualifying_secret_header(headers: &HashMap<String, String>) -> bool {
+    headers.keys().any(|name| {
+        let lower = name.to_ascii_lowercase();
+        lower == "authorization"
+            || lower == "cookie"
+            || lower == "proxy-authorization"
+            || lower == "set-cookie"
+    })
 }
 
 /// Site/page grouping key (used for site:{site_key}::{resource_key})
@@ -306,6 +351,16 @@ pub async fn put_hybrid_cache(
 
     // Never cache empty or near-empty HTML responses.
     if is_body_empty_for_cache(&http_response.body) {
+        return;
+    }
+
+    // Fail closed: never persist locally or dump remotely a
+    // request/response carrying Authorization/Cookie/Proxy-Authorization/
+    // Set-Cookie. Independent of any caller-side CacheOptions
+    // classification — see `contains_disqualifying_secret_header`.
+    if contains_disqualifying_secret_header(&http_request_headers)
+        || contains_disqualifying_secret_header(&http_response.headers)
+    {
         return;
     }
 
@@ -646,6 +701,20 @@ async fn handle_single_response(
             .as_ref()
             .map(headers_to_string_map)
             .unwrap_or_default();
+
+        // Fail closed: never cache locally, seed the session cache, or
+        // enqueue a remote dump for a request/response carrying
+        // Authorization/Cookie/Proxy-Authorization/Set-Cookie — this is
+        // real, live browser-intercepted traffic, so the headers here are
+        // never a caller-controlled fixture. Independent of `auth`/
+        // `CacheOptions` classification upstream, so a credential this
+        // module was never told about (a raw `Cookie` header, an origin's
+        // `Set-Cookie`) still can't reach the cache or a remote upload.
+        if contains_disqualifying_secret_header(&req_headers)
+            || contains_disqualifying_secret_header(&resp_headers)
+        {
+            return Ok(());
+        }
 
         let url = &ev.response.url;
         let status = ev.response.status as u16;

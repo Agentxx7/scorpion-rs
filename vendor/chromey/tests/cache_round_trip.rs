@@ -380,20 +380,31 @@ async fn test_dump_with_auth() {
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Verify the payload includes auth in the cache_key
+    // SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001: the resource key
+    // uploaded to the remote cache server must never expose the raw
+    // credential — `create_cache_key_raw` hashes it (blake3) before
+    // returning, so the auth value is present only as an input to a
+    // one-way digest, never as a literal substring.
     {
         let s = store.lock().await;
         let entries = s.get(&cache_site).expect("no entries");
         assert_eq!(entries.len(), 1);
 
         let entry = &entries[0];
-        // resource_key should contain auth
         let resource_key = entry["resource_key"].as_str().unwrap();
         assert!(
-            resource_key.contains("bearer_token_123"),
-            "resource_key should include auth: {}",
+            !resource_key.contains("bearer_token_123"),
+            "resource_key must never expose the raw credential: {}",
             resource_key
         );
+        // Still exactly what create_cache_key_raw produced for this
+        // (uri, method, auth) triple — deterministic, just opaque.
+        assert_eq!(resource_key, cache_key);
+        // A different auth value must produce a different key (the
+        // credential still meaningfully participates in the digest —
+        // this isn't just discarded).
+        let other_key = create_cache_key_raw(test_url, Some(method), Some("different_token"));
+        assert_ne!(resource_key, other_key);
         assert_eq!(entry["http_version"].as_str().unwrap(), "H2");
     }
 
@@ -457,7 +468,9 @@ async fn test_cache_key_consistency() {
     let dump_key = create_cache_key_raw(url, Some("GET"), auth);
     let retrieve_key = create_cache_key_raw(url, None, auth);
 
-    // Both should produce "GET:url:auth" since None defaults to GET
+    // None defaults to GET, so both calls hash the same "GET:url:auth"
+    // input — the keys must still match even though the output itself is
+    // now an opaque blake3 digest, not the raw formatted string.
     assert_eq!(
         dump_key, retrieve_key,
         "dump and retrieve cache keys must match"
@@ -641,6 +654,7 @@ async fn test_cache_policy_uses_correct_headers() {
         "GET",
         request_headers.clone(),
         None, // no remote dump — just local + session cache
+        false,
     )
     .await;
 
@@ -738,6 +752,7 @@ async fn test_put_hybrid_cache_cold_cache_dumps_to_remote() {
         "GET",
         HashMap::new(),
         Some(&base_url),
+        false,
     )
     .await;
 
@@ -806,6 +821,7 @@ async fn test_put_hybrid_cache_full_round_trip() {
         "GET",
         HashMap::new(),
         Some(&base_url),
+        false,
     )
     .await;
 
@@ -834,5 +850,161 @@ async fn test_put_hybrid_cache_full_round_trip() {
         http_res.headers.get("x-custom").unwrap(),
         "preserved",
         "custom headers must survive round-trip"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cache_key_never_exposes_a_raw_credential() {
+    use chromiumoxide::cache::manager::create_cache_key_raw;
+
+    const SECRET: &str = "sk-live-super-secret-token-abc123";
+    let key = create_cache_key_raw("https://example.test/resource", Some("GET"), Some(SECRET));
+    assert!(
+        !key.contains(SECRET),
+        "cache key must never contain the raw credential: {key}"
+    );
+    // Deterministic: the same triple always hashes to the same key.
+    let key2 = create_cache_key_raw("https://example.test/resource", Some("GET"), Some(SECRET));
+    assert_eq!(key, key2);
+    // A different credential produces a different key — the credential
+    // still meaningfully participates, it just never appears literally.
+    let other = create_cache_key_raw(
+        "https://example.test/resource",
+        Some("GET"),
+        Some("a-different-secret"),
+    );
+    assert_ne!(key, other);
+}
+
+#[test]
+fn disqualifying_secret_header_detection_is_case_insensitive_and_exhaustive() {
+    use chromiumoxide::cache::manager::contains_disqualifying_secret_header;
+
+    for name in ["Authorization", "authorization", "AUTHORIZATION"] {
+        let mut headers = HashMap::new();
+        headers.insert(name.to_string(), "Bearer x".to_string());
+        assert!(contains_disqualifying_secret_header(&headers), "{name}");
+    }
+    for name in ["Cookie", "cookie"] {
+        let mut headers = HashMap::new();
+        headers.insert(name.to_string(), "session=abc".to_string());
+        assert!(contains_disqualifying_secret_header(&headers), "{name}");
+    }
+    for name in ["Proxy-Authorization", "proxy-authorization"] {
+        let mut headers = HashMap::new();
+        headers.insert(name.to_string(), "Basic xyz".to_string());
+        assert!(contains_disqualifying_secret_header(&headers), "{name}");
+    }
+    for name in ["Set-Cookie", "set-cookie"] {
+        let mut headers = HashMap::new();
+        headers.insert(name.to_string(), "session=abc; Path=/".to_string());
+        assert!(contains_disqualifying_secret_header(&headers), "{name}");
+    }
+
+    let mut ordinary = HashMap::new();
+    ordinary.insert("content-type".to_string(), "text/html".to_string());
+    ordinary.insert("x-custom".to_string(), "value".to_string());
+    assert!(!contains_disqualifying_secret_header(&ordinary));
+    assert!(!contains_disqualifying_secret_header(&HashMap::new()));
+}
+
+#[tokio::test]
+async fn put_hybrid_cache_fails_closed_on_authorization_request_header() {
+    let (base_url, store, _handle) = start_mock_server().await;
+    init_remote_dump_worker(100, 50, 5000).await;
+
+    let url = "https://authz-header-test.example.com/secret";
+    let cache_key = create_cache_key_raw(url, Some("GET"), None);
+    let cache_site = site_key_for_target_url(url, None, None);
+    LOCAL_SESSION_CACHE.remove(&cache_site);
+
+    let mut request_headers = HashMap::new();
+    request_headers.insert(
+        "Authorization".to_string(),
+        "Bearer super-secret".to_string(),
+    );
+
+    let http_response = HttpResponse {
+        body: b"protected body".to_vec(),
+        headers: HashMap::new(),
+        status: 200,
+        url: url::Url::parse(url).unwrap(),
+        version: HttpVersion::Http11,
+    };
+
+    put_hybrid_cache(
+        &cache_key,
+        &cache_site,
+        http_response,
+        "GET",
+        request_headers,
+        Some(&base_url),
+        false,
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Nothing local, nothing remote.
+    assert!(
+        get_session_cache_item(&cache_site, &format!("GET:{url}")).is_none(),
+        "an Authorization-bearing request must never populate the session cache"
+    );
+    let s = store.lock().await;
+    assert!(
+        s.get(&cache_site).is_none(),
+        "an Authorization-bearing request must never be dumped to the remote cache"
+    );
+}
+
+#[tokio::test]
+async fn put_hybrid_cache_fails_closed_on_set_cookie_response_header() {
+    let (base_url, store, _handle) = start_mock_server().await;
+    init_remote_dump_worker(100, 50, 5000).await;
+
+    let url = "https://set-cookie-test.example.com/login";
+    let cache_key = create_cache_key_raw(url, Some("GET"), None);
+    let cache_site = site_key_for_target_url(url, None, None);
+    LOCAL_SESSION_CACHE.remove(&cache_site);
+
+    let mut response_headers = HashMap::new();
+    response_headers.insert(
+        "Set-Cookie".to_string(),
+        "session=newly-issued; HttpOnly".to_string(),
+    );
+
+    let http_response = HttpResponse {
+        body: b"welcome back".to_vec(),
+        headers: response_headers,
+        status: 200,
+        url: url::Url::parse(url).unwrap(),
+        version: HttpVersion::Http11,
+    };
+
+    put_hybrid_cache(
+        &cache_key,
+        &cache_site,
+        http_response,
+        "GET",
+        HashMap::new(),
+        Some(&base_url),
+        false,
+    )
+    .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert!(
+        get_session_cache_item(&cache_site, &format!("GET:{url}")).is_none(),
+        "a Set-Cookie-bearing response must never populate the session cache"
+    );
+    let s = store.lock().await;
+    assert!(
+        s.get(&cache_site).is_none(),
+        "a Set-Cookie-bearing response must never be dumped to the remote cache"
     );
 }

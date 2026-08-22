@@ -251,6 +251,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Reopened durable research session: research_id={} state={:?}",
             reopened_session.id, reopened_session.state
         );
+        let reopened_result = reopened_session.result.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("durable research session {research_id} has no reopened result payload"),
+            )
+        })?;
+        for extraction in &reopened_result.extractions {
+            println!(
+                "Reopened durable extraction: source=Source {} evidence_id={} extraction_input_bytes={} finish_reason={:?} facts={} missing_evidence={} json={}",
+                extraction.source_number,
+                extraction.evidence.id(),
+                extraction.extraction_input_bytes,
+                extraction.finish_reason,
+                extraction.extracted.facts.len(),
+                extraction.extracted.missing_evidence.len(),
+                bounded_preview(&serde_json::to_string_pretty(&extraction.extracted)?)
+            );
+        }
+        if let Some(synthesis) = &reopened_result.synthesis {
+            println!("Reopened durable final synthesis:");
+            println!("{}", synthesis.summary);
+            println!(
+                "Reopened synthesis token usage: prompt={} completion={} total={}",
+                synthesis.usage.prompt_tokens,
+                synthesis.usage.completion_tokens,
+                synthesis.usage.total_tokens
+            );
+            for citation in &synthesis.citations {
+                citation.evidence.resolve(&reopened).await?.ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "reopened synthesis citation Source {} evidence {} was not resolvable",
+                            citation.source_number,
+                            citation.evidence.id()
+                        ),
+                    )
+                })?;
+                println!(
+                    "Reopened durable citation: source=Source {} evidence_id={}",
+                    citation.source_number,
+                    citation.evidence.id()
+                );
+            }
+        } else {
+            println!("Reopened durable final synthesis: none for this terminal state");
+        }
         for binding in &reopened_session.source_bindings {
             let evidence = binding.evidence.resolve(&reopened).await?.ok_or_else(|| {
                 std::io::Error::new(
@@ -279,7 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         println!(
-            "Durable research session and Source-N evidence resolved from the reopened canonical ledger."
+            "Durable research result, session, and Source-N evidence resolved from the reopened canonical ledger."
         );
     } else {
         println!("Evidence was retained ephemerally; no EvidenceRef was persisted.");

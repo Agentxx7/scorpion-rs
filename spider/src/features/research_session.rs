@@ -3,16 +3,19 @@
 //! This module wraps the provider-neutral `spider_agent::Agent::research`
 //! engine without changing it. It claims a fresh [`ResearchId`] before any
 //! search side effect, injects Spider's durable [`CanonicalPageAcquirer`],
-//! and persists only invocation identity, evidence accounting, Source-N
-//! lineage, counts, and truthful terminal outcome. It deliberately does not
-//! persist `ResearchResult`, extraction payloads, model traffic, or replay
-//! state.
+//! and persists invocation identity, evidence accounting, Source-N lineage,
+//! counts, truthful terminal outcome, and a nested Spider-owned durable result.
+//! It deliberately does not persist the provider-neutral `ResearchResult`
+//! directly, source evidence payloads, model traffic, or replay state.
 
 use crate::features::agent_acquisition::{CanonicalPageAcquirer, ResearchAcquisitionEvidence};
 use crate::features::domain_persistence::{DomainPersistence, PersistenceError};
 use crate::features::identity::{EvidenceId, IdentityParseError, ResearchId};
 use crate::utils::evidence::{AcquisitionOptions, EvidenceLedgerError, EvidenceRef};
-use spider_agent::{AgentBuilder, AgentError, ResearchOptions, ResearchResult};
+use spider_agent::{
+    AgentBuilder, AgentError, FinishReason, ResearchExtraction, ResearchOptions, ResearchResult,
+};
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,6 +74,66 @@ pub struct ResearchSessionCounts {
     pub successful_extractions: usize,
 }
 
+/// One successful extraction retained as durable derived research output.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableResearchExtraction {
+    /// One-based position used by the synthesis presentation contract.
+    pub source_number: usize,
+    /// Canonical immutable evidence from which this extraction was derived.
+    pub evidence: EvidenceRef,
+    /// Strict source-grounded facts and missing-evidence statements.
+    pub extracted: ResearchExtraction,
+    /// Exact bounded source byte count supplied to extraction.
+    pub extraction_input_bytes: usize,
+    /// Provider-reported reason the successful extraction stopped.
+    pub finish_reason: Option<FinishReason>,
+}
+
+/// One synthesis citation resolved from a presentation-local Source N label.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableResearchCitation {
+    /// One-based Source N position. This is not an identity.
+    pub source_number: usize,
+    /// Canonical evidence bound to that source position.
+    pub evidence: EvidenceRef,
+}
+
+/// Provider-reported synthesis token usage copied into durable result metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableResearchTokenUsage {
+    /// Prompt tokens reported for synthesis.
+    pub prompt_tokens: u32,
+    /// Completion tokens reported for synthesis.
+    pub completion_tokens: u32,
+    /// Total tokens reported for synthesis.
+    pub total_tokens: u32,
+}
+
+/// A completed synthesis and its canonical durable citation bindings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableResearchSynthesis {
+    /// Exact validated synthesis text returned by the research engine.
+    pub summary: String,
+    /// Validated cited Source-N positions bound to canonical evidence.
+    pub citations: Vec<DurableResearchCitation>,
+    /// Provider-reported synthesis token usage.
+    pub usage: DurableResearchTokenUsage,
+}
+
+/// Durable derived output for one terminal research session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurableResearchResult {
+    /// Successful extractions in their exact Source-N order.
+    pub extractions: Vec<DurableResearchExtraction>,
+    /// Synthesis when it completed, whether sufficient or insufficient.
+    pub synthesis: Option<DurableResearchSynthesis>,
+}
+
 /// Truthful state of the durable session record.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +177,10 @@ pub struct ResearchSession {
     pub counts: ResearchSessionCounts,
     /// Claimed or truthful terminal state.
     pub state: ResearchSessionState,
+    /// Durable derived result, absent for claims and terminal states without
+    /// successful extractions. Missing in legacy records deserializes as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<DurableResearchResult>,
     /// Unix epoch milliseconds immediately before the initial claim write.
     pub created_at_unix_ms: u64,
     /// Unix epoch milliseconds at terminal recording; absent while claimed.
@@ -146,6 +213,8 @@ pub enum ResearchSessionError {
     Evidence(EvidenceLedgerError),
     /// Durable acquisition/result lineage violated the canonical contract.
     InvalidDurableBinding(String),
+    /// The durable result contradicted its session state or source bindings.
+    InvalidDurableResult(String),
 }
 
 impl std::fmt::Display for ResearchSessionError {
@@ -166,6 +235,9 @@ impl std::fmt::Display for ResearchSessionError {
             Self::InvalidDurableBinding(message) => {
                 write!(f, "research session durable binding failed: {message}")
             }
+            Self::InvalidDurableResult(message) => {
+                write!(f, "research session durable result failed: {message}")
+            }
         }
     }
 }
@@ -185,6 +257,7 @@ async fn persist_claim(
     store: &DomainPersistence,
     session: &ResearchSession,
 ) -> Result<u64, ResearchSessionError> {
+    validate_session_result(session)?;
     let payload = serde_json::to_vec(session).map_err(ResearchSessionError::Serialization)?;
     let revision = store
         .write_current(&session.id.to_string(), None, &payload)
@@ -207,6 +280,7 @@ async fn persist_terminal(
     session: &ResearchSession,
     expected_revision: u64,
 ) -> Result<(), ResearchSessionError> {
+    validate_session_result(session)?;
     let payload = serde_json::to_vec(session).map_err(ResearchSessionError::Serialization)?;
     let revision = store
         .write_current(&session.id.to_string(), Some(expected_revision), &payload)
@@ -263,6 +337,223 @@ fn terminal_state(
             None => ResearchSessionState::CompletedSynthesisFailed,
         }
     }
+}
+
+fn source_number(raw: &str) -> Result<usize, ResearchSessionError> {
+    let number = raw
+        .strip_prefix("Source ")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|number| *number > 0)
+        .ok_or_else(|| {
+            ResearchSessionError::InvalidDurableResult(format!(
+                "malformed synthesis source identifier {raw:?}"
+            ))
+        })?;
+    if raw != format!("Source {number}") {
+        return Err(ResearchSessionError::InvalidDurableResult(format!(
+            "non-canonical synthesis source identifier {raw:?}"
+        )));
+    }
+    Ok(number)
+}
+
+fn build_durable_result(
+    result: &Result<ResearchResult, AgentError>,
+    state: &ResearchSessionState,
+    bindings: &[ResearchSourceBinding],
+) -> Result<Option<DurableResearchResult>, ResearchSessionError> {
+    if matches!(
+        state,
+        ResearchSessionState::Claimed
+            | ResearchSessionState::SearchFailed
+            | ResearchSessionState::CompletedNoSearchResults
+            | ResearchSessionState::CompletedNoExtractions
+    ) {
+        return Ok(None);
+    }
+
+    let runtime = result.as_ref().map_err(|_| {
+        ResearchSessionError::InvalidDurableResult(
+            "terminal result state has no runtime ResearchResult".to_string(),
+        )
+    })?;
+    if runtime.extractions.len() != bindings.len() {
+        return Err(ResearchSessionError::InvalidDurableResult(
+            "runtime extraction count does not match durable Source-N bindings".to_string(),
+        ));
+    }
+
+    let mut extractions = Vec::with_capacity(runtime.extractions.len());
+    for (index, extraction) in runtime.extractions.iter().enumerate() {
+        let source_number = index + 1;
+        let binding = &bindings[index];
+        if binding.source_number != source_number {
+            return Err(ResearchSessionError::InvalidDurableResult(format!(
+                "Source {source_number} is bound out of order"
+            )));
+        }
+        let acquisition_id: EvidenceId = extraction
+            .acquisition_id
+            .as_deref()
+            .ok_or_else(|| {
+                ResearchSessionError::InvalidDurableResult(format!(
+                    "Source {source_number} has no acquisition identity"
+                ))
+            })?
+            .parse()
+            .map_err(ResearchSessionError::InvalidEvidenceId)?;
+        if binding.evidence.id() != acquisition_id {
+            return Err(ResearchSessionError::InvalidDurableResult(format!(
+                "Source {source_number} extraction does not match its durable EvidenceRef"
+            )));
+        }
+        extractions.push(DurableResearchExtraction {
+            source_number,
+            evidence: binding.evidence,
+            extracted: extraction.extracted.clone(),
+            extraction_input_bytes: extraction.extraction_input_bytes,
+            finish_reason: extraction.finish_reason.clone(),
+        });
+    }
+
+    let synthesis = if matches!(
+        state,
+        ResearchSessionState::CompletedSuccessfully
+            | ResearchSessionState::CompletedSynthesisInsufficient
+    ) {
+        let summary = runtime.summary.clone().ok_or_else(|| {
+            ResearchSessionError::InvalidDurableResult(format!(
+                "{state:?} requires a synthesis summary"
+            ))
+        })?;
+        let mut seen = HashSet::new();
+        let mut citations = Vec::with_capacity(runtime.synthesis_source_ids.len());
+        for raw in &runtime.synthesis_source_ids {
+            let source_number = source_number(raw)?;
+            if !seen.insert(source_number) {
+                return Err(ResearchSessionError::InvalidDurableResult(format!(
+                    "duplicate synthesis citation {raw:?}"
+                )));
+            }
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.source_number == source_number)
+                .ok_or_else(|| {
+                    ResearchSessionError::InvalidDurableResult(format!(
+                        "synthesis citation {raw:?} has no durable binding"
+                    ))
+                })?;
+            citations.push(DurableResearchCitation {
+                source_number,
+                evidence: binding.evidence,
+            });
+        }
+        if matches!(state, ResearchSessionState::CompletedSuccessfully) && citations.is_empty() {
+            return Err(ResearchSessionError::InvalidDurableResult(
+                "successful synthesis requires at least one durable citation".to_string(),
+            ));
+        }
+        Some(DurableResearchSynthesis {
+            summary,
+            citations,
+            usage: DurableResearchTokenUsage {
+                prompt_tokens: runtime.usage.prompt_tokens,
+                completion_tokens: runtime.usage.completion_tokens,
+                total_tokens: runtime.usage.total_tokens,
+            },
+        })
+    } else {
+        if runtime.summary.is_some() || !runtime.synthesis_source_ids.is_empty() {
+            return Err(ResearchSessionError::InvalidDurableResult(format!(
+                "{state:?} cannot publish synthesis output"
+            )));
+        }
+        None
+    };
+
+    Ok(Some(DurableResearchResult {
+        extractions,
+        synthesis,
+    }))
+}
+
+fn validate_session_result(session: &ResearchSession) -> Result<(), ResearchSessionError> {
+    let result_required = matches!(
+        session.state,
+        ResearchSessionState::CompletedWithoutSynthesisRequested
+            | ResearchSessionState::CompletedSynthesisFailed
+            | ResearchSessionState::CompletedSynthesisInsufficient
+            | ResearchSessionState::CompletedSuccessfully
+    );
+    if result_required != session.result.is_some() {
+        return Err(ResearchSessionError::InvalidDurableResult(format!(
+            "state {:?} has incompatible durable result presence",
+            session.state
+        )));
+    }
+    let Some(result) = session.result.as_ref() else {
+        return Ok(());
+    };
+    if result.extractions.is_empty()
+        || result.extractions.len() != session.source_bindings.len()
+        || result.extractions.len() != session.counts.successful_extractions
+    {
+        return Err(ResearchSessionError::InvalidDurableResult(
+            "durable extraction count contradicts session bindings/counts".to_string(),
+        ));
+    }
+    for (index, extraction) in result.extractions.iter().enumerate() {
+        let binding = &session.source_bindings[index];
+        if extraction.source_number != index + 1
+            || binding.source_number != extraction.source_number
+            || binding.evidence != extraction.evidence
+        {
+            return Err(ResearchSessionError::InvalidDurableResult(format!(
+                "durable extraction Source {} contradicts session binding",
+                index + 1
+            )));
+        }
+    }
+    let synthesis_required = matches!(
+        session.state,
+        ResearchSessionState::CompletedSynthesisInsufficient
+            | ResearchSessionState::CompletedSuccessfully
+    );
+    if synthesis_required != result.synthesis.is_some() {
+        return Err(ResearchSessionError::InvalidDurableResult(format!(
+            "state {:?} has incompatible durable synthesis presence",
+            session.state
+        )));
+    }
+    if let Some(synthesis) = &result.synthesis {
+        let mut seen = HashSet::new();
+        for citation in &synthesis.citations {
+            if !seen.insert(citation.source_number) {
+                return Err(ResearchSessionError::InvalidDurableResult(format!(
+                    "duplicate durable citation Source {}",
+                    citation.source_number
+                )));
+            }
+            let binding = session
+                .source_bindings
+                .iter()
+                .find(|binding| binding.source_number == citation.source_number);
+            if !matches!(binding, Some(binding) if binding.evidence == citation.evidence) {
+                return Err(ResearchSessionError::InvalidDurableResult(format!(
+                    "durable citation Source {} is unbound",
+                    citation.source_number
+                )));
+            }
+        }
+        if matches!(session.state, ResearchSessionState::CompletedSuccessfully)
+            && synthesis.citations.is_empty()
+        {
+            return Err(ResearchSessionError::InvalidDurableResult(
+                "successful durable synthesis has no citations".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn bind_sources(
@@ -359,6 +650,7 @@ where
         source_bindings: Vec::new(),
         counts: ResearchSessionCounts::default(),
         state: ResearchSessionState::Claimed,
+        result: None,
         created_at_unix_ms: unix_time_ms(),
         completed_at_unix_ms: None,
     };
@@ -377,6 +669,7 @@ where
     }
     session.counts.durable_sources = retained.len();
     session.state = terminal_state(&result, options.synthesize);
+    session.result = build_durable_result(&result, &session.state, &session.source_bindings)?;
     session.completed_at_unix_ms = Some(unix_time_ms());
     persist_terminal(&store, &session, claim_revision).await?;
 
@@ -467,7 +760,7 @@ mod tests {
                         topic: "Evidence".to_string(),
                         finding: "Source-grounded finding".to_string(),
                     }],
-                    missing_evidence: Vec::new(),
+                    missing_evidence: vec!["Unsupported detail".to_string()],
                 },
                 acquisition_id: Some(id.to_string()),
                 finish_reason: Some(FinishReason::Stop),
@@ -486,8 +779,16 @@ mod tests {
                 }
             }),
             synthesis_sufficient,
-            synthesis_source_ids: Vec::new(),
-            usage: TokenUsage::default(),
+            synthesis_source_ids: if synthesis_sufficient.is_some() && !acquisition_ids.is_empty() {
+                vec!["Source 1".to_string()]
+            } else {
+                Vec::new()
+            },
+            usage: TokenUsage {
+                prompt_tokens: 11,
+                completion_tokens: 7,
+                total_tokens: 18,
+            },
         }
     }
 
@@ -678,7 +979,7 @@ mod tests {
             extraction: bool,
             synthesize: bool,
             sufficient: Option<bool>,
-        ) -> ResearchSessionState {
+        ) -> ResearchSession {
             let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
             let acquirer = adapter(&store).await;
             let execution_acquirer = acquirer.clone();
@@ -700,7 +1001,6 @@ mod tests {
             .await
             .unwrap()
             .session
-            .state
         }
 
         let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
@@ -715,30 +1015,191 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(failed.session.state, ResearchSessionState::SearchFailed);
+        assert!(failed.session.result.is_none());
+        let no_search_results = run_case(0, false, true, None).await;
         assert_eq!(
-            run_case(0, false, true, None).await,
+            no_search_results.state,
             ResearchSessionState::CompletedNoSearchResults
         );
+        assert!(no_search_results.result.is_none());
+        let no_extractions = run_case(2, false, true, None).await;
         assert_eq!(
-            run_case(2, false, true, None).await,
+            no_extractions.state,
             ResearchSessionState::CompletedNoExtractions
         );
+        assert!(no_extractions.result.is_none());
         assert_eq!(
-            run_case(1, true, false, None).await,
+            run_case(1, true, false, None).await.state,
             ResearchSessionState::CompletedWithoutSynthesisRequested
         );
         assert_eq!(
-            run_case(1, true, true, None).await,
+            run_case(1, true, true, None).await.state,
             ResearchSessionState::CompletedSynthesisFailed
         );
         assert_eq!(
-            run_case(1, true, true, Some(false)).await,
+            run_case(1, true, true, Some(false)).await.state,
             ResearchSessionState::CompletedSynthesisInsufficient
         );
         assert_eq!(
-            run_case(1, true, true, Some(true)).await,
+            run_case(1, true, true, Some(true)).await.state,
             ResearchSessionState::CompletedSuccessfully
         );
+    }
+
+    #[test]
+    fn legacy_session_without_result_deserializes_truthfully() {
+        let legacy = serde_json::json!({
+            "id": ResearchId::new(),
+            "topic": "legacy topic",
+            "extraction_instructions": null,
+            "sources": [],
+            "source_bindings": [],
+            "counts": {
+                "search_results": 0,
+                "acquisition_attempts": 0,
+                "durable_sources": 0,
+                "successful_extractions": 0
+            },
+            "state": "completed_successfully",
+            "created_at_unix_ms": 1,
+            "completed_at_unix_ms": 2
+        });
+        let session: ResearchSession = serde_json::from_value(legacy).unwrap();
+        assert_eq!(session.result, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_states_publish_only_compatible_durable_results() {
+        async fn completed_session(synthesize: bool, sufficient: Option<bool>) -> ResearchSession {
+            let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+            let acquirer = adapter(&store).await;
+            let execution_acquirer = acquirer.clone();
+            run_with_id(
+                Arc::clone(&store),
+                acquirer,
+                ResearchId::new(),
+                "topic".to_string(),
+                ResearchOptions::new().with_synthesize(synthesize),
+                move || async move {
+                    let id = acquire(&execution_acquirer, b"<html>durable result</html>").await;
+                    Ok(result(1, &[id], sufficient))
+                },
+            )
+            .await
+            .unwrap()
+            .session
+        }
+
+        let extraction_only = completed_session(false, None).await;
+        assert_eq!(
+            extraction_only.state,
+            ResearchSessionState::CompletedWithoutSynthesisRequested
+        );
+        assert!(extraction_only.result.as_ref().unwrap().synthesis.is_none());
+
+        let technical_failure = completed_session(true, None).await;
+        assert_eq!(
+            technical_failure.state,
+            ResearchSessionState::CompletedSynthesisFailed
+        );
+        assert!(technical_failure
+            .result
+            .as_ref()
+            .unwrap()
+            .synthesis
+            .is_none());
+
+        for (sufficient, expected_state) in [
+            (false, ResearchSessionState::CompletedSynthesisInsufficient),
+            (true, ResearchSessionState::CompletedSuccessfully),
+        ] {
+            let session = completed_session(true, Some(sufficient)).await;
+            assert_eq!(session.state, expected_state);
+            let result = session.result.as_ref().unwrap();
+            assert_eq!(result.extractions.len(), 1);
+            assert_eq!(result.extractions[0].source_number, 1);
+            assert_eq!(
+                result.extractions[0].evidence,
+                session.source_bindings[0].evidence
+            );
+            assert_eq!(result.extractions[0].extracted.facts[0].topic, "Evidence");
+            assert_eq!(result.extractions[0].extraction_input_bytes, 128);
+            assert_eq!(
+                result.extractions[0].finish_reason,
+                Some(FinishReason::Stop)
+            );
+            let synthesis = result.synthesis.as_ref().unwrap();
+            assert_eq!(synthesis.citations[0].source_number, 1);
+            assert_eq!(
+                synthesis.citations[0].evidence,
+                session.source_bindings[0].evidence
+            );
+            assert_eq!(synthesis.usage.total_tokens, 18);
+        }
+
+        let mut incompatible = completed_session(true, Some(true)).await;
+        incompatible.result.as_mut().unwrap().synthesis = None;
+        assert!(matches!(
+            validate_session_result(&incompatible),
+            Err(ResearchSessionError::InvalidDurableResult(_))
+        ));
+        let mut incompatible_insufficient = completed_session(true, Some(false)).await;
+        incompatible_insufficient.result.as_mut().unwrap().synthesis = None;
+        assert!(matches!(
+            validate_session_result(&incompatible_insufficient),
+            Err(ResearchSessionError::InvalidDurableResult(_))
+        ));
+        let mut unbound = completed_session(true, Some(true)).await;
+        unbound
+            .result
+            .as_mut()
+            .unwrap()
+            .synthesis
+            .as_mut()
+            .unwrap()
+            .citations[0]
+            .evidence = EvidenceRef::new(EvidenceId::new());
+        assert!(matches!(
+            validate_session_result(&unbound),
+            Err(ResearchSessionError::InvalidDurableResult(_))
+        ));
+        incompatible.state = ResearchSessionState::Claimed;
+        assert!(matches!(
+            validate_session_result(&incompatible),
+            Err(ResearchSessionError::InvalidDurableResult(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_unknown_and_duplicate_synthesis_citations_fail_closed() {
+        for source_ids in [
+            vec!["source 1".to_string()],
+            vec!["Source 2".to_string()],
+            vec!["Source 1".to_string(), "Source 1".to_string()],
+        ] {
+            let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+            let acquirer = adapter(&store).await;
+            let execution_acquirer = acquirer.clone();
+            let error = run_with_id(
+                Arc::clone(&store),
+                acquirer,
+                ResearchId::new(),
+                "topic".to_string(),
+                ResearchOptions::new().with_synthesize(true),
+                move || async move {
+                    let id = acquire(&execution_acquirer, b"<html>cited source</html>").await;
+                    let mut runtime = result(1, &[id], Some(true));
+                    runtime.synthesis_source_ids = source_ids;
+                    Ok(runtime)
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                ResearchSessionError::InvalidDurableResult(_)
+            ));
+        }
     }
 
     #[tokio::test]
@@ -753,10 +1214,10 @@ mod tests {
             acquirer,
             ResearchId::new(),
             "durable topic".to_string(),
-            ResearchOptions::new().with_synthesize(false),
+            ResearchOptions::new().with_synthesize(true),
             move || async move {
                 let id = acquire(&execution_acquirer, b"<html>reopen source</html>").await;
-                Ok(result(1, &[id], None))
+                Ok(result(1, &[id], Some(true)))
             },
         )
         .await
@@ -780,6 +1241,38 @@ mod tests {
                 .id,
             Some(expected_binding.evidence.id())
         );
+        let durable_result = session.result.as_ref().unwrap();
+        assert_eq!(durable_result.extractions[0].source_number, 1);
+        assert_eq!(
+            durable_result.extractions[0].evidence,
+            expected_binding.evidence
+        );
+        assert_eq!(
+            durable_result.extractions[0].extracted.facts[0].finding,
+            "Source-grounded finding"
+        );
+        assert_eq!(
+            durable_result.extractions[0].extracted.missing_evidence,
+            ["Unsupported detail"]
+        );
+        assert_eq!(durable_result.extractions[0].extraction_input_bytes, 128);
+        assert_eq!(
+            durable_result.extractions[0].finish_reason,
+            Some(FinishReason::Stop)
+        );
+        let synthesis = durable_result.synthesis.as_ref().unwrap();
+        assert_eq!(synthesis.summary, "Supported [Source 1]");
+        assert_eq!(synthesis.usage.prompt_tokens, 11);
+        assert_eq!(synthesis.usage.completion_tokens, 7);
+        assert_eq!(synthesis.usage.total_tokens, 18);
+        assert_eq!(synthesis.citations[0].source_number, 1);
+        assert_eq!(synthesis.citations[0].evidence, expected_binding.evidence);
+        assert!(synthesis.citations[0]
+            .evidence
+            .resolve(&reopened)
+            .await
+            .unwrap()
+            .is_some());
 
         drop(reopened);
         remove_temporary_database(&path);

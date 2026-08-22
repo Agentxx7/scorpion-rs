@@ -5594,3 +5594,53 @@ fn durable_research_example_reports_counts_from_the_session_owner() {
         "durable reporting must not turn its intentionally absent process-local acquirer handle into zero counts"
     );
 }
+
+#[test]
+fn durable_research_result_is_nested_spider_owned_and_evidence_referential() {
+    let session =
+        fs::read_to_string(workspace_root().join("spider/src/features/research_session.rs"))
+            .unwrap();
+    for required in [
+        "pub struct DurableResearchResult",
+        "pub struct DurableResearchExtraction",
+        "pub struct DurableResearchSynthesis",
+        "pub struct DurableResearchCitation",
+        "pub result: Option<DurableResearchResult>",
+        "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+        "session.result = build_durable_result(",
+        "validate_session_result(session)?;",
+        "pub evidence: EvidenceRef",
+    ] {
+        assert!(
+            session.contains(required),
+            "durable research result is missing ownership/publication invariant {required:?}"
+        );
+    }
+    for forbidden in [
+        "struct DurableResearchResultId",
+        "struct ExtractionId",
+        "CREATE TABLE",
+        "sqlx::",
+        "pub acquisition_id: String",
+        "pub requested_url:",
+        "pub final_url:",
+        "pub body:",
+        "pub content_hash:",
+        "pub transport:",
+        "pub backend_provenance:",
+    ] {
+        assert!(
+            !session.contains(forbidden),
+            "durable research result must reuse session persistence/evidence by reference: found {forbidden:?}"
+        );
+    }
+
+    let agent = fs::read_to_string(workspace_root().join("spider_agent/src/agent.rs")).unwrap();
+    assert!(
+        !agent.contains("DurableResearchResult")
+            && !agent.contains("ResearchId")
+            && !agent.contains("EvidenceRef")
+            && !agent.contains("DomainPersistence"),
+        "provider-neutral spider_agent must not own Spider durable-result types"
+    );
+}

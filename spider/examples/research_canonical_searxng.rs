@@ -7,10 +7,31 @@ use spider::agent::{Agent, AgentConfig, ResearchOptions, SearchOptions};
 use spider::features::agent_acquisition::CanonicalPageAcquirer;
 use std::collections::HashSet;
 
+const HTML_MAX_BYTES: usize = 10_000;
+const PREVIEW_CHARS: usize = 1_200;
+
+fn truncate_research_input(content: &str) -> &str {
+    if content.len() <= HTML_MAX_BYTES {
+        return content;
+    }
+    let mut end = HTML_MAX_BYTES;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    &content[..end]
+}
+
+fn bounded_preview(content: &str) -> String {
+    let mut preview: String = content.chars().take(PREVIEW_CHARS).collect();
+    if content.chars().count() > PREVIEW_CHARS {
+        preview.push_str("\n...[preview truncated]...");
+    }
+    preview
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
-
     let searxng_base_url =
         std::env::var("SEARXNG_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
     let openai_base_url = std::env::var("OPENAI_COMPAT_BASE_URL")
@@ -24,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = Agent::builder()
         .with_config(
             AgentConfig::default()
-                .with_html_max_bytes(10_000)
+                .with_html_max_bytes(HTML_MAX_BYTES)
                 .with_max_tokens(1024),
         )
         .with_openai_compatible(openai_base_url, api_key, model)
@@ -52,18 +73,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Successful extraction count: {}",
         research.extractions.len()
     );
-
     let successful_ids: HashSet<&str> = research
         .extractions
         .iter()
         .filter_map(|extraction| extraction.acquisition_id.as_deref())
         .collect();
-
     for extraction in &research.extractions {
         println!(
-            "Successful extraction: url={} acquisition_id={}",
+            "Successful extraction: url={} acquisition_id={} json={}",
             extraction.url,
-            extraction.acquisition_id.as_deref().unwrap_or("none")
+            extraction.acquisition_id.as_deref().unwrap_or("none"),
+            bounded_preview(&serde_json::to_string_pretty(&extraction.extracted)?)
         );
     }
 
@@ -90,6 +110,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "unknown".to_string()),
             outcome
         );
+
+        match record.evidence.content.as_deref() {
+            Some(original) => match spider_agent_html::materialize_research_markdown(
+                original,
+                record.evidence.final_url.as_deref().unwrap_or_default(),
+            ) {
+                Ok(readable) => {
+                    let extraction_input = truncate_research_input(&readable);
+                    println!(
+                        "Research-readable input: acquisition_id={} original_body_bytes={} derived_readable_bytes={} admission=admitted extraction_input_bytes={} preview={:?}",
+                        id,
+                        original.len(),
+                        readable.len(),
+                        extraction_input.len(),
+                        bounded_preview(extraction_input)
+                    );
+                }
+                Err(error) => println!(
+                    "Research-readable input: acquisition_id={} original_body_bytes={} derived_readable_bytes=none admission=rejected reason={:?}",
+                    id,
+                    original.len(),
+                    error.to_string()
+                ),
+            },
+            None => println!(
+                "Research-readable input: acquisition_id={} original_body_bytes=none derived_readable_bytes=none admission=rejected reason={:?}",
+                id,
+                "canonical evidence contains no materialized body"
+            ),
+        }
     }
 
     println!("Final synthesis:");
@@ -102,6 +152,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Final research output complete.");
     println!("Evidence was retained in memory; no EvidenceRef was persisted.");
-
     Ok(())
 }

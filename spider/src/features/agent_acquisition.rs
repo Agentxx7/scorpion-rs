@@ -149,6 +149,7 @@ mod tests {
         handle.join().unwrap();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(source.content.as_bytes(), BODY);
         let retained = adapter.retained_evidence();
         assert_eq!(retained.len(), 1);
         assert_eq!(
@@ -156,6 +157,10 @@ mod tests {
             Some(retained[0].acquisition_id.to_string())
         );
         assert_eq!(retained[0].evidence.id, None, "evidence was not persisted");
+        assert_eq!(
+            retained[0].evidence.content.as_deref(),
+            std::str::from_utf8(BODY).ok()
+        );
         assert_eq!(
             retained[0].evidence.response_body_hash.as_deref(),
             Some(format!("{:x}", Sha256::digest(BODY)).as_str())

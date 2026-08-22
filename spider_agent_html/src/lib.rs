@@ -12,8 +12,10 @@
 //! - `spider_agent_types` — type definitions
 
 mod cleaning;
+mod readable;
 
 pub use cleaning::{
     clean_html, clean_html_base, clean_html_full, clean_html_raw, clean_html_slim,
     clean_html_with_profile, clean_html_with_profile_and_intent, smart_clean_html,
 };
+pub use readable::{materialize_research_markdown, ResearchReadableError};

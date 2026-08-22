@@ -238,6 +238,7 @@ tokio = { version = "1", features = ["test-util"] }
 # at publish time).
 spider_network_blocker = "0.0"
 fast_html2md = "0"
+spider_agent_html = { path = "../spider_agent_html" }
 
 [[bench]]
 name = "allocator_bench"

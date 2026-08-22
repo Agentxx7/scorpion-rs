@@ -224,7 +224,16 @@ impl Agent {
     /// Extract structured data from HTML using the LLM.
     pub async fn extract(&self, html: &str, prompt: &str) -> AgentResult<serde_json::Value> {
         let cleaned_html = self.clean_html(html);
-        let truncated = self.truncate_html(&cleaned_html);
+        self.extract_prepared(&cleaned_html, prompt).await
+    }
+
+    /// Extract from an already prepared research-readable representation.
+    async fn extract_prepared(
+        &self,
+        content: &str,
+        prompt: &str,
+    ) -> AgentResult<serde_json::Value> {
+        let truncated = self.truncate_html(content);
 
         let messages = vec![
             Message::system(
@@ -384,8 +393,26 @@ impl Agent {
                         continue;
                     }
 
+                    let research_content = match spider_agent_html::materialize_research_markdown(
+                        &source.content,
+                        &source.final_url,
+                    ) {
+                        Ok(content) => content,
+                        Err(error) => {
+                            log::warn!(
+                                "Skipping {}: unusable research content: {}",
+                                result.url,
+                                error
+                            );
+                            continue;
+                        }
+                    };
+
                     // Extract
-                    match self.extract(&source.content, &extraction_prompt).await {
+                    match self
+                        .extract_prepared(&research_content, &extraction_prompt)
+                        .await
+                    {
                         Ok(extracted) => {
                             extractions.push(PageExtraction {
                                 url: source.final_url,
@@ -2058,7 +2085,10 @@ mod tests {
                     final_url: format!("{url}/final"),
                     status: self.status,
                     content_type: "text/html".to_string(),
-                    content: "<html><body>research source</body></html>".to_string(),
+                    content: format!(
+                        "<html><body><article><h1>Research source</h1><p>{}</p></article></body></html>",
+                        "This acquired source contains substantive, source-bound research material about asynchronous Rust runtimes, their executor designs, networking facilities, scheduling behavior, synchronization primitives, and ecosystem compatibility. ".repeat(2)
+                    ),
                     acquisition_id: Some(format!("opaque-{call}")),
                 })
             }
@@ -2176,7 +2206,7 @@ mod tests {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut request = [0_u8; 2048];
                 let _ = stream.read(&mut request);
-                let body = b"<html><body>compatibility research</body></html>";
+                let body = b"<html><body><article><h1>Compatibility research</h1><p>This standalone compatibility source contains substantive research material about asynchronous Rust runtimes, executor behavior, networking facilities, scheduling, synchronization primitives, and library interoperability. It remains available without an injected canonical acquirer.</p></article></body></html>";
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -2192,6 +2222,57 @@ mod tests {
 
             assert_eq!(result.extractions.len(), 1);
             assert_eq!(result.extractions[0].acquisition_id, None);
+        }
+
+        #[tokio::test]
+        async fn research_materializes_before_truncation_and_preserves_lineage() {
+            struct LateArticleAcquirer;
+
+            #[async_trait]
+            impl PageAcquirer for LateArticleAcquirer {
+                async fn acquire(&self, url: &str) -> AgentResult<AcquiredSource> {
+                    let boilerplate = format!(
+                        "<header><nav>{}</nav></header>",
+                        "<a href='/menu'>menu</a>".repeat(600)
+                    );
+                    assert!(boilerplate.len() > 10_000);
+                    Ok(AcquiredSource {
+                        requested_url: url.to_string(),
+                        final_url: format!("{url}/final"),
+                        status: 200,
+                        content_type: "text/html".to_string(),
+                        content: format!(
+                            "<html><body>{boilerplate}<article><h1>Late article</h1><p>{}</p><ul><li>Useful first point</li><li>Useful second point</li></ul></article></body></html>",
+                            "The substantive article explains executor scheduling, asynchronous networking, timers, synchronization primitives, task spawning, cancellation behavior, and ecosystem interoperability using only the acquired source material. ".repeat(2)
+                        ),
+                        acquisition_id: Some("evid-late-article".to_string()),
+                    })
+                }
+            }
+
+            let (llm, captured) = ScriptedLlm::new(&[r#"{"fact":"article retained"}"#]);
+            let mut builder =
+                Agent::builder().with_config(AgentConfig::default().with_html_max_bytes(10_000));
+            builder.search_provider = Some(Box::new(StaticSearch {
+                urls: vec!["https://late.example".into()],
+            }));
+            builder.llm = Some(Box::new(llm));
+            builder.page_acquirer = Some(Box::new(LateArticleAcquirer));
+            let agent = builder.build().unwrap();
+
+            let result = agent.research("topic", options(1)).await.unwrap();
+
+            assert_eq!(result.extractions.len(), 1);
+            assert_eq!(
+                result.extractions[0].acquisition_id.as_deref(),
+                Some("evid-late-article")
+            );
+            let calls = captured.lock().unwrap();
+            let extraction_input = message_text(&calls[0][1]);
+            assert!(extraction_input.contains("Late article"));
+            assert!(extraction_input.contains("Useful first point"));
+            assert!(!extraction_input.contains("menu\nmenu\nmenu"));
+            assert!(extraction_input.len() < 10_000);
         }
 
         #[tokio::test]

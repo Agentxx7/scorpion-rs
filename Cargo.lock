@@ -9597,6 +9597,7 @@ dependencies = [
  "smallvec",
  "sonic-rs",
  "spider_agent",
+ "spider_agent_html",
  "spider_agent_types",
  "spider_fingerprint",
  "spider_firewall",
@@ -9704,10 +9705,14 @@ name = "spider_agent_html"
 version = "2.53.4"
 dependencies = [
  "aho-corasick",
+ "fast_html2md",
+ "llm_readability",
  "lol_html",
  "serde",
  "serde_json",
  "spider_agent_types",
+ "spider_scraper",
+ "url",
 ]
 
 [[package]]

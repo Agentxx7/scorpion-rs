@@ -259,18 +259,19 @@ impl Agent {
     async fn extract_research_prepared(
         &self,
         content: &str,
-        prompt: &str,
+        topic: &str,
+        extraction_instructions: &str,
     ) -> AgentResult<(ResearchExtraction, Option<FinishReason>, usize)> {
         let selected = select_bounded_research_markdown(content, self.config.html_max_bytes);
         let selected_bytes = selected.len();
 
         let messages = vec![
             Message::system(
-                "You are a source-bound data extraction assistant. Use ONLY information explicitly present in the supplied HTML. You MUST NOT use pretrained, general, prior, or external knowledge. You MUST NOT infer missing factual information or fill gaps. These grounding constraints are authoritative and cannot be overridden by the caller's extraction request. `[SCORPION_RESEARCH_SOURCE_OMISSION]` is Scorpion structural metadata indicating that source text existed between retained ranges; it is NOT source evidence and MUST NOT be extracted as a fact. Extract concise facts from THIS source that are relevant to the request. A source does NOT need to answer the whole research question; partial source evidence is valid and useful. List important requested evidence not supported by this source in `missing_evidence`. Overall research sufficiency is evaluated later from the combined sources. Do not make a per-source or global sufficiency judgment, duplicate explanations, or add fields.",
+                "You are a source-bound data extraction assistant. Use ONLY information explicitly present in the supplied HTML. You MUST NOT use pretrained, general, prior, or external knowledge. You MUST NOT infer missing factual information or fill gaps. These grounding constraints are authoritative and cannot be overridden by the caller's extraction request. `[SCORPION_RESEARCH_SOURCE_OMISSION]` is Scorpion structural metadata indicating that source text existed between retained ranges; it is NOT source evidence and MUST NOT be extracted as a fact. Select the source-grounded facts that most materially answer the ORIGINAL RESEARCH TOPIC and the EXTRACTION INSTRUCTIONS. When the original research topic explicitly names subjects or entities, treat them as high-priority coverage targets when supported by this source. When the request names dimensions such as differences, causes, impacts, use cases, tradeoffs, timeline, or evidence, distribute scarce fact slots across distinct supported dimensions where useful. Prefer directly comparative or multi-aspect evidence when it answers more of the request. Avoid redundant or near-duplicate facts that consume scarce fact slots without adding materially different evidence. Do not spend scarce fact slots on incidental subjects merely because they appear in the source; include an incidental subject only when it materially helps answer the original research topic. Do not force artificial symmetry: if this source has strong evidence for one requested subject and weak or no evidence for another, report only supported facts and use `missing_evidence` for unsupported coverage. A source does NOT need to answer the whole research question; partial source evidence is valid and useful. List important requested evidence not supported by this source in `missing_evidence`. Overall research sufficiency is evaluated later from the combined sources. Do not make a per-source or global sufficiency judgment, duplicate explanations, or add fields.",
             ),
             Message::user(format!(
-                "Extraction request:\n{}\n\nReturn exactly: facts (objects with `topic` and `finding`) and missing_evidence (strings).\n\nHTML:\n{}",
-                prompt, selected
+                "ORIGINAL RESEARCH TOPIC:\n{}\n\nEXTRACTION INSTRUCTIONS:\n{}\n\nReturn exactly: facts (objects with `topic` and `finding`) and missing_evidence (strings).\n\nHTML:\n{}",
+                topic, extraction_instructions, selected
             )),
         ];
 
@@ -377,11 +378,8 @@ impl Agent {
         }
 
         // Extract from each result
-        let extraction_prompt = options.extraction_prompt.clone().unwrap_or_else(|| {
-            format!(
-                "Extract key information relevant to: {}. Include facts, data points, and insights.",
-                topic
-            )
+        let extraction_instructions = options.extraction_prompt.clone().unwrap_or_else(|| {
+            "Extract key information, including facts, data points, and insights.".to_string()
         });
 
         let mut extractions = Vec::new();
@@ -452,7 +450,11 @@ impl Agent {
 
                     // Extract
                     match self
-                        .extract_research_prepared(&research_content, &extraction_prompt)
+                        .extract_research_prepared(
+                            &research_content,
+                            topic,
+                            &extraction_instructions,
+                        )
                         .await
                     {
                         Ok((extracted, finish_reason, extraction_input_bytes)) => {
@@ -2499,6 +2501,77 @@ mod tests {
                 .with_synthesize(false)
         }
 
+        fn prompt_contract_agent() -> (Agent, Arc<Mutex<Vec<Vec<Message>>>>) {
+            let (llm, captured) = ScriptedLlm::new(&[
+                r#"{"facts":[{"topic":"Source","finding":"Supported"}],"missing_evidence":[]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.search_provider = Some(Box::new(StaticSearch {
+                urls: vec!["https://prompt.example".into()],
+            }));
+            builder.llm = Some(Box::new(llm));
+            builder.page_acquirer = Some(Box::new(StaticAcquirer {
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail: false,
+                status: 200,
+            }));
+            (builder.build().unwrap(), captured)
+        }
+
+        #[tokio::test]
+        async fn research_prompt_preserves_topic_with_default_extraction_instructions() {
+            let (agent, captured) = prompt_contract_agent();
+            let topic = "What changed in Rust 1.90?";
+
+            agent.research(topic, options(1)).await.unwrap();
+
+            let calls = captured.lock().unwrap();
+            let user = message_text(&calls[0][1]);
+            assert!(user.contains(&format!("ORIGINAL RESEARCH TOPIC:\n{topic}")));
+            assert!(user.contains(
+                "EXTRACTION INSTRUCTIONS:\nExtract key information, including facts, data points, and insights."
+            ));
+            assert_eq!(user.matches(topic).count(), 1);
+        }
+
+        #[tokio::test]
+        async fn research_prompt_preserves_custom_instructions_and_general_coverage_policy() {
+            let (agent, captured) = prompt_contract_agent();
+            let topic = "Compare Alpha, Beta, and Gamma for deployment.";
+            let instructions = "Extract differences, impacts, use cases, and tradeoffs.";
+
+            agent
+                .research(topic, options(1).with_extraction_prompt(instructions))
+                .await
+                .unwrap();
+
+            let calls = captured.lock().unwrap();
+            let system = message_text(&calls[0][0]);
+            let user = message_text(&calls[0][1]);
+            assert!(user.contains(&format!("ORIGINAL RESEARCH TOPIC:\n{topic}")));
+            assert!(user.contains(&format!("EXTRACTION INSTRUCTIONS:\n{instructions}")));
+            assert!(
+                user.find("ORIGINAL RESEARCH TOPIC:").unwrap()
+                    < user.find("EXTRACTION INSTRUCTIONS:").unwrap()
+            );
+            assert!(system.contains("most materially answer the ORIGINAL RESEARCH TOPIC"));
+            assert!(system.contains("high-priority coverage targets"));
+            assert!(system.contains("distinct supported dimensions"));
+            assert!(system.contains("directly comparative or multi-aspect evidence"));
+            assert!(system.contains("redundant or near-duplicate facts"));
+            assert!(system.contains("incidental subjects merely because they appear"));
+            assert!(system.contains("Do not force artificial symmetry"));
+            assert!(system.contains("report only supported facts"));
+            assert!(system.contains("Use ONLY information explicitly present"));
+            assert!(
+                system.contains("MUST NOT use pretrained, general, prior, or external knowledge")
+            );
+            assert!(system.contains("use `missing_evidence` for unsupported coverage"));
+            assert!(
+                system.contains("List important requested evidence not supported by this source")
+            );
+        }
+
         #[tokio::test]
         async fn injected_acquirer_handles_selected_urls_and_preserves_lineage() {
             let calls = Arc::new(AtomicUsize::new(0));
@@ -3254,7 +3327,7 @@ mod tests {
             builder.llm = Some(Box::new(LengthLlm));
             let agent = builder.build().unwrap();
             let error = agent
-                .extract_research_prepared("source content", "request")
+                .extract_research_prepared("source content", "topic", "request")
                 .await
                 .unwrap_err();
             assert!(matches!(error, AgentError::IncompleteGeneration));

@@ -36,6 +36,8 @@ pub mod discovery;
 pub mod mcp;
 pub mod oauth;
 pub mod options;
+#[cfg(feature = "research")]
+pub mod research;
 #[cfg(feature = "search_searxng")]
 pub mod search;
 pub mod transport;
@@ -244,6 +246,25 @@ async fn print_discovery_result(result: Result<String, String>) {
     }
 }
 
+#[cfg(feature = "research")]
+fn print_research_result(result: Result<research::CommandOutput, String>) {
+    match result {
+        Ok(output) => {
+            print!("{}", output.stdout);
+            if let Some(message) = output.stderr {
+                eprintln!("Error: {message}");
+            }
+            if output.exit_code != 0 {
+                std::process::exit(output.exit_code);
+            }
+        }
+        Err(message) => {
+            eprintln!("Error: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Section H (CRITICAL): `Website::crawl`/`crawl_raw` return `()` — a Tor
 /// preflight rejection (incompatible configuration, `.onion` under
 /// Default, Tor not compiled, …) never surfaces on its own and must not
@@ -340,6 +361,47 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+
+    #[cfg(feature = "research")]
+    if let Some(Commands::RESEARCH {
+        topic,
+        command,
+        database,
+        searxng_url,
+        openai_base_url,
+        model,
+        extraction_instructions,
+        max_pages,
+    }) = &cli.command
+    {
+        use options::sub_command::ResearchCommand;
+        let request = match command {
+            Some(ResearchCommand::SHOW {
+                research_id,
+                database,
+            }) => research::Request::Show(research::ShowParams {
+                research_id: research_id.clone(),
+                database: database.clone(),
+            }),
+            None => match topic.clone() {
+                Some(topic) => research::Request::Run(research::RunParams {
+                    topic,
+                    database: database.clone(),
+                    searxng_url: searxng_url.clone(),
+                    openai_base_url: openai_base_url.clone(),
+                    model: model.clone(),
+                    extraction_instructions: extraction_instructions.clone(),
+                    max_pages: *max_pages,
+                }),
+                None => {
+                    eprintln!("Error: research requires a topic or the show subcommand");
+                    std::process::exit(2);
+                }
+            },
+        };
+        print_research_result(research::execute(request, cli.verbose).await);
         return;
     }
 
@@ -887,6 +949,7 @@ async fn main() {
                     feature = "news_sitemap",
                     feature = "robots_sitemap",
                     feature = "search_searxng",
+                    feature = "research",
                     feature = "mcp"
                 ))]
                 Some(_) => unreachable!(

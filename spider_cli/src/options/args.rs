@@ -274,6 +274,71 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "research")]
+    #[test]
+    fn parses_durable_research_run_and_has_no_api_key_argument() {
+        let cli = Cli::try_parse_from([
+            "scorpion",
+            "research",
+            "How do A and B compare?",
+            "--database",
+            "/tmp/research.sqlite",
+            "--searxng-url",
+            "https://search.example",
+            "--openai-base-url",
+            "https://model.example/v1",
+            "--model",
+            "model-name",
+            "--max-pages",
+            "3",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::RESEARCH {
+                topic: Some(topic),
+                command: None,
+                max_pages: Some(3),
+                ..
+            }) if topic == "How do A and B compare?"
+        ));
+
+        let command = Cli::command();
+        let research = command
+            .get_subcommands()
+            .find(|command| command.get_name() == "research")
+            .unwrap();
+        assert!(research
+            .get_arguments()
+            .all(|argument| argument.get_id().as_str() != "api_key"));
+    }
+
+    #[cfg(feature = "research")]
+    #[test]
+    fn parses_show_unambiguously_and_never_as_a_topic() {
+        use crate::options::sub_command::ResearchCommand;
+
+        let id = "research_00112233445566778899aabbccddeeff";
+        let cli = Cli::try_parse_from([
+            "scorpion",
+            "research",
+            "show",
+            id,
+            "--database",
+            "/tmp/research.sqlite",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::RESEARCH {
+                topic: None,
+                command: Some(ResearchCommand::SHOW { research_id, .. }),
+                ..
+            }) if research_id == id
+        ));
+        assert!(Cli::try_parse_from(["scorpion", "research", "show"]).is_err());
+    }
+
     /// Existing commands remain parseable, unregressed by the new variants.
     /// Argv[0] is deliberately still `"spider"` here — clap only uses it
     /// for shell-completion/error-message purposes, never for validating
@@ -400,6 +465,8 @@ mod tests {
         assert!(names.contains(&"robots-sitemap"), "{names:?}");
         #[cfg(feature = "search_searxng")]
         assert!(names.contains(&"search"), "{names:?}");
+        #[cfg(feature = "research")]
+        assert!(names.contains(&"research"), "{names:?}");
         #[cfg(feature = "mcp")]
         assert!(names.contains(&"mcp"), "{names:?}");
     }

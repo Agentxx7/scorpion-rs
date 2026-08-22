@@ -28,6 +28,49 @@ cargo install spider_cli
 cargo install -F smart spider_cli
 ```
 
+## Durable research
+
+The normal shipping `scorpion` binary includes durable canonical research.
+Every run persists its initial claim, source evidence, terminal session, and
+compatible result; there is no ephemeral fallback.
+
+Configure the search endpoint, OpenAI-compatible endpoint, model, API key, and
+canonical database through the environment:
+
+```sh
+export RESEARCH_EVIDENCE_DB=/path/to/scorpion-research.sqlite
+export SEARXNG_BASE_URL=https://search.example
+export OPENAI_COMPAT_BASE_URL=https://model.example/v1
+export OPENAI_COMPAT_MODEL=model-name
+export OPENAI_COMPAT_API_KEY=secret
+```
+
+Non-secret values may instead be supplied with `--database`,
+`--searxng-url`, `--openai-base-url`, and `--model`; explicit CLI values take
+precedence over their environment counterparts. The API key is environment-only
+so it is not exposed through command history or process arguments.
+
+Run research:
+
+```sh
+scorpion research "How do Tokio and async-std compare for Rust async programming?"
+```
+
+The command prints a `ResearchId`, the durable conclusion, and Source-N to
+durable evidence-ID bindings. A truthful insufficient-evidence conclusion is a
+successful command, not a technical failure.
+
+Reopen the same result in a later process without model or search configuration:
+
+```sh
+scorpion research show research_00112233445566778899aabbccddeeff \
+  --database /path/to/scorpion-research.sqlite
+```
+
+`ResearchId` identifies the persisted invocation. Each displayed `EvidenceId`
+identifies canonical durable source evidence. Full source URLs, bodies, headers,
+cookies, and credentials are not printed by default.
+
 ## Cli
 
 Run crawls with explicit runtime mode control:

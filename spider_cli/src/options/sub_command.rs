@@ -53,8 +53,53 @@ pub struct TransportArgs {
     pub tor_proxy: Option<String>,
 }
 
+/// Nested operations under the durable research product surface.
+#[cfg(feature = "research")]
+#[derive(Subcommand)]
+pub enum ResearchCommand {
+    /// Reopen and display one existing durable research session.
+    SHOW {
+        /// Canonical research invocation identity.
+        research_id: String,
+        /// Canonical evidence/session database path. Falls back to
+        /// RESEARCH_EVIDENCE_DB.
+        #[clap(long)]
+        database: Option<std::path::PathBuf>,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Run durable canonical research, or reopen a prior durable session.
+    #[cfg(feature = "research")]
+    RESEARCH {
+        /// Research question. The reserved word `show` selects the nested
+        /// reopen command instead of being accepted as a topic.
+        topic: Option<String>,
+        /// Reopen operation, when `show` is supplied.
+        #[clap(subcommand)]
+        command: Option<ResearchCommand>,
+        /// Canonical evidence/session database path. Falls back to
+        /// RESEARCH_EVIDENCE_DB.
+        #[clap(long)]
+        database: Option<std::path::PathBuf>,
+        /// SearXNG base URL. Falls back to SEARXNG_BASE_URL.
+        #[clap(long)]
+        searxng_url: Option<String>,
+        /// OpenAI-compatible API base URL. Falls back to
+        /// OPENAI_COMPAT_BASE_URL.
+        #[clap(long)]
+        openai_base_url: Option<String>,
+        /// OpenAI-compatible model name. Falls back to OPENAI_COMPAT_MODEL.
+        #[clap(long)]
+        model: Option<String>,
+        /// Caller-specific extraction instructions.
+        #[clap(long)]
+        extraction_instructions: Option<String>,
+        /// Maximum discovered pages selected for acquisition.
+        #[clap(long)]
+        max_pages: Option<usize>,
+    },
     /// Crawl the website extracting links.
     CRAWL {
         /// sequentially one by one crawl pages

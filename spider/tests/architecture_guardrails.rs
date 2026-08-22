@@ -5644,3 +5644,57 @@ fn durable_research_result_is_nested_spider_owned_and_evidence_referential() {
         "provider-neutral spider_agent must not own Spider durable-result types"
     );
 }
+
+#[test]
+fn shipping_research_cli_is_a_thin_canonical_session_binding() {
+    let cli = fs::read_to_string(workspace_root().join("spider_cli/src/research.rs")).unwrap();
+    for required in [
+        "run_durable_research(",
+        "read_research_session(",
+        ".evidence\n                    .resolve(store)",
+        "async fn format_session(",
+        "format_session(&store, &run.session, verbose)",
+        "format_session(&store, &session, verbose)",
+        "RESEARCH_EVIDENCE_DB",
+        "OPENAI_COMPAT_API_KEY",
+    ] {
+        assert!(
+            cli.contains(required),
+            "shipping research CLI is missing canonical binding invariant {required:?}"
+        );
+    }
+    for forbidden in [
+        ".research(",
+        "CanonicalPageAcquirer",
+        "ResearchId::new(",
+        "EvidenceId::new(",
+        "record_evidence(",
+        "CREATE TABLE",
+        "sqlx::",
+        "--api-key",
+        "pub struct ResearchSession",
+        "pub struct DurableResearchResult",
+    ] {
+        let production = cli.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !production.contains(forbidden),
+            "shipping research CLI must not duplicate canonical research ownership: found {forbidden:?}"
+        );
+    }
+
+    let main = fs::read_to_string(workspace_root().join("spider_cli/src/main.rs")).unwrap();
+    assert!(main.contains("research::execute(request, cli.verbose).await"));
+    assert!(!main.contains("run_durable_research"));
+    assert!(!main.contains("read_research_session"));
+
+    let manifest = fs::read_to_string(workspace_root().join("spider_cli/Cargo.toml")).unwrap();
+    assert!(manifest.contains("\"search_searxng\", \"research\", \"mcp\""));
+    for feature in [
+        "spider/agent_acquisition",
+        "spider/agent_openai",
+        "spider/agent_search_searxng",
+        "spider/disk",
+    ] {
+        assert!(manifest.contains(feature));
+    }
+}

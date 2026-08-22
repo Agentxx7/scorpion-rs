@@ -1,11 +1,21 @@
 //! Live operator check for canonical Spider-backed research acquisition.
 //!
-//! This retains evidence in memory for inspection. It does not record an
-//! `EvidenceRef` or claim durable evidence persistence.
+//! By default this retains evidence ephemerally for inspection. With the
+//! `disk` feature and `RESEARCH_EVIDENCE_DB` set, it records through the
+//! canonical evidence ledger, drops the adapter/store, reopens the database,
+//! and resolves every successfully extracted acquisition ID as an
+//! `EvidenceRef`.
 
 use spider::agent::{Agent, AgentConfig, ResearchOptions, SearchOptions};
 use spider::features::agent_acquisition::CanonicalPageAcquirer;
+#[cfg(feature = "disk")]
+use spider::{
+    features::{domain_persistence::DomainPersistence, identity::EvidenceId},
+    utils::evidence::{AcquisitionOptions, EvidenceRef},
+};
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "disk")]
+use std::sync::Arc;
 
 const HTML_MAX_BYTES: usize = 10_000;
 const PREVIEW_CHARS: usize = 1_200;
@@ -29,7 +39,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("OPENAI_COMPAT_MODEL must name the model served by llama.cpp");
     let api_key = std::env::var("OPENAI_COMPAT_API_KEY").unwrap_or_else(|_| "local".to_string());
 
-    let canonical_acquirer = CanonicalPageAcquirer::default();
+    let evidence_database = std::env::var_os("RESEARCH_EVIDENCE_DB").map(std::path::PathBuf::from);
+    #[cfg(feature = "disk")]
+    let canonical_acquirer = match evidence_database.as_deref() {
+        Some(path) => CanonicalPageAcquirer::new_durable(
+            AcquisitionOptions::default(),
+            Arc::new(DomainPersistence::open(path).await?),
+        ),
+        None => CanonicalPageAcquirer::default(),
+    };
+    #[cfg(not(feature = "disk"))]
+    let canonical_acquirer = {
+        if evidence_database.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "RESEARCH_EVIDENCE_DB requires the spider disk feature",
+            )
+            .into());
+        }
+        CanonicalPageAcquirer::default()
+    };
     let evidence_handle = canonical_acquirer.clone();
     let agent = Agent::builder()
         .with_config(
@@ -66,6 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .extractions
         .iter()
         .filter_map(|extraction| extraction.acquisition_id.as_deref())
+        .collect();
+    #[cfg(feature = "disk")]
+    let durable_ids: Vec<String> = research
+        .extractions
+        .iter()
+        .filter_map(|extraction| extraction.acquisition_id.clone())
         .collect();
     let extraction_input_bytes: HashMap<&str, usize> = research
         .extractions
@@ -155,6 +190,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or("No synthesis produced")
     );
     println!("Final research output complete.");
-    println!("Evidence was retained in memory; no EvidenceRef was persisted.");
+    #[cfg(feature = "disk")]
+    if let Some(path) = evidence_database {
+        drop(retained);
+        drop(evidence_handle);
+        drop(agent);
+        let reopened = DomainPersistence::open(&path).await?;
+        for id in durable_ids {
+            let evidence_id: EvidenceId = id.parse()?;
+            let evidence = EvidenceRef::new(evidence_id)
+                .resolve(&reopened)
+                .await?
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("durable evidence {id} was not resolvable after reopen"),
+                    )
+                })?;
+            println!(
+                "Reopened durable evidence: acquisition_id={} requested_url={} final_url={} transport={} dns={} backend_provenance={} response_origin={}",
+                id,
+                evidence.requested_url.as_deref().unwrap_or("unknown"),
+                evidence.final_url.as_deref().unwrap_or("unknown"),
+                evidence.transport.as_deref().unwrap_or("unknown"),
+                evidence.dns.as_deref().unwrap_or("unspecified"),
+                evidence
+                    .backend_provenance
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                evidence.response_origin.as_deref().unwrap_or("unknown")
+            );
+        }
+        println!("Durable evidence resolved from the reopened canonical ledger.");
+    } else {
+        println!("Evidence was retained ephemerally; no EvidenceRef was persisted.");
+    }
+    #[cfg(not(feature = "disk"))]
+    println!("Evidence was retained ephemerally; no EvidenceRef was persisted.");
     Ok(())
 }

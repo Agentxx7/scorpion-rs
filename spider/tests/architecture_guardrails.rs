@@ -5466,3 +5466,46 @@ fn no_shadow_credential_aware_cache_policy_in_cli_or_mcp() {
         }
     }
 }
+
+#[test]
+fn durable_research_acquisition_reuses_the_canonical_evidence_ledger() {
+    let acquisition =
+        fs::read_to_string(workspace_root().join("spider/src/features/agent_acquisition.rs"))
+            .unwrap();
+    for required in [
+        "features::domain_persistence::DomainPersistence",
+        "utils::evidence::{record_evidence, EvidenceRef}",
+        "pub fn new_durable(",
+        "evidence.id = Some(acquisition_id);",
+        "record_evidence(store, evidence)",
+        "evidence.id != Some(acquisition_id)",
+        "acquisition_id: Some(acquisition_id.to_string())",
+    ] {
+        assert!(
+            acquisition.contains(required),
+            "durable canonical research acquisition is missing ledger/identity invariant {required:?}"
+        );
+    }
+
+    for forbidden in [
+        "sqlx::",
+        "CREATE TABLE",
+        "INSERT INTO",
+        "struct ResearchEvidenceStore",
+        "struct DurableResearchEvidence",
+    ] {
+        assert!(
+            !acquisition.contains(forbidden),
+            "research acquisition must not introduce a second evidence store/model: found {forbidden:?}"
+        );
+    }
+}
+
+#[test]
+fn research_page_extraction_preserves_the_canonical_acquisition_identity() {
+    let agent = fs::read_to_string(workspace_root().join("spider_agent/src/agent.rs")).unwrap();
+    assert!(
+        agent.contains("acquisition_id: source.acquisition_id,"),
+        "successful PageExtraction must carry the exact acquisition identity supplied by PageAcquirer"
+    );
+}

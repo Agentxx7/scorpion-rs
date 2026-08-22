@@ -239,6 +239,26 @@ tokio = { version = "1", features = ["test-util"] }
 spider_network_blocker = "0.0"
 fast_html2md = "0"
 spider_agent_html = { path = "../spider_agent_html" }
+# Parses docs/frontier/ledger/*.toml for spider/tests/closure_harness.rs
+# (SCORPION_CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_001). Already
+# resolved in Cargo.lock via a transitive dependency; adding it directly as
+# a dev-dependency here does not introduce a second copy.
+toml = "0.9"
+syn = { version = "2", features = ["full", "visit"] }
+# Parses .github/workflows/*.yml as real structured data for
+# closure_harness.rs's CI_ENFORCED checks — raw-text/substring matching
+# against workflow files was found, under adversarial review, to be
+# satisfiable by a YAML comment or a step's own `if:` gate, neither of
+# which a text scan can distinguish from a genuinely required, executed
+# command. Maintained fork of the (deprecated) serde_yaml.
+serde_yaml_ng = "0.10"
+# Isolated fixture directories for
+# spider/tests/closure_harness_behavioral_contract.rs, which spawns the
+# real closure_harness binary as a subprocess against deliberately-invalid
+# ledger fixtures. Already an optional main dependency (gated behind
+# `balance`); listed here directly so this dev-only use never depends on
+# that feature being enabled.
+tempfile = "3"
 
 [[bench]]
 name = "allocator_bench"

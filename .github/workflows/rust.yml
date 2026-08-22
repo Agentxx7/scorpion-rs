@@ -64,6 +64,354 @@ jobs:
         if: env.RUN_LIVE_TESTS == '1' || env.RUN_LIVE_TESTS == 'true' || env.RUN_LIVE_TESTS == 'TRUE'
         run: cargo test -p spider --features chrome website::scrape -- --exact --nocapture
 
+  # SCORPION_CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_001: before
+  # this job existed, `spider --lib` (755+ unit tests) and
+  # `spider --test architecture_guardrails` (every architecture guardrail
+  # built up across this repository's frontier history) never ran in CI at
+  # all — only narrow slices (`uring_fs`, one live-gated `website::scrape`
+  # smoke test) did. Every closure claim resting on those suites had only
+  # ever been verified locally. This job closes that gap, and also runs
+  # `closure_harness` — the tool that checks other capabilities' CI_ENFORCED
+  # claims — so it cannot itself be an exception to the rule it enforces.
+  #
+  # Required/deterministic only: every step below must not depend on
+  # third-party live-network behavior. The exact, current set of
+  # live-network tests is tracked machine-checkably in
+  # docs/frontier/ledger/LIVE_NETWORK_TESTS.toml, independently
+  # re-derived every run by closure_harness's own static analysis
+  # (`live_network_registry_matches_detected_reality`,
+  # `required_ci_excludes_every_registered_live_test`) — this comment is
+  # documentation, not the source of truth; if the two ever disagree, the
+  # `spider_core` job's own second step (which runs closure_harness)
+  # fails. `--skip` below excludes the registry entries compiled by these
+  # (`crawl`, `scrape`, `crawl_invalid` [covered by the `website::crawl`
+  # skip via prefix match], `not_crawl_blacklist`,
+  # `not_crawl_blacklist_regex`, `test_crawl_subdomains`,
+  # `test_crawl_glob`, `test_crawl_tld`, `test_crawl_subscription`,
+  # `test_crawl_proxy`, `test_crawl_budget`, `test_crawl_pause_resume`)
+  # feature combinations; the canonical registry currently contains 13 total.
+  # `test_crawl_shutdown`
+  # (spider.cloud) requires a feature neither step enables and needs no
+  # skip here. They still run, unfiltered, in the separately-classified
+  # `spider_core_live_network` job below.
+  spider_core:
+    runs-on: ubuntu-latest
+    # Bypass class closed (Codex adversarial review): "proxy state during
+    # assurance execution — GitHub Actions run steps are separate
+    # processes; an `unset` performed in the firewall/probe step does not
+    # guarantee later test steps inherit cleared proxy variables." Each
+    # `run:` step below is its own shell process; the firewall step's own
+    # `unset HTTP_PROXY ...` (further down) only ever cleared that one
+    # step's process environment, not any step that runs after it. A
+    # job-level `env:` block is inherited by *every* step's process
+    # (unlike a shell `unset`, which dies with the step that ran it), so
+    # every step in this job — the pre-build/dependency-fetch steps
+    # before lockdown, the firewall step itself, and every assurance-
+    # execution step after it — starts with these proxy variables
+    # explicitly forced empty, both upper- and lower-case forms. This
+    # closes the exact gap named: a proxy variable set by the runner
+    # environment (or a prior step, if GitHub Actions semantics ever
+    # changed) can no longer route a post-lockdown `cargo test` process
+    # through a loopback proxy and regain effective external network
+    # access despite the firewall's DROP rule.
+    env:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      NO_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      no_proxy: ""
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-spidercore-${{ hashFiles('**/Cargo.lock') }}
+      # Dependency fetch/build happens with full network access, before
+      # egress is denied below — `cargo test --no-run` compiles every
+      # binary this job will later execute without running anything, so
+      # the deny step that follows applies only to the deterministic test
+      # *phase*, not to crates.io/registry access.
+      - name: Pre-build deterministic + closure-assurance test binaries (network still open)
+        env:
+          RUST_MIN_STACK: "67108864"
+        run: >-
+          cargo test -p spider --lib --test architecture_guardrails --test closure_harness
+          --test closure_harness_integrity --test closure_harness_behavioral_contract
+          --features "chrome cache cache_request" --no-run
+      - name: Pre-build chrome_remote_cache regression binary (network still open)
+        run: cargo test -p spider --lib --features chrome_remote_cache --no-run
+      # Runtime egress denial for the deterministic phase — the primary
+      # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
+      # alone. GitHub-hosted ubuntu-latest runners grant the runner user
+      # passwordless sudo, so this is designed as a real, working rule
+      # set, not aspirational — but see the NOTE below on what could and
+      # could not be verified.
+      #
+      # Fixes over the prior version, each closing a specific demonstrated
+      # bypass:
+      #   - `ip6tables` rules mirror every `iptables` (IPv4) rule — the
+      #     prior version left IPv6 completely unrestricted.
+      #   - No DNS is permitted at all (the prior version allowed any
+      #     external DNS server on port 53, itself a viable exfiltration/
+      #     tunneling channel). The deterministic phase's tests are all
+      #     either pure in-memory logic or LOCAL_NETWORK (127.0.0.1)
+      #     fixtures — none of them legitimately need to resolve a
+      #     hostname, so none is allowed to.
+      #   - `-F`/`-X` flush every pre-existing OUTPUT rule (both stacks)
+      #     before adding any of ours, so no earlier ACCEPT rule — from
+      #     the runner image's own default configuration, which this
+      #     workflow does not control — can out-rank the REJECT below by
+      #     rule-ordering accident. The explicit rule *order* added here
+      #     (loopback ACCEPT, then REJECT) is itself now the only source
+      #     of truth for this chain.
+      #   - `set -euo pipefail` plus checking each `sudo iptables`/
+      #     `ip6tables` call's own exit status: if firewall setup itself
+      #     fails partway (e.g. the runner image lacks `iptables`, or
+      #     sudo is unexpectedly unavailable), the step fails closed —
+      #     the job stops here rather than silently proceeding into the
+      #     "deterministic" phase with no enforcement at all.
+      #   - Explicit post-install probes prove the lockdown is actually
+      #     active before any test runs: loopback must still work,
+      #     IPv4 external must fail, IPv6 external must fail. Any probe
+      #     behaving the wrong way fails the step.
+      #
+      # NOTE (unverified, not hidden): this step's actual enforcement
+      # could not be exercised from this sandboxed development
+      # environment, which has neither root nor CAP_NET_ADMIN
+      # (`unshare -n` and `sudo iptables` were both refused here) — it is
+      # designed against documented iptables/ip6tables semantics and
+      # GitHub Actions' documented passwordless-sudo runner
+      # configuration, but has not been observed running for real. The
+      # post-install probes below exist precisely so its *first* real
+      # run — not this review — is what actually proves it, and fails
+      # loudly if it doesn't.
+      - name: Deny external network egress for the deterministic test phase (IPv4 + IPv6, fail-closed, self-verifying)
+        run: |
+          set -euo pipefail
+
+          # Flush first: no rule from the runner image's own default
+          # OUTPUT chain configuration survives to compete with ours.
+          sudo iptables -F OUTPUT
+          sudo ip6tables -F OUTPUT
+
+          # Loopback only. No DNS, no external host, on either stack.
+          sudo iptables  -A OUTPUT -o lo -j ACCEPT
+          sudo iptables  -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
+          sudo iptables  -P OUTPUT DROP
+          sudo ip6tables -A OUTPUT -o lo -j ACCEPT
+          sudo ip6tables -A OUTPUT -d ::1/128 -j ACCEPT
+          sudo ip6tables -P OUTPUT DROP
+
+          # A proxy env var pointed at an allowed (loopback) address could
+          # let `curl` route an "external" probe through it and appear to
+          # succeed/fail for the wrong reason — unset every case variant
+          # before probing, so each probe measures the firewall, not a
+          # proxy configuration. This job's own `env:` block (see above)
+          # already forces every one of these empty for this step's
+          # process (and every other step's, including the assurance
+          # steps that follow) — this `unset` is kept as a second,
+          # belt-and-suspenders guarantee specifically for this probe's
+          # own shell, since an empty-string env var and a genuinely
+          # unset one are not always treated identically by every tool.
+          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
+
+          echo "Probe: IPv4 loopback (must succeed)"
+          python3 -m http.server 18734 --bind 127.0.0.1 &>/dev/null &
+          server_pid=$!
+          trap "kill $server_pid 2>/dev/null || true" EXIT
+          sleep 1
+          if ! curl -sS --max-time 3 -o /dev/null http://127.0.0.1:18734/; then
+            echo "::error::IPv4 loopback connectivity failed — firewall rules are too strict, LOCAL_NETWORK fixtures cannot run"
+            exit 1
+          fi
+
+          echo "Probe: IPv6 loopback (must succeed)"
+          python3 -m http.server 18735 --bind ::1 &>/dev/null &
+          server6_pid=$!
+          trap "kill $server_pid $server6_pid 2>/dev/null || true" EXIT
+          sleep 1
+          if ! curl -sS --max-time 3 -g -o /dev/null "http://[::1]:18735/"; then
+            echo "::error::IPv6 loopback connectivity failed — firewall rules are too strict, LOCAL_NETWORK fixtures cannot run"
+            exit 1
+          fi
+
+          echo "Probe: IPv4 external egress (must be denied)"
+          if curl -sS --max-time 3 -o /dev/null https://1.1.1.1/ 2>/dev/null; then
+            echo "::error::IPv4 external egress succeeded — firewall lockdown is not active"
+            exit 1
+          fi
+
+          echo "Probe: IPv6 external egress (must be denied)"
+          if curl -sS --max-time 3 -6 -o /dev/null https://[2606:4700:4700::1111]/ 2>/dev/null; then
+            echo "::error::IPv6 external egress succeeded — firewall lockdown is not active"
+            exit 1
+          fi
+
+          echo "Firewall lockdown confirmed active (IPv4/IPv6 loopback usable, IPv4/IPv6 external egress denied)."
+      - name: Cargo test spider lib, deterministic only (default features)
+        run: >-
+          cargo test -p spider --lib --
+          --skip website::crawl
+          --skip website::scrape
+          --skip website::not_crawl_blacklist
+          --skip website::test_crawl_subdomains
+          --skip website::test_crawl_tld
+          --skip website::test_crawl_subscription
+          --skip website::test_crawl_budget
+          --skip website::test_crawl_glob
+          --skip website::test_crawl_pause_resume
+          --skip website::test_crawl_proxy
+          --skip website::test_crawl_shutdown
+      # RUST_MIN_STACK: pre-existing, environment-specific stack-overflow
+      # under this feature combination at the default thread stack size
+      # (confirmed identical on baseline `HEAD` via `git stash`, unrelated
+      # to any change in this job) — the full `website::*` suite needs a
+      # larger stack to run in-process together under `chrome`.
+      - name: Cargo test spider lib, deterministic only (chrome cache cache_request)
+        env:
+          RUST_MIN_STACK: "67108864"
+        run: >-
+          cargo test -p spider --lib
+          --features "chrome cache cache_request" --
+          --skip website::crawl
+          --skip website::scrape
+          --skip website::not_crawl_blacklist
+          --skip website::test_crawl_subdomains
+          --skip website::test_crawl_tld
+          --skip website::test_crawl_subscription
+          --skip website::test_crawl_budget
+          --skip website::test_crawl_glob
+          --skip website::test_crawl_pause_resume
+          --skip website::test_crawl_proxy
+          --skip website::test_crawl_shutdown
+      # THE closure/architecture assurance suite — deliberately its own,
+      # standalone step, never bundled with `--lib`. This is the narrow,
+      # truthful CI_ENFORCED claim this frontier actually makes: "the
+      # closure/architecture assurance suite is deterministic and
+      # CI-enforced," not "all spider unit tests are deterministic." Its
+      # pass/fail signal is now about exactly these four targets, not
+      # entangled with ~840 unrelated `--lib` tests (some of which are
+      # LOCAL_NETWORK TcpListener fixtures never individually audited for
+      # this claim). `closure_harness_behavioral_contract` — the
+      # independent, subprocess-based behavioral suite that proves each
+      # verifier rule actually rejects a real invalid fixture, not merely
+      # that the source text asserting so exists — is included here so it
+      # is itself required, non-gated CI, not merely a local development
+      # check (Codex adversarial review: "the independent behavioral
+      # suite must be in REQUIRED assurance CI").
+      - name: Cargo test closure/architecture assurance suite (chrome cache cache_request)
+        run: >-
+          cargo test -p spider --test architecture_guardrails --test closure_harness
+          --test closure_harness_integrity --test closure_harness_behavioral_contract
+          --features "chrome cache cache_request"
+      - name: Cargo test canonical credential-cache regression (exact features)
+        run: cargo test -p spider --lib cache_request --features "chrome cache cache_request"
+      # Targeted, exact-match, single-test regression for the
+      # legacy/vendor-chromey cache-isolation invariant
+      # (SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001) — this test
+      # requires `chrome_remote_cache` specifically, a different (larger)
+      # feature than `chrome cache cache_request` above, and is otherwise
+      # uncovered by any step in this job. `--exact` on the one named test
+      # avoids compiling this feature combination's full `--lib` suite
+      # (which would also pull the same live-network `website::*` tests
+      # back in, undoing the determinism above) while still genuinely
+      # compiling and running the regression, not merely checking it
+      # exists.
+      - name: Cargo test spider credential-cache regression (chrome_remote_cache)
+        run: >-
+          cargo test -p spider --lib --features chrome_remote_cache
+          utils::tests::test_cache_enabled_excludes_authorized -- --exact
+
+  # Current shipping-product deterministic proof. These commands exercise
+  # durable research and the CLI fixture/reopen contracts; they are not live
+  # SearXNG/model acceptance and must never be reported as such.
+  current_product:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-current-product-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cargo test spider_agent deterministic research (OpenAI-compatible + SearXNG)
+        run: cargo test -p spider_agent --features "openai search_searxng"
+      - name: Cargo test spider_agent_html
+        run: cargo test -p spider_agent_html
+      - name: Cargo test durable canonical acquisition
+        run: cargo test -p spider --features "agent_acquisition agent_openai agent_search_searxng disk" features::agent_acquisition::tests
+      - name: Cargo test durable ResearchSession and DurableResearchResult
+        run: cargo test -p spider --features "agent_acquisition agent_openai agent_search_searxng disk" features::research_session::tests
+      - name: Cargo test canonical identity
+        run: cargo test -p spider --features serde features::identity::tests
+      - name: Cargo check CLI without default features
+        run: cargo check -p spider_cli --no-default-features
+      - name: Cargo check CLI research feature composition
+        run: cargo check -p spider_cli --no-default-features --features research
+      - name: Cargo test research-only CLI unit contract
+        run: cargo test -p spider_cli --no-default-features --features research --bin scorpion
+      - name: Cargo test research-only shipping binary RUN and SHOW fixtures
+        run: cargo test -p spider_cli --no-default-features --features research --test research_cli
+      - name: Cargo test default shipping CLI
+        run: cargo test -p spider_cli --bin scorpion
+      - name: Cargo test default shipping binary RUN and SHOW fixtures
+        run: cargo test -p spider_cli --test research_cli
+
+  # Separately classified: the same 13 live-network tests skipped above,
+  # unfiltered, gated behind `RUN_LIVE_TESTS` like the `chrome` job's
+  # comparable test — real coverage is preserved, it is simply not part of
+  # the required/deterministic closure path. Not treated as
+  # `CI_ENFORCED` configuration proof for any capability's closure ledger
+  # unless that capability specifically documents a controlled (non-live)
+  # test endpoint.
+  spider_core_live_network:
+    runs-on: ubuntu-latest
+    env:
+      RUN_LIVE_TESTS: ${{ secrets.RUN_LIVE_TESTS }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-spidercore-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cargo test spider lib live network (website crawl/scrape/blacklist/subdomains/tld/subscription/budget/glob/pause_resume/proxy)
+        if: env.RUN_LIVE_TESTS == '1' || env.RUN_LIVE_TESTS == 'true' || env.RUN_LIVE_TESTS == 'TRUE'
+        run: |
+          set -euo pipefail
+          cargo test -p spider --lib website::crawl -- --exact --nocapture
+          cargo test -p spider --lib website::scrape -- --exact --nocapture
+          cargo test -p spider --lib website::crawl_invalid -- --exact --nocapture
+          cargo test -p spider --lib website::not_crawl_blacklist -- --exact --nocapture
+          cargo test -p spider --lib website::not_crawl_blacklist_regex -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_subdomains -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_glob -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_tld -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_subscription -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_proxy -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_budget -- --exact --nocapture
+          cargo test -p spider --lib website::test_crawl_pause_resume -- --exact --nocapture
+          cargo test -p spider --lib --features spider_cloud website::test_crawl_shutdown -- --exact --nocapture
+      - name: Live-test status when disabled
+        if: env.RUN_LIVE_TESTS != '1' && env.RUN_LIVE_TESTS != 'true' && env.RUN_LIVE_TESTS != 'TRUE'
+        run: echo "LIVE TESTS = NOT RUN"
+
   io_uring:
     runs-on: ubuntu-latest
     steps:

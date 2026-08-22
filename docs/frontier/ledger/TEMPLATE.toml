@@ -1,0 +1,137 @@
+# Capability closure ledger — one file per tracked frontier, named
+# `<FRONTIER_ID>.toml`. See docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md
+# for the full stage definitions and what `spider/tests/closure_harness.rs`
+# checks. Copy this file, fill it in with real, grep-checkable evidence
+# (not narrative claims), and delete any [stages.X] table you cannot yet
+# back with evidence — the harness rejects a claimed `stage` higher than
+# the last section it can verify.
+#
+# `id` must exactly match this file's basename (without .toml).
+
+id = "SCORPION_EXAMPLE_001"
+sdd = "docs/frontier/EXAMPLE_SDD.md"
+summary = "one sentence describing the capability"
+# One of: DESIGNED, IMPLEMENTED, VERIFIED, WIRED, PRODUCTION_REACHABLE,
+# ADVERSARIALLY_VERIFIED, CI_ENFORCED, CLOSED. This is a CLAIM — the
+# harness computes the true, evidence-backed stage independently and fails
+# if this claim exceeds it.
+stage = "DESIGNED"
+# Proof requirements are independent from maturity. CLOSED requires every
+# listed class. UNPROVEN can document absence but can never be required.
+required_proof_classes = ["CODE_PROVEN", "CI_PROVEN"]
+
+[proof.CODE_PROVEN]
+capability_id = "SCORPION_EXAMPLE_001"
+commit = "<40-hex reachable commit SHA>"
+evidence = ["specific locally reproducible code/static/test fact"]
+
+# Add only after a real GitHub Actions execution. Workflow YAML alone is
+# CI_ENFORCED, never CI_PROVEN.
+# [proof.CI_PROVEN]
+# capability_id = "SCORPION_EXAMPLE_001"
+# commit = "<40-hex SHA actually executed>"
+# run_commit = "<same SHA reported by the Actions run>"
+# workflow = ".github/workflows/rust.yml"
+# run_id = "<numeric Actions run id>"
+# run_url = "https://github.com/OWNER/REPO/actions/runs/<same id>"
+# job = "<job id>"
+# step = "<step name>"
+# conclusion = "success"
+# command_identity = "<stable identity equal to stages.CI_ENFORCED.command_identity>"
+
+# [[proof.OPERATOR_OBSERVED]]
+# capability_id = "SCORPION_EXAMPLE_001"
+# commit = "<40-hex SHA actually observed>"
+# command = "<real product command>"
+# purpose = "<what product behavior this establishes>"
+# result = "<concrete observed result and durable IDs where applicable>"
+
+# [proof.LIVE_ENVIRONMENT_DEPENDENT]
+# capability_id = "SCORPION_EXAMPLE_001"
+# requirements = ["real network", "real provider"]
+# observed = false # classification is not observation
+
+[proof.UNPROVEN]
+capability_id = "SCORPION_EXAMPLE_001"
+missing = ["CI_PROVEN"]
+reason = "No real GitHub Actions execution has been recorded yet."
+
+[stages.DESIGNED]
+# Must be a real, existing file path.
+sdd = "docs/frontier/EXAMPLE_SDD.md"
+
+[stages.IMPLEMENTED]
+# "path/to/file.rs:symbol_name" — the actual implementation, not a test.
+evidence = []
+
+[stages.VERIFIED]
+# Required: explicitly marks this stage's evidence as test-only, so it can
+# never be silently reused as PRODUCTION_REACHABLE evidence later.
+test_only = true
+# "path/to/file.rs::tests::test_name"
+evidence = []
+last_verified_command = ""
+last_verified_result = ""
+
+[stages.WIRED]
+# "caller_file.rs:caller_fn -> callee_file.rs:callee_fn", grep-verified.
+callers = []
+# Optional. Cargo features (beyond this harness's own compiled feature
+# set and PRODUCTION_REACHABLE.feature_requirements) that must be
+# considered "on" to resolve which #[cfg(...)]-gated overload of a hop
+# in `callers` above is the real, non-stub implementation — kept
+# separate from feature_requirements so declaring it cannot silently
+# change PRODUCTION_REACHABLE's own ANY-of-these-enabled reachability
+# verdict.
+additional_cfg_features = []
+
+[stages.PRODUCTION_REACHABLE]
+# "binary_default" | "binary_optional_flag" | "public_library_api" | "NOT_REACHABLE"
+reachability_kind = "NOT_REACHABLE"
+# Which shipping binaries/crates actually compile this code under a real
+# build configuration. Empty if NOT_REACHABLE.
+shipping_artifacts = []
+# Cargo features that must be enabled for the code above to compile in.
+feature_requirements = []
+# Symbols that, if found in a claimed artifact's OWN src/ tree, prove that
+# artifact's own code genuinely calls into the WIRED chain — not merely
+# that a Cargo feature happened to compile the module in. Required: a
+# feature-only check would false-positive on code that compiles but is
+# never actually invoked (see closure_harness.rs's
+# artifact_source_references_symbol doc comment for a real example this
+# caught).
+entry_point_symbols = []
+# Mandatory once this table exists — even if the answer is "none found."
+siblings_enumerated = true
+siblings = []
+siblings_note = "why the list above is exhaustive, or why it's empty"
+# "MET" or "NOT_MET" — must match what shipping_artifacts/feature_requirements
+# actually prove when grep-verified against the real Cargo.toml files.
+verdict = "NOT_MET"
+verdict_evidence = "exact reasoning, referencing the Cargo.toml lines checked"
+
+# Everything below is omitted entirely (not left empty) unless
+# PRODUCTION_REACHABLE.verdict = "MET".
+
+# [stages.ADVERSARIALLY_VERIFIED]
+# bypass_attempts = ["mechanism -> outcome", ...]
+
+# [stages.CI_ENFORCED]
+# ci_workflow_file = ".github/workflows/rust.yml"
+# command_identity = "spider-closure-assurance"
+# # No free-text shell command. The real `cargo test` invocation is
+# # declared as discrete, structurally typed fields — parsed with no shell
+# # semantics at all — and compared field-by-field (order-independent) to
+# # the real workflow `run:` step's own parsed structure. See
+# # closure_harness.rs's `TestSelection`/`same_test_selection` doc
+# # comments for the exact model.
+# package = "spider"
+# lib = false
+# test_targets = ["architecture_guardrails", "closure_harness"]
+# feature_set = "chrome cache cache_request"
+# positional_filters = []
+# exact = false
+# skip = []
+
+# [stages.CLOSED]
+# closed_commit = "<40-hex-char SHA present in `git log`>"

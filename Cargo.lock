@@ -9239,6 +9239,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
+]
+
+[[package]]
 name = "servo_arc"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9591,6 +9604,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_regex",
+ "serde_yaml_ng",
  "sha2 0.10.9",
  "simdutf8",
  "sitemap",
@@ -9610,6 +9624,7 @@ dependencies = [
  "string-interner",
  "string_concat",
  "strum 0.28.0",
+ "syn 2.0.119",
  "sysinfo",
  "tempfile",
  "thirtyfour",
@@ -9618,6 +9633,7 @@ dependencies = [
  "tokenizers 0.22.2",
  "tokio",
  "tokio-stream",
+ "toml",
  "tower",
  "tracing",
  "ua_generator",
@@ -11702,6 +11718,12 @@ dependencies = [
  "phf_codegen 0.11.3",
  "rand 0.8.7",
 ]
+
+[[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

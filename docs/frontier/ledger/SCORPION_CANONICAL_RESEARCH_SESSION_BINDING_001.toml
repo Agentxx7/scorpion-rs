@@ -1,0 +1,42 @@
+id = "SCORPION_CANONICAL_RESEARCH_SESSION_BINDING_001"
+sdd = "SCORPION_ARCHITECTURE.md"
+summary = "ResearchId owns one durable ResearchSession and ordered Source-N to EvidenceRef lineage."
+stage = "VERIFIED"
+required_proof_classes = ["CODE_PROVEN", "CI_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
+
+[proof.CODE_PROVEN]
+capability_id = "SCORPION_CANONICAL_RESEARCH_SESSION_BINDING_001"
+commit = "b830d74046f2ac47e1471232da949c1f44f6bbda"
+evidence = ["ResearchSession persistence and reopen tests", "canonical ResearchId tests"]
+
+[[proof.OPERATOR_OBSERVED]]
+capability_id = "SCORPION_CANONICAL_RESEARCH_SESSION_BINDING_001"
+commit = "b8671f335642e81bfc279e521c8d0c80729a3d12"
+command = "scorpion research followed in a separate process by scorpion research show research_8a163f3ccffa2e19949cbad189452ead --database /tmp/scorpion-research-cli.sqlite"
+purpose = "Observe one durable invocation retaining identity and ordered evidence bindings after reopen."
+result = "The same ResearchId, CompletedSuccessfully state, synthesis, and three ordered EvidenceRefs reopened without provider configuration."
+
+[proof.LIVE_ENVIRONMENT_DEPENDENT]
+capability_id = "SCORPION_CANONICAL_RESEARCH_SESSION_BINDING_001"
+requirements = ["real SearXNG", "real web network", "real OpenAI-compatible model"]
+observed = false
+
+[proof.UNPROVEN]
+capability_id = "SCORPION_CANONICAL_RESEARCH_SESSION_BINDING_001"
+missing = ["CI_PROVEN"]
+reason = "No real GitHub Actions run for the repaired required command has been recorded."
+
+[stages.DESIGNED]
+sdd = "SCORPION_ARCHITECTURE.md"
+
+[stages.IMPLEMENTED]
+evidence = ["spider/src/features/research_session.rs:ResearchSession"]
+
+[stages.VERIFIED]
+test_only = true
+evidence = [
+  "spider/src/features/research_session.rs::tests::identical_topics_are_distinct_sessions_and_claim_precedes_execution",
+  "spider/src/features/research_session.rs::tests::session_and_bound_evidence_resolve_after_file_reopen",
+]
+last_verified_command = "cargo test -p spider --lib --features \"agent_acquisition agent_openai agent_search_searxng disk\" features::research_session::tests"
+last_verified_result = "9 passed locally; CI proof absent"

@@ -1,0 +1,42 @@
+id = "SCORPION_CANONICAL_RESEARCH_CLI_PRODUCT_BINDING_001"
+sdd = "SCORPION_ARCHITECTURE.md"
+summary = "The shipping scorpion CLI is a thin durable RUN/SHOW presentation binding."
+stage = "VERIFIED"
+required_proof_classes = ["CODE_PROVEN", "CI_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
+
+[proof.CODE_PROVEN]
+capability_id = "SCORPION_CANONICAL_RESEARCH_CLI_PRODUCT_BINDING_001"
+commit = "b8671f335642e81bfc279e521c8d0c80729a3d12"
+evidence = ["shipping parser and binary fixture tests", "thin-binding architecture guardrail"]
+
+[[proof.OPERATOR_OBSERVED]]
+capability_id = "SCORPION_CANONICAL_RESEARCH_CLI_PRODUCT_BINDING_001"
+commit = "b8671f335642e81bfc279e521c8d0c80729a3d12"
+command = "scorpion research \"How do Tokio and async-std compare for Rust async programming?\" followed by separate-process scorpion research show research_8a163f3ccffa2e19949cbad189452ead --database /tmp/scorpion-research-cli.sqlite"
+purpose = "Observe the shipping binary's real durable RUN and provider-independent SHOW paths."
+result = "RUN completed successfully; SHOW restored the same ResearchId, state, synthesis, and Source 1/2/3 EvidenceIds without SearXNG, endpoint, model, or API key configuration."
+
+[proof.LIVE_ENVIRONMENT_DEPENDENT]
+capability_id = "SCORPION_CANONICAL_RESEARCH_CLI_PRODUCT_BINDING_001"
+requirements = ["real SearXNG", "real web network", "real OpenAI-compatible model"]
+observed = false
+
+[proof.UNPROVEN]
+capability_id = "SCORPION_CANONICAL_RESEARCH_CLI_PRODUCT_BINDING_001"
+missing = ["CI_PROVEN"]
+reason = "The historical operator observation is exact-commit bound; repaired CI has not run."
+
+[stages.DESIGNED]
+sdd = "SCORPION_ARCHITECTURE.md"
+
+[stages.IMPLEMENTED]
+evidence = ["spider_cli/src/research.rs:execute"]
+
+[stages.VERIFIED]
+test_only = true
+evidence = [
+  "spider_cli/tests/research_cli.rs:show_reopens_and_formats_canonical_result_without_provider_config_or_secret_payloads",
+  "spider_cli/tests/research_cli.rs:run_fails_closed_on_each_missing_configuration_before_networking",
+]
+last_verified_command = "cargo test -p spider_cli --test research_cli"
+last_verified_result = "4 passed locally; CI proof absent"

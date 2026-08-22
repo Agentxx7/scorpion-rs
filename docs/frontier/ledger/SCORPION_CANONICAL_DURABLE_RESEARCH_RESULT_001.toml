@@ -1,0 +1,42 @@
+id = "SCORPION_CANONICAL_DURABLE_RESEARCH_RESULT_001"
+sdd = "SCORPION_ARCHITECTURE.md"
+summary = "ResearchSession durably owns extracted facts, synthesis, and canonical citation bindings without duplicating evidence."
+stage = "VERIFIED"
+required_proof_classes = ["CODE_PROVEN", "CI_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
+
+[proof.CODE_PROVEN]
+capability_id = "SCORPION_CANONICAL_DURABLE_RESEARCH_RESULT_001"
+commit = "1b1db0eddfff8399ce0180a5e62a35abd1f7e85c"
+evidence = ["terminal/result compatibility tests", "durable result architecture guardrails"]
+
+[[proof.OPERATOR_OBSERVED]]
+capability_id = "SCORPION_CANONICAL_DURABLE_RESEARCH_RESULT_001"
+commit = "b8671f335642e81bfc279e521c8d0c80729a3d12"
+command = "scorpion research followed in a separate process by scorpion research show research_8a163f3ccffa2e19949cbad189452ead --database /tmp/scorpion-research-cli.sqlite"
+purpose = "Observe durable synthesis, missing evidence, and citations after process-local result lifetime ended."
+result = "SHOW restored the same synthesis and ordered source-local missing evidence with all three canonical EvidenceRefs."
+
+[proof.LIVE_ENVIRONMENT_DEPENDENT]
+capability_id = "SCORPION_CANONICAL_DURABLE_RESEARCH_RESULT_001"
+requirements = ["real SearXNG", "real web network", "real OpenAI-compatible model"]
+observed = false
+
+[proof.UNPROVEN]
+capability_id = "SCORPION_CANONICAL_DURABLE_RESEARCH_RESULT_001"
+missing = ["CI_PROVEN"]
+reason = "No real GitHub Actions run for the repaired required command has been recorded."
+
+[stages.DESIGNED]
+sdd = "SCORPION_ARCHITECTURE.md"
+
+[stages.IMPLEMENTED]
+evidence = ["spider/src/features/research_session.rs:DurableResearchResult"]
+
+[stages.VERIFIED]
+test_only = true
+evidence = [
+  "spider/src/features/research_session.rs::tests::terminal_states_publish_only_compatible_durable_results",
+  "spider/src/features/research_session.rs::tests::malformed_unknown_and_duplicate_synthesis_citations_fail_closed",
+]
+last_verified_command = "cargo test -p spider --lib --features \"agent_acquisition agent_openai agent_search_searxng disk\" features::research_session::tests"
+last_verified_result = "9 passed locally; CI proof absent"

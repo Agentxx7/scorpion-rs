@@ -1,0 +1,42 @@
+id = "SCORPION_RESEARCH_DURABLE_SOURCE_EVIDENCE_001"
+sdd = "SCORPION_ARCHITECTURE.md"
+summary = "Canonical research acquisition persists source evidence through EvidenceRef before exposing a durable acquisition identity."
+stage = "VERIFIED"
+required_proof_classes = ["CODE_PROVEN", "CI_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
+
+[proof.CODE_PROVEN]
+capability_id = "SCORPION_RESEARCH_DURABLE_SOURCE_EVIDENCE_001"
+commit = "9492bb748ef51062608bdbef6a442de06450ae82"
+evidence = ["durable and ephemeral adapter tests", "canonical record_evidence architecture guardrail"]
+
+[[proof.OPERATOR_OBSERVED]]
+capability_id = "SCORPION_RESEARCH_DURABLE_SOURCE_EVIDENCE_001"
+commit = "b8671f335642e81bfc279e521c8d0c80729a3d12"
+command = "scorpion research \"How do Tokio and async-std compare for Rust async programming?\" --database /tmp/scorpion-research-cli.sqlite --searxng-url http://127.0.0.1:8080 --openai-base-url http://127.0.0.1:11434/v1 --model <operator-model>"
+purpose = "Observe real shipping research persisting canonical source evidence."
+result = "CompletedSuccessfully; EvidenceIds evid_42db65ff48258b4607efcff1ee44a29e, evid_9cb47b3e6b903e41875d843c89ecff4c, and evid_0f3bc93a7aa1875104c8ca5ee5c74892 reopened through the canonical ledger."
+
+[proof.LIVE_ENVIRONMENT_DEPENDENT]
+capability_id = "SCORPION_RESEARCH_DURABLE_SOURCE_EVIDENCE_001"
+requirements = ["real SearXNG", "real web network", "real OpenAI-compatible model"]
+observed = false
+
+[proof.UNPROVEN]
+capability_id = "SCORPION_RESEARCH_DURABLE_SOURCE_EVIDENCE_001"
+missing = ["CI_PROVEN"]
+reason = "No real GitHub Actions run for the repaired required command has been recorded."
+
+[stages.DESIGNED]
+sdd = "SCORPION_ARCHITECTURE.md"
+
+[stages.IMPLEMENTED]
+evidence = ["spider/src/features/agent_acquisition.rs:CanonicalPageAcquirer"]
+
+[stages.VERIFIED]
+test_only = true
+evidence = [
+  "spider/src/features/agent_acquisition.rs::tests::durable_adapter_preserves_identity_payload_and_resolves_after_reopen",
+  "spider/src/features/agent_acquisition.rs::tests::durable_persistence_failure_returns_no_source_and_never_falls_back",
+]
+last_verified_command = "cargo test -p spider --lib --features \"agent_acquisition agent_openai agent_search_searxng disk\" features::agent_acquisition::tests"
+last_verified_result = "6 passed locally; CI proof absent"

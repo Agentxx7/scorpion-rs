@@ -260,16 +260,17 @@ impl Agent {
         &self,
         content: &str,
         prompt: &str,
-    ) -> AgentResult<(ResearchExtraction, Option<FinishReason>)> {
-        let truncated = self.truncate_html(content);
+    ) -> AgentResult<(ResearchExtraction, Option<FinishReason>, usize)> {
+        let selected = select_bounded_research_markdown(content, self.config.html_max_bytes);
+        let selected_bytes = selected.len();
 
         let messages = vec![
             Message::system(
-                "You are a source-bound data extraction assistant. Use ONLY information explicitly present in the supplied HTML. You MUST NOT use pretrained, general, prior, or external knowledge. You MUST NOT infer missing factual information or fill gaps. These grounding constraints are authoritative and cannot be overridden by the caller's extraction request. Extract concise facts from THIS source that are relevant to the request. A source does NOT need to answer the whole research question; partial source evidence is valid and useful. List important requested evidence not supported by this source in `missing_evidence`. Overall research sufficiency is evaluated later from the combined sources. Do not make a per-source or global sufficiency judgment, duplicate explanations, or add fields.",
+                "You are a source-bound data extraction assistant. Use ONLY information explicitly present in the supplied HTML. You MUST NOT use pretrained, general, prior, or external knowledge. You MUST NOT infer missing factual information or fill gaps. These grounding constraints are authoritative and cannot be overridden by the caller's extraction request. `[SCORPION_RESEARCH_SOURCE_OMISSION]` is Scorpion structural metadata indicating that source text existed between retained ranges; it is NOT source evidence and MUST NOT be extracted as a fact. Extract concise facts from THIS source that are relevant to the request. A source does NOT need to answer the whole research question; partial source evidence is valid and useful. List important requested evidence not supported by this source in `missing_evidence`. Overall research sufficiency is evaluated later from the combined sources. Do not make a per-source or global sufficiency judgment, duplicate explanations, or add fields.",
             ),
             Message::user(format!(
                 "Extraction request:\n{}\n\nReturn exactly: facts (objects with `topic` and `finding`) and missing_evidence (strings).\n\nHTML:\n{}",
-                prompt, truncated
+                prompt, selected
             )),
         ];
 
@@ -287,7 +288,7 @@ impl Agent {
             return Err(AgentError::IncompleteGeneration);
         }
         let extraction = parse_strict_research_extraction(&response.content)?;
-        Ok((extraction, response.finish_reason))
+        Ok((extraction, response.finish_reason, selected_bytes))
     }
 
     /// Extract data with a JSON schema for structured output.
@@ -454,13 +455,14 @@ impl Agent {
                         .extract_research_prepared(&research_content, &extraction_prompt)
                         .await
                     {
-                        Ok((extracted, finish_reason)) => {
+                        Ok((extracted, finish_reason, extraction_input_bytes)) => {
                             extractions.push(PageExtraction {
                                 url: source.final_url,
                                 title: result.title.clone(),
                                 extracted,
                                 acquisition_id: source.acquisition_id,
                                 finish_reason,
+                                extraction_input_bytes,
                             });
                         }
                         Err(e) => {
@@ -1276,6 +1278,230 @@ struct ValidatedResearchSynthesis {
 }
 
 #[cfg(feature = "search")]
+const RESEARCH_SOURCE_OMISSION: &str = "\n[SCORPION_RESEARCH_SOURCE_OMISSION]\n";
+
+#[cfg(feature = "search")]
+fn select_bounded_research_markdown<'a>(
+    content: &'a str,
+    budget: usize,
+) -> std::borrow::Cow<'a, str> {
+    if content.len() <= budget {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    if budget == 0 {
+        return std::borrow::Cow::Owned(String::new());
+    }
+
+    let sections = research_markdown_sections(content);
+    let mut source_budget = budget;
+    let mut ranges = allocate_research_ranges(content, &sections, source_budget);
+
+    loop {
+        let separator_bytes = RESEARCH_SOURCE_OMISSION
+            .len()
+            .saturating_mul(ranges.len().saturating_sub(1));
+        let adjusted = budget.saturating_sub(separator_bytes).min(source_budget);
+        if adjusted == source_budget {
+            break;
+        }
+        source_budget = adjusted;
+        ranges = allocate_research_ranges(content, &sections, source_budget);
+    }
+
+    let mut selected = String::with_capacity(budget);
+    for (index, (start, end)) in ranges.into_iter().enumerate() {
+        if index > 0 {
+            selected.push_str(RESEARCH_SOURCE_OMISSION);
+        }
+        selected.push_str(&content[start..end]);
+    }
+    debug_assert!(selected.len() <= budget);
+    std::borrow::Cow::Owned(selected)
+}
+
+#[cfg(feature = "search")]
+fn research_markdown_sections(content: &str) -> Vec<(usize, usize)> {
+    let mut headings = Vec::new();
+    let mut counts = [0usize; 7];
+    let mut offset = 0;
+    let mut fence: Option<(char, usize)> = None;
+
+    for line in content.split_inclusive('\n') {
+        let indentation = line.bytes().take_while(|byte| *byte == b' ').count();
+        let trimmed = if indentation <= 3 {
+            &line[indentation..]
+        } else {
+            line
+        };
+        let fence_char = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        if let Some(character) = fence_char {
+            let run = trimmed.chars().take_while(|c| *c == character).count();
+            if run >= 3 {
+                match fence {
+                    Some((open, width)) if open == character && run >= width => fence = None,
+                    None => fence = Some((character, run)),
+                    _ => {}
+                }
+                offset += line.len();
+                continue;
+            }
+        }
+
+        if fence.is_none() && indentation <= 3 {
+            let hashes = trimmed.bytes().take_while(|byte| *byte == b'#').count();
+            if (1..=6).contains(&hashes)
+                && trimmed
+                    .as_bytes()
+                    .get(hashes)
+                    .is_some_and(u8::is_ascii_whitespace)
+            {
+                headings.push((offset, hashes));
+                counts[hashes] += 1;
+            }
+        }
+        offset += line.len();
+    }
+
+    let Some(level) = (1..=6).find(|level| counts[*level] >= 2) else {
+        return vec![(0, content.len())];
+    };
+    let mut starts = vec![0];
+    starts.extend(headings.into_iter().filter_map(|(start, heading_level)| {
+        (heading_level == level && start > 0).then_some(start)
+    }));
+    starts.push(content.len());
+    starts
+        .windows(2)
+        .filter_map(|pair| (pair[0] < pair[1]).then_some((pair[0], pair[1])))
+        .collect()
+}
+
+#[cfg(feature = "search")]
+fn allocate_research_ranges(
+    content: &str,
+    sections: &[(usize, usize)],
+    budget: usize,
+) -> Vec<(usize, usize)> {
+    if budget == 0 || sections.is_empty() {
+        return Vec::new();
+    }
+
+    let mut allocations = vec![0usize; sections.len()];
+    let mut active: Vec<usize> = (0..sections.len()).collect();
+    let mut remaining = budget.min(content.len());
+
+    while remaining > 0 && !active.is_empty() {
+        let share = remaining / active.len();
+        let remainder = remaining % active.len();
+        let mut consumed = 0;
+        let mut next = Vec::new();
+        for (position, section_index) in active.into_iter().enumerate() {
+            let (start, end) = sections[section_index];
+            let capacity = end - start - allocations[section_index];
+            let target = share + usize::from(position < remainder);
+            let allocated = capacity.min(target);
+            allocations[section_index] += allocated;
+            consumed += allocated;
+            if allocations[section_index] < end - start {
+                next.push(section_index);
+            }
+        }
+        if consumed == 0 {
+            break;
+        }
+        remaining -= consumed;
+        active = next;
+    }
+
+    let mut ranges = Vec::new();
+    for ((start, end), allocation) in sections.iter().copied().zip(allocations) {
+        if allocation == 0 {
+            continue;
+        }
+        if allocation >= end - start {
+            ranges.push((start, end));
+            continue;
+        }
+
+        let head_bytes = allocation.div_ceil(2);
+        let tail_bytes = allocation - head_bytes;
+        let head_end = preferred_boundary_at_or_before(content, start, start + head_bytes);
+        if head_end > start {
+            ranges.push((start, head_end));
+        }
+        if tail_bytes > 0 {
+            let tail_start = preferred_boundary_at_or_after(content, end - tail_bytes, end);
+            if tail_start < end {
+                ranges.push((tail_start, end));
+            }
+        }
+    }
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        let is_adjacent = merged
+            .last()
+            .is_some_and(|(_, previous_end)| *previous_end == start);
+        if is_adjacent {
+            merged.last_mut().unwrap().1 = end;
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+#[cfg(feature = "search")]
+fn preferred_boundary_at_or_before(content: &str, lower: usize, mut offset: usize) -> usize {
+    offset = offset.min(content.len());
+    while offset > 0 && !content.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let search_start = utf8_boundary_at_or_after(content, lower.max(offset.saturating_sub(128)));
+    let window = &content[search_start..offset];
+    if let Some(position) = window.rfind("\n\n") {
+        return search_start + position + 2;
+    }
+    if let Some(position) = window.rfind('\n') {
+        return search_start + position + 1;
+    }
+    offset
+}
+
+#[cfg(feature = "search")]
+fn preferred_boundary_at_or_after(content: &str, mut offset: usize, upper: usize) -> usize {
+    offset = offset.min(content.len());
+    while offset < content.len() && !content.is_char_boundary(offset) {
+        offset += 1;
+    }
+    let search_end = utf8_boundary_at_or_before(content, upper.min(offset.saturating_add(128)));
+    let window = &content[offset..search_end];
+    if let Some(position) = window.find("\n\n") {
+        return offset + position + 2;
+    }
+    if let Some(position) = window.find('\n') {
+        return offset + position + 1;
+    }
+    offset
+}
+
+#[cfg(feature = "search")]
+fn utf8_boundary_at_or_before(content: &str, mut offset: usize) -> usize {
+    offset = offset.min(content.len());
+    while offset > 0 && !content.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+#[cfg(feature = "search")]
+fn utf8_boundary_at_or_after(content: &str, mut offset: usize) -> usize {
+    offset = offset.min(content.len());
+    while offset < content.len() && !content.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}
+
 fn research_extraction_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1436,6 +1662,9 @@ pub struct PageExtraction {
     /// Provider-reported reason the successful extraction stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
+    /// Exact byte length of the bounded source string supplied to extraction.
+    #[serde(default)]
+    pub extraction_input_bytes: usize,
 }
 
 /// One bounded fact extracted from a research source.
@@ -2194,6 +2423,7 @@ mod tests {
                 },
                 acquisition_id: acquisition_id.map(str::to_string),
                 finish_reason: Some(FinishReason::Stop),
+                extraction_input_bytes: 0,
             }
         }
 
@@ -2424,6 +2654,8 @@ mod tests {
                 result.extractions[0].acquisition_id.as_deref(),
                 Some("evid-late-article")
             );
+            assert!(result.extractions[0].extraction_input_bytes > 0);
+            assert!(result.extractions[0].extraction_input_bytes <= 10_000);
             let calls = captured.lock().unwrap();
             let extraction_system = message_text(&calls[0][0]);
             let extraction_input = message_text(&calls[0][1]);
@@ -2431,6 +2663,9 @@ mod tests {
             assert!(extraction_system.contains("MUST NOT use pretrained"));
             assert!(extraction_system.contains("partial source evidence is valid and useful"));
             assert!(extraction_system.contains("evaluated later from the combined sources"));
+            assert!(extraction_system.contains("SCORPION_RESEARCH_SOURCE_OMISSION"));
+            assert!(extraction_system.contains("NOT source evidence"));
+            assert!(extraction_system.contains("MUST NOT be extracted as a fact"));
             assert!(extraction_input.contains("Late article"));
             assert!(extraction_input.contains("Useful first point"));
             assert!(!extraction_input.contains("menu\nmenu\nmenu"));
@@ -2692,6 +2927,200 @@ mod tests {
             .to_string()
         }
 
+        fn long_section(heading: &str, marker: &str, bytes: usize) -> String {
+            let mut section = format!("## {heading}\n{marker}\n");
+            while section.len() < bytes {
+                section.push_str("source paragraph text retained without rewriting. ");
+            }
+            section.push('\n');
+            section
+        }
+
+        fn assert_selected_ranges_are_verbatim_and_ordered(original: &str, selected: &str) {
+            let mut cursor = 0;
+            for range in selected.split(RESEARCH_SOURCE_OMISSION) {
+                assert!(!range.is_empty());
+                let relative = original[cursor..]
+                    .find(range)
+                    .expect("selected range must be verbatim source text");
+                cursor += relative + range.len();
+            }
+        }
+
+        #[test]
+        fn bounded_research_markdown_returns_fitting_input_byte_identically() {
+            let input = "# Title\nunchanged åäö\n";
+            let selected = select_bounded_research_markdown(input, input.len());
+            assert!(matches!(selected, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(selected, input);
+        }
+
+        #[test]
+        fn bounded_research_markdown_is_deterministic_utf8_safe_and_within_budget() {
+            let input = format!(
+                "# Document\n{}{}{}",
+                long_section("Early", "EARLY åäö", 4_000),
+                long_section("Middle", "MIDDLE 東京", 4_000),
+                long_section("Late", "LATE 🦀", 4_000)
+            );
+            let first = select_bounded_research_markdown(&input, 2_003).into_owned();
+            let second = select_bounded_research_markdown(&input, 2_003).into_owned();
+            assert_eq!(first, second);
+            assert!(first.len() <= 2_003);
+            assert!(std::str::from_utf8(first.as_bytes()).is_ok());
+            assert_selected_ranges_are_verbatim_and_ordered(&input, &first);
+        }
+
+        #[test]
+        fn structural_level_ignores_fences_and_treats_lone_h1_as_preamble() {
+            let input = format!(
+                "# Lone title\nintro\n```rust\n## fake one\n## fake two\n```\n~~~text\n## fake three\n~~~\n    ## indented code one\n    ## indented code two\n{}{}{}",
+                long_section("First real section", "EARLY_REAL", 3_000),
+                long_section("Middle real section", "MIDDLE_REAL", 3_000),
+                long_section("Last real section", "LATE_REAL", 3_000)
+            );
+            let sections = research_markdown_sections(&input);
+            assert_eq!(sections.len(), 4);
+            let selected = select_bounded_research_markdown(&input, 4_000);
+            assert!(selected.contains("# Lone title"));
+            assert!(selected.contains("EARLY_REAL"));
+            assert!(selected.contains("MIDDLE_REAL"));
+            assert!(selected.contains("LATE_REAL"));
+        }
+
+        #[test]
+        fn fair_water_filling_redistributes_short_sections() {
+            let input = format!(
+                "preamble\n## Short\nshort\n{}{}",
+                long_section("Long one", "LONG_ONE", 5_000),
+                long_section("Long two", "LONG_TWO", 5_000)
+            );
+            let selected = select_bounded_research_markdown(&input, 4_000);
+            assert_eq!(selected.len(), 4_000);
+            assert!(selected.contains("short"));
+            assert!(selected.contains("LONG_ONE"));
+            assert!(selected.contains("LONG_TWO"));
+        }
+
+        #[test]
+        fn many_headings_are_covered_deterministically() {
+            let input: String = (0..20)
+                .map(|index| {
+                    long_section(&format!("Section {index}"), &format!("MARKER_{index}"), 700)
+                })
+                .collect();
+            let selected = select_bounded_research_markdown(&input, 10_000);
+            assert_eq!(selected, select_bounded_research_markdown(&input, 10_000));
+            for index in 0..20 {
+                assert!(selected.contains(&format!("MARKER_{index}")));
+            }
+        }
+
+        #[test]
+        fn oversized_single_section_and_heading_free_document_use_head_and_tail() {
+            for input in [
+                format!("## Only section\nBEGIN\n{}\nEND", "middle ".repeat(2_000)),
+                format!("BEGIN\n{}\nEND", "middle ".repeat(2_000)),
+            ] {
+                let selected = select_bounded_research_markdown(&input, 1_000);
+                assert!(selected.contains("BEGIN"));
+                assert!(selected.contains("END"));
+                assert_eq!(selected.matches(RESEARCH_SOURCE_OMISSION).count(), 1);
+                assert!(selected.len() <= 1_000);
+            }
+        }
+
+        #[test]
+        fn omission_marker_is_counted_and_separates_only_verbatim_ranges() {
+            let input = format!("BEGIN{}END", "x".repeat(8_000));
+            let selected = select_bounded_research_markdown(&input, 1_000);
+            assert_eq!(selected.len(), 1_000);
+            assert_eq!(selected.matches(RESEARCH_SOURCE_OMISSION).count(), 1);
+            assert_selected_ranges_are_verbatim_and_ordered(&input, &selected);
+            let source_bytes = selected.len() - RESEARCH_SOURCE_OMISSION.len();
+            assert_eq!(source_bytes + RESEARCH_SOURCE_OMISSION.len(), 1_000);
+        }
+
+        #[test]
+        fn rustify_shaped_structure_retains_comparison_and_guidance() {
+            let input = [
+                long_section("Who Should Read This?", "INTRO", 2_000),
+                long_section("What Is Tokio?", "TOKIO_EVIDENCE", 3_000),
+                long_section("What Is async-std?", "ASYNC_STD_EVIDENCE", 3_000),
+                long_section("What Is smol?", "SMOL_SECTION", 2_000),
+                long_section("How Do the Runtimes Compare?", "DIRECT_COMPARISON", 3_000),
+                long_section(
+                    "When Should You Choose Each Runtime?",
+                    "CHOICE_GUIDANCE",
+                    3_000,
+                ),
+                long_section("Frequently Asked Questions", "LATE_FAQ", 3_000),
+            ]
+            .concat();
+            let selected = select_bounded_research_markdown(&input, 10_000);
+            assert_eq!(selected.len(), 10_000);
+            for marker in [
+                "TOKIO_EVIDENCE",
+                "ASYNC_STD_EVIDENCE",
+                "DIRECT_COMPARISON",
+                "CHOICE_GUIDANCE",
+            ] {
+                assert!(selected.contains(marker));
+            }
+        }
+
+        #[test]
+        fn dasroot_shaped_structure_retains_both_runtime_halves() {
+            let input = [
+                long_section(
+                    "Understanding Async Rust Fundamentals",
+                    "FUNDAMENTALS",
+                    5_000,
+                ),
+                long_section(
+                    "Tokio Runtime: Features and Use Cases",
+                    "TOKIO_SUBSTANTIVE",
+                    7_000,
+                ),
+                long_section(
+                    "async-std: A Modern Alternative",
+                    "ASYNC_STD_SUBSTANTIVE DIRECT_COMPARISON",
+                    6_000,
+                ),
+                long_section("Choosing the Right Runtime", "CHOICE_GUIDANCE", 5_000),
+                long_section("Conclusion", "COMPARATIVE_CONCLUSION", 2_000),
+            ]
+            .concat();
+            let selected = select_bounded_research_markdown(&input, 10_000);
+            assert_eq!(selected.len(), 10_000);
+            for marker in [
+                "TOKIO_SUBSTANTIVE",
+                "ASYNC_STD_SUBSTANTIVE",
+                "DIRECT_COMPARISON",
+                "CHOICE_GUIDANCE",
+            ] {
+                assert!(selected.contains(marker));
+            }
+        }
+
+        #[tokio::test]
+        async fn general_extract_keeps_compatibility_prefix_truncation() {
+            let (llm, captured) = ScriptedLlm::new(&[r#"{}"#]);
+            let mut builder =
+                Agent::builder().with_config(AgentConfig::default().with_html_max_bytes(128));
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let input = format!("BEGIN{}TAIL", "x".repeat(1_000));
+
+            agent.extract(&input, "request").await.unwrap();
+
+            let calls = captured.lock().unwrap();
+            let user = message_text(&calls[0][1]);
+            assert!(user.contains("BEGIN"));
+            assert!(!user.contains("TAIL"));
+            assert!(!user.contains("SCORPION_RESEARCH_SOURCE_OMISSION"));
+        }
+
         #[test]
         fn exact_research_extraction_schema_is_bounded_and_closed() {
             let schema = research_extraction_schema();
@@ -2845,6 +3274,7 @@ mod tests {
 
             assert_eq!(extraction.acquisition_id, None);
             assert_eq!(extraction.finish_reason, None);
+            assert_eq!(extraction.extraction_input_bytes, 0);
         }
     }
 }

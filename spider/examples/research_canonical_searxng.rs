@@ -5,21 +5,10 @@
 
 use spider::agent::{Agent, AgentConfig, ResearchOptions, SearchOptions};
 use spider::features::agent_acquisition::CanonicalPageAcquirer;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 const HTML_MAX_BYTES: usize = 10_000;
 const PREVIEW_CHARS: usize = 1_200;
-
-fn truncate_research_input(content: &str) -> &str {
-    if content.len() <= HTML_MAX_BYTES {
-        return content;
-    }
-    let mut end = HTML_MAX_BYTES;
-    while !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    &content[..end]
-}
 
 fn bounded_preview(content: &str) -> String {
     let mut preview: String = content.chars().take(PREVIEW_CHARS).collect();
@@ -78,11 +67,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter_map(|extraction| extraction.acquisition_id.as_deref())
         .collect();
+    let extraction_input_bytes: HashMap<&str, usize> = research
+        .extractions
+        .iter()
+        .filter_map(|extraction| {
+            extraction
+                .acquisition_id
+                .as_deref()
+                .map(|id| (id, extraction.extraction_input_bytes))
+        })
+        .collect();
     for extraction in &research.extractions {
         println!(
-            "Successful extraction: url={} acquisition_id={} facts={} missing_evidence={} finish_reason={:?} json={}",
+            "Successful extraction: url={} acquisition_id={} extraction_input_bytes={} facts={} missing_evidence={} finish_reason={:?} json={}",
             extraction.url,
             extraction.acquisition_id.as_deref().unwrap_or("none"),
+            extraction.extraction_input_bytes,
             extraction.extracted.facts.len(),
             extraction.extracted.missing_evidence.len(),
             extraction.finish_reason,
@@ -120,14 +120,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 record.evidence.final_url.as_deref().unwrap_or_default(),
             ) {
                 Ok(readable) => {
-                    let extraction_input = truncate_research_input(&readable);
                     println!(
-                        "Research-readable input: acquisition_id={} original_body_bytes={} derived_readable_bytes={} admission=admitted extraction_input_bytes={} preview={:?}",
+                        "Research-readable input: acquisition_id={} original_body_bytes={} derived_readable_bytes={} admission=admitted extraction_input_bytes={}",
                         id,
                         original.len(),
                         readable.len(),
-                        extraction_input.len(),
-                        bounded_preview(extraction_input)
+                        extraction_input_bytes
+                            .get(id.as_str())
+                            .map(|bytes| bytes.to_string())
+                            .unwrap_or_else(|| "not supplied to a successful extraction".to_string())
                     );
                 }
                 Err(error) => println!(

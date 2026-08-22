@@ -90,12 +90,79 @@ Durable results retain source-grounded facts, missing-evidence statements,
 extraction metadata, final synthesis, synthesis token usage, and citation
 bindings. They do not provide deterministic replay.
 
+## Architecture and verification model
+
+Scorpion follows two connected principles: **one canonical engine with thin
+interfaces**, and **evidence-first, proof-gated development**.
+
+```text
+CLI / MCP / library consumers
+            ↓
+    canonical capability seams
+            ↓
+research / discovery / acquisition / transport
+            ↓
+      evidence + provenance
+            ↓
+ identity / persistence / state
+```
+
+Core modules own behavior and state; interfaces call the canonical seams. The
+CLI, for example, must not build its own research engine. An interface or test
+must not introduce a parallel transport, evidence, identity, or persistence
+implementation. Spider compatibility machinery may remain behind approved
+boundaries, while new Scorpion development uses canonical Scorpion paths.
+
+Durable research follows the single lineage shown above:
+
+```text
+ResearchId
+→ ResearchSession
+→ DurableResearchResult
+→ Source N + EvidenceRef
+→ EvidenceId
+→ EvidenceBundle
+```
+
+Development proceeds by narrowing claims to the proof actually obtained:
+
+```text
+AUDIT REALITY
+      ↓
+DEFINE ONE FRONTIER
+      ↓
+TRACE CANONICAL PRODUCT PATH
+      ↓
+MINIMAL IMPLEMENTATION
+      ↓
+CODE_PROVEN
+      ↓
+CI_PROVEN
+      ↓
+OPERATOR_OBSERVED
+      ↓
+CLOSED
+```
+
+`OPERATOR_OBSERVED` is required only when meaningful and feasible and when the
+capability declares it. The canonical proof classes are `CODE_PROVEN`
+(source/static evidence and deterministic tests), `CI_PROVEN` (an identified
+real CI execution), `OPERATOR_OBSERVED` (a concrete product-path observation),
+`LIVE_ENVIRONMENT_DEPENDENT` (a declared external-environment dependency, not
+an observation), and `UNPROVEN` (required proof does not yet exist).
+
+Consequently, green tests do not mean `CLOSED`; a configured workflow is not
+`CI_PROVEN`; successful CI is not `OPERATOR_OBSERVED`; and
+`LIVE_ENVIRONMENT_DEPENDENT` does not mean live execution was observed.
+
 ## Architecture and process
 
 - [Product contract](./SCORPION.md)
 - [Canonical architecture and guardrails](./SCORPION_ARCHITECTURE.md)
 - [Software design specification](./SCORPION_SDD.md)
 - [Frontier process](./SCORPION_PROCESS.md)
+- [Intelligent failure: AI, TDD, and false product confidence](./docs/INTELLIGENT_FAILURE.md)
+- [Canonical closure and production-reality harness](./docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md)
 
 These documents distinguish canonical Scorpion ownership from inherited
 Spider compatibility code and future roadmap work.

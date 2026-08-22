@@ -64,7 +64,9 @@ Rules:
   - commit succeeds
   - push succeeds
   - `HEAD == origin/main`
-  - worktree clean
+  - frontier-specific staged and unstaged diffs clean
+  - unrelated pre-existing dirty work, if any, reverified untouched and
+    unstaged
   - index clean
   - `git diff --check` PASS
   - `git diff --cached --check` PASS
@@ -150,10 +152,25 @@ SDD and acceptance contract is correct.
 Every frontier begins by proving, before any audit or implementation:
 
 - `HEAD == origin/main`
-- clean worktree
 - clean index
 - `git diff --check` PASS
 - `git diff --cached --check` PASS
 
-If any precondition fails: STOP. Do not stash, commit, amend, clean, or mix
-another frontier. Return PRECONDITION BLOCK.
+A globally clean worktree is preferred. Unrelated pre-existing dirty work may
+remain only when all of the following isolation conditions are met:
+
+- every parked path is explicitly identified before frontier work begins
+- its content is recorded sufficiently to verify it later
+- it remains untouched and unstaged
+- the frontier's exact authorized paths are known
+- the frontier-specific staged diff contains only authorized work
+- the frontier-specific unstaged diff is clean at closure
+- the parked paths are reverified unchanged after commit and push
+
+If the index is dirty, HEAD differs from the required baseline/remote, or dirty
+work cannot be isolated and verified under these rules: STOP. Do not stash,
+commit, amend, clean, or mix another frontier. Return PRECONDITION BLOCK.
+
+This exception does not authorize editing, staging, resetting, or absorbing
+unrelated work. Global cleanliness remains the normal case; explicit preservation
+is a narrow isolation mechanism for already parked work.

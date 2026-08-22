@@ -1,144 +1,132 @@
-<p align="center">
-  <a href="https://spider.cloud?utm_source=github&utm_medium=readme&utm_campaign=spider_rs" target="_blank">
-    <img src="https://avatars.githubusercontent.com/u/112983871?s=400&u=e03cc05523f015dd1f2a5ab9e6158de8a30821c2&v=4" alt="Spider" width="140" height="140">
-  </a>
-</p>
+# Scorpion
 
-<h1 align="center">Spider</h1>
+Scorpion is an independent Rust crawling, web-research, evidence, and
+intelligence engine. It combines Spider's mature crawling foundation with a
+canonical evidence-first architecture, durable research sessions, and a
+shipping `scorpion` command-line interface.
 
-<p align="center">The fastest web crawler and scraper for Rust.</p>
+## Built on Spider
 
-<p align="center">
-  <a href="https://crates.io/crates/spider"><img src="https://img.shields.io/crates/v/spider.svg" alt="Crates.io"></a>
-  <a href="https://crates.io/crates/spider"><img src="https://img.shields.io/crates/d/spider.svg?label=downloads" alt="Downloads"></a>
-  <a href="https://docs.rs/spider"><img src="https://docs.rs/spider/badge.svg" alt="Documentation"></a>
-  <a href="https://discord.spider.cloud"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-informational" alt="License"></a>
-</p>
+Scorpion is a fork of [Spider](https://github.com/spider-rs/spider), not a
+replacement history for it. The inherited crawler, crate names, Rust import
+paths, authorship, and MIT licensing remain attributed to the Spider project
+and contributors. Existing Spider library and Spider Cloud integrations remain
+available where their corresponding features are enabled.
 
-<h4 align="center">
-  <a href="https://spider.cloud?utm_source=github&utm_medium=readme&utm_campaign=spider_rs">spider.cloud</a> ·
-  <a href="https://spider.cloud/guides?utm_source=github&utm_medium=readme&utm_campaign=spider_rs">Guides</a> ·
-  <a href="https://docs.rs/spider">Docs</a> ·
-  <a href="./examples/">Examples</a> ·
-  <a href="https://discord.spider.cloud">Discord</a>
-</h4>
+The fork adds Scorpion-owned canonical capabilities while keeping inherited
+Spider compatibility paths clearly separated from new product behavior.
 
----
+## Current capabilities
 
-Spider is a concurrency-first crawling engine built in Rust. It streams pages the moment they arrive, renders JavaScript only when a page demands it, and scales from a single script to a distributed fleet without changing your code. The same engine powers [Spider Cloud](https://spider.cloud?utm_source=github&utm_medium=readme&utm_campaign=spider_rs), so you can prototype locally and move to managed infrastructure with one config change.
+- High-concurrency crawling and scraping inherited from Spider
+- HTTP and browser-backed acquisition
+- One-shot fetch with canonical evidence and provenance
+- Feed, sitemap, news-sitemap, robots-sitemap, and web-search discovery
+- Fail-closed Tor transport when the Tor feature is enabled
+- Durable evidence records identified by `EvidenceId`
+- Durable research sessions and results identified by `ResearchId`
+- Reopening completed research in a later process
+- Canonical Source-N-to-evidence citation bindings
+- MCP access through the existing Spider MCP implementation
+- Canonical watch identity, state, scheduled execution, change detection, and
+  health/readiness primitives
 
-## Start in the cloud
+The normal default build of `spider_cli` produces the `scorpion` binary and
+includes the durable research feature. Custom `--no-default-features` builds
+enable only the capabilities selected by the builder.
 
-The hardest part of crawling at scale isn't the code. It's the proxies, headless browsers, and constant anti-bot churn. Spider Cloud runs all of that for you behind the same API.
+## Command-line interface
 
-[**Get a free API key →**](https://spider.cloud?utm_source=github&utm_medium=readme&utm_campaign=spider_rs) (no card required)
+Build the shipping binary from this repository:
 
-```toml
-[dependencies]
-spider = { version = "2", features = ["spider_cloud"] }
+```sh
+cargo build -p spider_cli
 ```
 
-```rust
-use spider::configuration::{SpiderCloudConfig, SpiderCloudMode};
-use spider::website::Website;
+Inspect its commands with:
 
-let cloud = SpiderCloudConfig::new("sk-...")
-    .with_mode(SpiderCloudMode::Smart); // proxy by default, auto-unblock when blocked
-
-let mut website = Website::new("https://example.com")
-    .with_spider_cloud_config(cloud)
-    .build()?;
+```sh
+cargo run -p spider_cli -- --help
 ```
 
-`Smart` mode routes through proxies first and escalates to the unblocker only on pages that fight back, so you pay for bypass exactly when it's needed and never when it isn't.
+The CLI exposes crawling, scraping, fetch/discovery, search, MCP, transport,
+authentication, and durable research surfaces according to the compiled
+features. See [the CLI guide](./spider_cli/README.md) for command details.
 
-## Or run it locally
+## Durable research
 
-No key, no service. Just the crawler.
+Configure a durable database, SearXNG, and an OpenAI-compatible model endpoint,
+then run:
 
-```toml
-[dependencies]
-spider = "2"
+```sh
+scorpion research "How do Tokio and async-std compare for Rust async programming?"
 ```
 
-```rust
-use spider::{tokio, website::Website};
+The command prints a durable `ResearchId`, the final synthesis, and ordered
+source bindings. Reopen that result later, without the search or model process:
 
-#[tokio::main]
-async fn main() {
-    let mut website = Website::new("https://example.com");
-    let mut rx = website.subscribe(16);
-
-    tokio::spawn(async move {
-        while let Ok(page) = rx.recv().await {
-            println!("{}  {}", page.status_code, page.get_url());
-        }
-    });
-
-    website.crawl().await;
-    website.unsubscribe();
-}
+```sh
+scorpion research show research_00112233445566778899aabbccddeeff \
+  --database /path/to/scorpion-research.sqlite
 ```
 
-Pages stream in as they're fetched. The crawler discovers links, respects boundaries, and stops on its own.
+The durable lineage is:
 
-## How it works
-
-Spider runs HTTP-first and only launches headless Chrome when a page actually needs JavaScript. Streaming is built into both the HTTP and Chrome paths, so pages flow back the moment they're fetched instead of batching at the end. That design delivers best-in-class concurrency throughput, sustaining extremely high request volumes that scale from a single async task to a distributed worker fleet on the same API. Proxies, retries, rate limiting, and stealth are built in.
-
-## Install
-
-| You want… | Run |
-|---|---|
-| Rust library | `cargo add spider` |
-| Command-line tool | `cargo install spider_cli` |
-| Node.js package | `npm i @spider-rs/spider-rs` |
-| Python package | `pip install spider_rs` |
-| MCP server (Claude, Cursor, …) | `cargo install spider_mcp` |
-| Managed crawling | [spider.cloud](https://spider.cloud?utm_source=github&utm_medium=readme&utm_campaign=spider_rs) |
-
-## Configuration
-
-Every option has a sensible default, so set only what you need.
-
-```rust
-let mut website = Website::new("https://example.com")
-    .with_limit(50)                    // concurrent requests
-    .with_depth(10)                    // how deep to follow links
-    .with_delay(500)                   // pause between requests (ms)
-    .with_respect_robots_txt(true)
-    .with_subdomains(true)
-    .with_user_agent(Some("MyBot/1.0"))
-    .with_stealth(true)
-    .build()
-    .unwrap();
+```text
+ResearchId
+→ ResearchSession
+→ DurableResearchResult
+→ Source N + EvidenceRef
+→ EvidenceId
+→ EvidenceBundle
 ```
 
-Full reference in the [`Configuration` docs](https://docs.rs/spider/latest/spider/configuration/struct.Configuration.html).
+- `ResearchId` identifies one persisted research invocation.
+- `EvidenceId` identifies one canonical durable source-evidence record.
+- `Source N` is a presentation-local binding to an `EvidenceRef`; it is not an
+  identity of its own.
 
-For JavaScript-heavy sites, enable `features = ["chrome"]` and call `crawl_smart()`. Spider tries HTTP first and only launches Chrome on pages that need it.
+Durable results retain source-grounded facts, missing-evidence statements,
+extraction metadata, final synthesis, synthesis token usage, and citation
+bindings. They do not provide deterministic replay.
 
-## Use cases
+## Architecture and process
 
-Teams use Spider to feed the open web into vector stores for LLM and RAG pipelines, monitor sites for SEO and price changes, export pages as Markdown, JSON, or WARC, and drive headless Chrome for AI browsing agents. There are [50+ runnable examples](./examples/) to start from.
+- [Product contract](./SCORPION.md)
+- [Canonical architecture and guardrails](./SCORPION_ARCHITECTURE.md)
+- [Software design specification](./SCORPION_SDD.md)
+- [Frontier process](./SCORPION_PROCESS.md)
 
-## Learn more
+These documents distinguish canonical Scorpion ownership from inherited
+Spider compatibility code and future roadmap work.
 
-- 📚 [Guides](https://spider.cloud/guides?utm_source=github&utm_medium=readme&utm_campaign=spider_rs): recipes and integrations
-- 📖 [API docs](https://docs.rs/spider): every option and method
-- 💬 [Discord](https://discord.spider.cloud): questions and ideas
-- 🐛 [Issues](https://github.com/spider-rs/spider/issues): bugs and feature requests
+## Current limitations and roadmap
 
-## Contributing
+The following remain separate work rather than completed product claims:
 
-PRs welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+- Deterministic research replay and complete model/search request snapshots
+- Background watch scheduler daemon operation
+- Watch notifications
+- Unified mixed clearweb/`.onion` research orchestration
+- A stable public JSON contract for research CLI output
 
-```bash
-cargo test -p spider                  # unit tests
-RUN_LIVE_TESTS=1 cargo test           # live network tests
-```
+Some provider, browser, model, CAPTCHA, and transport paths are feature-gated
+or require separate operator qualification. Consult the architecture inventory
+before treating an internal seam as a shipping product capability.
+
+## Upstream libraries and services
+
+For the inherited Spider Rust API, packages, examples, and managed service:
+
+- [Spider repository](https://github.com/spider-rs/spider)
+- [Spider crate](https://crates.io/crates/spider)
+- [Spider API documentation](https://docs.rs/spider)
+- [Spider Cloud](https://spider.cloud)
+
+Scorpion core remains independently self-hostable; Spider Cloud is an optional
+inherited integration, not a requirement for canonical local research.
 
 ## License
 
-[MIT](./LICENSE).
+This repository retains Spider's [MIT license](./LICENSE) and attribution.
+Scorpion-specific additions are distributed under the same repository license.

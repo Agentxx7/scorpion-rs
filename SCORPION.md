@@ -1,8 +1,9 @@
 # Scorpion — Product & Architecture Contract
 
-**Status:** LOCKED — documentation only. Nothing in this document is implemented
-yet; it records decisions so future source changes have a fixed target instead
-of drifting.
+**Status:** ACTIVE PRODUCT CONTRACT. Sections explicitly marked current describe
+implemented or partially implemented Scorpion behavior. Sections explicitly
+marked future or historical retain the original design direction without
+claiming that unfinished capabilities exist today.
 
 **Baseline:** forked from [`spider-rs/spider`](https://github.com/spider-rs/spider)
 at `229e5cd43628f5ee0b43117ffddfcd20a000ced6`. `origin` is this repository
@@ -25,14 +26,16 @@ authorizes, touches Nightstalker.
 
 ### Attribution
 
-Scorpion's crawling core is Spider, unmodified in license terms and largely
-unmodified in code at this baseline. This repository's `LICENSE` (MIT,
+Scorpion's crawling core is inherited from Spider and remains unmodified in
+license terms. This repository's `LICENSE` (MIT,
 `Copyright (c) 2026 Spider Contributors`) is preserved byte-for-byte and
 governs the inherited codebase. Spider's own attribution — project name,
-license text, and upstream repository/homepage links in crate metadata — is
-not to be stripped, obscured, or rewritten as future Scorpion-specific work
-lands. Where Scorpion adds new source files or crates, they inherit the same
-MIT terms; this document does not change licensing.
+license text, authorship, inherited crate names/import paths, and relevant
+upstream repository, crates.io, docs.rs, and homepage links — is not to be
+stripped or obscured as Scorpion-specific work lands. Fork-specific package
+metadata may identify this repository as its actual source while retaining
+that attribution. Where Scorpion adds new source files or crates, they inherit
+the same MIT terms; this document does not change licensing.
 
 ---
 
@@ -58,63 +61,77 @@ its internal types.
 
 ---
 
-## 3. Evidence-First Direction
+## 3. Evidence-First Contract
 
-This section locks *concepts*, not representations. None of the identifier
-types below are defined, typed, or implemented at this baseline — naming them
-here fixes vocabulary so later work doesn't invent five different schemes.
+### Current implementation
 
-**Identifier concepts (future, undefined representation):**
+The canonical identity module currently owns `EvidenceId`, `ResearchId`,
+`WatchId`, and `AuthSessionId`. `CrawlId`, `FetchId`, and `ArtifactId` remain
+unimplemented concepts and must not be introduced merely for symmetry.
 
-- `ResearchId` — a research session/goal spanning one or more crawls
-- `CrawlId` — a single crawl run (one starting point, one policy)
-- `FetchId` — a single request/response exchange within a crawl
-- `EvidenceId` — a unit of captured evidence derived from a fetch
-- `ArtifactId` — a stored byproduct (screenshot, WARC record, raw blob, …)
+- `EvidenceId` identifies one immutable canonical `EvidenceBundle`.
+- `ResearchId` identifies exactly one durable research invocation.
+- `WatchId` identifies one canonical watch definition/state chain.
+- `AuthSessionId` identifies one canonical authenticated-session lifecycle.
 
-**Evidence direction** — the fields a future evidence record is expected to
-carry, gathered from what the baseline audit found already exists in Spider
-(scattered across `Page`, `warc.rs`, and the HTTP/Chrome/WebDriver response
-paths) versus what does not yet exist anywhere:
+Canonical durable research owns this lineage:
+
+```text
+ResearchId
+→ ResearchSession
+→ DurableResearchResult
+→ Source N + EvidenceRef
+→ EvidenceId
+→ EvidenceBundle
+```
+
+Durable results retain extracted facts, missing evidence, extraction metadata,
+final synthesis, synthesis token usage, and citation bindings. `Source N` is a
+presentation-local ordering label, not an identity. Full deterministic replay
+is not implemented by durable result persistence.
+
+The canonical evidence bundle can retain the applicable source facts below:
 
 - requested URL and final URL (redirect-resolved)
 - retrieval timestamp
 - response status
-- headers and content type
-- raw content / HTML
-- cleaned Markdown
+- declared and detected content type
+- textual content in the requested format
+- readable/derived content where produced
 - links
-- screenshots
+- screenshot where produced
 - content hash and screenshot hash
-- WARC reference
-- parent / discovery relationship (what led here)
-- crawl depth
-- anchor text
 - transport used (direct / proxy / Tor — see §7)
-- browser usage (HTTP-only vs. Chrome/WebDriver-rendered)
+- DNS, backend, and response-origin provenance where observed
 
-Unifying these into one evidence bundle type is future work, not this
-document's job — see the ranked frontier list from the baseline audit
-(`unified evidence bundle` was ranked last precisely because it depends on
-decisions this section is deferring on purpose).
+Not every acquisition populates every optional field. The evidence model must
+remain truthful about absent data and must not fabricate provenance.
+
+### Historical baseline
+
+At the original fork baseline, `ResearchId`, `EvidenceId`, and a unified
+evidence bundle were future vocabulary rather than implemented types. That
+historical finding explains the sequence of later identity, evidence-ledger,
+research-session, and durable-result frontiers; it is not current status.
 
 ---
 
-## 4. Modern Research Roadmap
+## 4. Modern Research Status and Roadmap
 
-Recorded as future capability directions, not committed designs:
+Durable canonical research, source evidence, research-session identity,
+durable results, Source-N evidence bindings, and shipping CLI RUN/SHOW are
+implemented. The remaining future capability directions include:
 
 - adaptive / focused research crawling (steer the crawl toward a research
   goal rather than exhaustive breadth-first traversal)
 - browser/DOM/network evidence traces (beyond final rendered HTML — what the
   page actually did)
 - deterministic/offline replay where possible (re-derive evidence from a
-  WARC/trace without re-fetching)
+  retained trace without re-fetching)
 - first-class non-HTML resources: PDF, JSON, XML, and other document types as
   primary evidence, not incidental byproducts
-- reproducible research sessions
-- a research/discovery graph (how pages and evidence relate across a
-  `ResearchId`, not just within one `CrawlId`)
+- richer research/discovery graph lineage beyond the currently durable ordered
+  evidence and Source-N bindings
 - deterministic change tracking (has this evidence changed since last seen,
   and how)
 
@@ -122,9 +139,13 @@ Recorded as future capability directions, not committed designs:
 
 ## 5. Authenticated Research
 
-Future first-class support, concepts only:
+**Current implementation:** canonical `AuthSessionId`, authentication-profile
+vocabulary, durable `AuthSessionState`, explicit pause/resume/invalidate
+transitions, and browser-continuity validation exist. Concrete authentication
+flows (form submission, OAuth exchange, credential loading, and browser login
+execution) remain future work.
 
-**`AuthenticationProfile` variants (locked names, no implementation):**
+**`AuthenticationProfile` variants:**
 
 - `NONE`
 - `FORM_LOGIN`
@@ -134,7 +155,7 @@ Future first-class support, concepts only:
 - `OAUTH`
 - `INTERACTIVE_BROWSER`
 
-**Non-negotiable rules for when this is built:**
+**Non-negotiable rules for concrete authentication flows:**
 
 - Credentials are referenced, never embedded, via a `CredentialRef` concept
   (locked name, undefined representation — same status as the identifier
@@ -172,14 +193,14 @@ automated defeat of protections a site operator did not choose to relax.
 
 ## 7. Transport Contract
 
-**`TransportProfile` variants (locked names, no implementation):**
+**Canonical transport profiles:**
 
 - `DIRECT`
 - `PROXY`
 - `TOR`
 
-**TOR is not implemented at this baseline.** When it is, it must be fail
-closed:
+**Current status:** canonical Tor transport is implemented and feature-gated.
+It remains fail closed:
 
 - no direct HTTP fallback
 - no local DNS fallback
@@ -191,17 +212,18 @@ closed:
 any request or subresource, that request fails — it does not silently
 complete over clearnet.
 
-**Baseline audit findings that must be resolved before `TOR` can be
-enabled** (see the prior read-only audit for exact file/line references):
+**Historical baseline:** before canonical Tor could be enabled, the original
+audit found the following issues (retained here as historical rationale):
 Spider's existing proxy-handling paths (HTTP client, Chrome CDP context, and
 their DNS resolution) were found to have silent-fallback and scheme-handling
 gaps — a failed or misconfigured proxy can currently fall through to a
 direct connection rather than hard-failing, and a non-standard `socks://`
 scheme is silently rewritten to `http://` in more than one place. Chrome/
 WebDriver launches were also found to have no WebRTC leak mitigation. All of
-these are exactly the kind of clearnet-fallback behavior the fail-closed
-rule above forbids, and hardening them is a prerequisite for `TOR`, not a
-follow-up to it.
+these were exactly the kind of clearnet-fallback behavior the fail-closed rule
+above forbids. Canonical Tor was implemented only after its own transport and
+guardrail frontiers; retained upstream compatibility paths are not authority
+for canonical Tor execution.
 
 ---
 

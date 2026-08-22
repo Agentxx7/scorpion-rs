@@ -174,11 +174,14 @@ Forbidden:
 | Artifact binding | `features/artifact_download_binding.rs` | `bind()` | `ArtifactDownloadBinding` |
 | Artifact execution | `features/artifact_download_execution.rs` | `execute()` | `AcquiredArtifact`, `ArtifactDownloadExecutionError` |
 | Secret headers | `features/secret_request_headers.rs` | `SecretRequestHeaders` | — |
+| Durable research | `features/research_session.rs` | `run_durable_research()`, `read_research_session()` | `ResearchSession`, `DurableResearchResult` |
 | CLI | `spider_cli` | `scorpion` binary | — |
 | MCP | `spider_mcp` | `serve_stdio()` | — |
 | future API/Web | not started | — | — |
 | future TUI | not started | — | — |
-| future WATCH/MONITOR | **BLOCKED** — no canonical model exists | — | — |
+| Watch identity/state | `features/{identity,watch}.rs` | `define_watch()`, watch transitions/read seams | `WatchId`, `WatchDefinition`, `WatchState` |
+| Watch scheduling/execution | `features/watch_schedule.rs` | `define_watch_schedule()`, `execute_scheduled_watch_run()` | `WatchSchedule`, `ScheduledRunRecord` |
+| Watch change/health | `features/{change_detection,watch_health}.rs` | change recording/read and health assessment seams | `ChangeResult`, `ChangeEvent`, `WatchHealthReport` |
 
 ---
 
@@ -201,7 +204,21 @@ identity, no persistence, no resume.
 
 ### 5.2 State-driven capabilities
 
-Long-lived operations — the future WATCH/MONITOR class:
+Durable state-driven capabilities include research sessions, authenticated
+sessions, and watch state. Durable research follows:
+
+```text
+ResearchId
+→ initial claimed ResearchSession persisted before search side effects
+→ provider-neutral research execution with durable source acquisition
+→ truthful terminal ResearchSession + compatible DurableResearchResult
+```
+
+`ResearchSession` owns invocation identity, lifecycle, evidence/source
+accounting, Source-N bindings, and the nested durable result. It does not own
+deterministic replay inputs or raw provider traffic.
+
+The implemented watch state chain follows:
 
 ```
 WatchId
@@ -213,14 +230,19 @@ WatchId
 → persisted updated state
 ```
 
-Rules for when this class is built:
+Implemented watch ownership includes `WatchId`, `WatchDefinition`,
+`WatchState`, canonical transitions/persistence, a scheduled execution seam,
+change detection, and health/readiness. A continuously running background
+scheduler daemon and notifications remain separate future product surfaces.
+
+Rules for this class:
 
 - One canonical state type per capability, owned by the canonical core.
 - Interfaces always operate on the same canonical state — never on
   interface-local copies or re-derivations.
 - Transitions are explicit, typed, and persisted; no implicit state drift.
-- WATCH/MONITOR must not be implemented before a frontier establishes this
-  canonical model. It is BLOCKED until then.
+- New state-driven capabilities must not be implemented before a frontier
+  establishes their canonical model and ownership.
 
 ---
 

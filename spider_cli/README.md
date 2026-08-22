@@ -1,8 +1,14 @@
-# Spider CLI
+# Scorpion CLI
 
 ![crate version](https://img.shields.io/crates/v/spider.svg)
 
-A fast command-line spider (web crawler) for high-performance website scraping.
+The shipping `scorpion` command-line interface for crawling, evidence-first
+acquisition, and durable web research, built on the Spider crawler.
+
+The package retains the inherited `spider_cli` crate name, Spider authorship,
+and MIT license. Crawling and scraping behavior comes from Spider; Scorpion adds
+the canonical evidence, transport, research-session, and product bindings used
+by the `scorpion` binary.
 
 ## Dependencies
 
@@ -19,7 +25,8 @@ apt install pkg-config
 
 ## Usage
 
-The CLI is a binary so do not add it to your `Cargo.toml` file.
+The CLI is a binary named `scorpion`, so do not add it to your `Cargo.toml`
+file.
 
 ```sh
 # default install (includes chrome support)
@@ -77,65 +84,65 @@ Run crawls with explicit runtime mode control:
 
 ```sh
 # HTTP mode (default)
-spider --url https://choosealicense.com crawl --output-links
+scorpion --url https://choosealicense.com crawl --output-links
 ```
 
 ```sh
 # Browser mode on demand
-spider --url https://choosealicense.com --headless crawl --output-links
+scorpion --url https://choosealicense.com --headless crawl --output-links
 ```
 
 ```sh
 # Force HTTP-only even in chrome-enabled builds
-spider --url https://choosealicense.com --http crawl --output-links
+scorpion --url https://choosealicense.com --http crawl --output-links
 ```
 
 Crawl and output all links visited to a file.
 
 ```sh
-spider --url https://choosealicense.com crawl -o > spider_choosealicense.json
+scorpion --url https://choosealicense.com crawl -o > spider_choosealicense.json
 ```
 
 Download all html to local destination. Use the option `-t` to pass in the target destination folder.
 
 ```sh
-spider --url https://choosealicense.com download -t _temp_spider_downloads
+scorpion --url https://choosealicense.com download -t _temp_spider_downloads
 ```
 
 Set a crawl budget and only crawl one domain.
 
 ```sh
-spider --url https://choosealicense.com --budget "*,1" crawl -o
+scorpion --url https://choosealicense.com --budget "*,1" crawl -o
 ```
 
 Set a crawl budget and only allow 10 pages matching the /blog/ path and limit all pages to 100.
 
 ```sh
-spider --url https://choosealicense.com --budget "*,100,/blog/,10" crawl -o
+scorpion --url https://choosealicense.com --budget "*,100,/blog/,10" crawl -o
 ```
 
 Get all the resources for the page.
 
 ```sh
-spider --url https://choosealicense.com --full-resources crawl -o
+scorpion --url https://choosealicense.com --full-resources crawl -o
 ```
 
 Scrape a page and return content as Markdown (great for LLMs and RAG pipelines).
 
 ```sh
-spider --url https://choosealicense.com --return-format markdown scrape --output-html
+scorpion --url https://choosealicense.com --return-format markdown scrape --output-html
 ```
 
 Other supported formats: `raw` (default), `commonmark`, `text`, `xml`.
 
 ```sh
-spider --url https://choosealicense.com --return-format text scrape --output-html
+scorpion --url https://choosealicense.com --return-format text scrape --output-html
 ```
 
 ```sh
 The fastest web crawler CLI written in Rust.
 
-Usage: spider [OPTIONS] --url <URL> [COMMAND]
+Usage: scorpion [OPTIONS] --url <URL> [COMMAND]
 
 Commands:
   crawl     Crawl the website extracting links

@@ -78,6 +78,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 | Crawl/scrape orchestration seam | `spider/src/website.rs` — **methods only**: `Website::with_transport()`, `crawl_raw()`, `scrape()` | `transport`, `page` | New transport stacks | `Website::with_transport()` + `crawl_raw()`/`scrape()` | `configure_base_client` (UPSTREAM_COMPAT — transitive implementation of this seam, never directly callable from canonical code) |
 | Streaming artifact download | `spider/src/features/artifact_download_execution.rs` | `transport::execute_streaming_request`, `uring_fs` | `Website`, `Page`, independent clients | `execute()` | None |
 | Acquisition binding | `spider/src/features/acquisition_binding.rs` | `discovery_target`, `evidence` | Network, transport | `bind()`/`execute()` | None |
+| Research page acquisition | `spider/src/features/agent_acquisition.rs` | `spider_agent::PageAcquirer`, canonical fetch/evidence ledger, `DomainPersistence` in explicit durable mode | A second fetch/evidence path, silent durable-to-ephemeral fallback | `CanonicalPageAcquirer::new()` / `new_durable()` | None |
 
 **Clarification on `website.rs`:** The `Website` type and its crawl/scrape methods are the canonical public seam for multi-page acquisition. The internal client construction (`configure_base_client`, proxy rotation, legacy redirect policies) is UPSTREAM_COMPAT — retained for upstream parity, not to be extended by new Scorpion capabilities. A canonical boundary primitive may internally execute upstream-compatible machinery; the boundary primitive and the machinery are classified separately. Upstream machinery is therefore an **implementation dependency behind an approved boundary** — it is transitively executed underneath the seam, but canonical code never directly selects it, never calls it as an alternate path, and never depends on it as fallback. See `SCORPION_SDD.md` §3 for the three-category dependency model.
 
@@ -122,7 +123,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
-| CLI | `spider_cli` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers` | `reqwest::Client` construction, independent domain logic | `scorpion` binary | None |
+| CLI | `spider_cli` | canonical Spider public seams, including `run_durable_research`, `read_research_session`, and `EvidenceRef::resolve` | `Agent::research`, `CanonicalPageAcquirer` construction, identity minting, parallel persistence, independent domain logic | `scorpion` binary, including `scorpion research` / `research show` | None |
 | MCP | `spider_mcp` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers` | `reqwest::Client` construction, independent domain logic | `serve_stdio()` | `spider_mcp::evidence` shim |
 | Agent types | `spider_agent_types` | Pure data | `spider`, `spider_agent` | Data types | None |
 | Agent HTML | `spider_agent_html` | `lol_html` | `spider`, `spider_agent` | `clean_html*()` | None |
@@ -137,18 +138,17 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
-| Persisted-domain identity | `spider/src/features/identity.rs` | `std`, `ahash` (entropy mixing only) | Network, transport, persistence, state/lifecycle, the domain object types themselves | `EvidenceId`, `WatchId` | None |
+| Persisted-domain identity | `spider/src/features/identity.rs` | `std`, `ahash` (entropy mixing only) | Network, transport, persistence, state/lifecycle, the domain object types themselves | `EvidenceId`, `ResearchId`, `WatchId`, `AuthSessionId` | None |
 
 **Clarification on `identity.rs`:** This module owns identity only —
 explicit type, deterministic serialization, validating parse, and value
 equality/hash/ordering per identity kind. It owns no persistence, no
-state/lifecycle, and no domain object. `EvidenceId` realizes the concept
-locked in `SCORPION.md` §3; `WatchId` realizes the first link of the
-state-driven capability chain locked in `SCORPION_SDD.md` §5.2. Only these
-two identity types exist — `ResearchId`, `CrawlId`, `FetchId`, `SessionId`,
-`AuthSessionId`, `JobId`, `OperationId`, and any other identity type each
-require their own frontier scoped to an actually-locked, actually-needed
-concept; none may be added "for symmetry" with these two.
+state/lifecycle, and no domain object. `EvidenceId` identifies immutable
+evidence, `ResearchId` one durable research invocation, `WatchId` one watch,
+and `AuthSessionId` one authenticated-session lifecycle. `CrawlId`, `FetchId`,
+bare `SessionId`, `JobId`, `OperationId`, and any other proposed identity still
+require a frontier scoped to a proven ownership need; none may be added merely
+for symmetry.
 
 ### 3.10 State/Transition Semantics
 
@@ -485,6 +485,37 @@ route watch-pipeline health through — and remain untouched; no
 notifications, no generic monitoring framework, and no `Job`/`Operation`
 model are implemented here.
 
+### 3.18 Durable Research Session / Result
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Durable research invocation | `spider/src/features/research_session.rs` | `spider_agent` provider-neutral execution, durable `CanonicalPageAcquirer`, `DomainPersistence`, `EvidenceRef`, `ResearchId` | Spider persistence types in `spider_agent`, a second session/result store, phantom evidence IDs | `run_durable_research()`, `read_research_session()` | None |
+| Durable research result | Nested Spider-owned DTOs in `features/research_session.rs` | `ResearchExtraction`, finish/token metadata, existing session source bindings | Persisting provider-neutral `ResearchResult` directly, duplicated evidence payloads, replay snapshots | `ResearchSession::result` | None |
+
+`ResearchId` identifies exactly one invocation and is durably claimed before
+search side effects. A durable session always uses durable canonical source
+acquisition. Terminal publication stores the compatible nested result in the
+same serialized current-session payload; evidence remains in the one canonical
+evidence ledger.
+
+```text
+ResearchId
+→ ResearchSession
+→ ordered ResearchSourceBinding
+→ EvidenceRef
+→ EvidenceBundle
+
+ResearchSession
+→ DurableResearchResult
+→ DurableResearchExtraction / DurableResearchSynthesis
+→ Source N + EvidenceRef
+```
+
+`Source N` is presentation-local ordering over successful extractions, never an
+identity. Durable result reopening is not deterministic replay: model requests,
+raw responses, exact prompts, selected bounded Markdown, provider snapshots,
+and network timing are deliberately not owned by this record.
+
 ---
 
 ## 4. Canonical Path Map
@@ -532,6 +563,25 @@ GitHubRepositoryProvider / HuggingFaceModelProvider
 Provider-specific request construction and response parsing remain in the
 provider adapter; network execution, transport pinning, and target validation
 are owned by canonical transport.
+
+### 4.5 Durable Research Product
+
+```text
+scorpion research <topic>
+  └─> research_session::run_durable_research
+        └─> durable CanonicalPageAcquirer
+              └─> record_evidence
+        └─> spider_agent::Agent::research (provider-neutral engine)
+        └─> persist terminal ResearchSession + DurableResearchResult
+
+scorpion research show <ResearchId>
+  └─> research_session::read_research_session
+        └─> EvidenceRef::resolve for displayed bindings
+```
+
+The CLI owns parsing, configuration, presentation, and exit semantics only. It
+must not call `Agent::research` directly, construct `CanonicalPageAcquirer`,
+mint `ResearchId`/`EvidenceId`, or create parallel persistence/evidence logic.
 
 ---
 
@@ -660,10 +710,10 @@ shim, or hidden alternate path.
 
 Do not create alternative versions of canonical domain models.
 `ArtifactReference`, `ArtifactDownloadBinding`, `ArtifactDownloadExecutionError`,
-`AcquiredArtifact` are only defined in their canonical modules. `EvidenceId`
-and `WatchId` are only defined in `spider/src/features/identity.rs` — no
-interface (`spider_cli`, `spider_mcp`, or otherwise) may define its own
-identity type for either concept. `CurrentState`, `HistoryEntry`,
+`AcquiredArtifact` are only defined in their canonical modules. `EvidenceId`,
+`ResearchId`, `WatchId`, and `AuthSessionId` are only defined in
+`spider/src/features/identity.rs` — no interface (`spider_cli`, `spider_mcp`,
+or otherwise) may define a shadow identity type. `CurrentState`, `HistoryEntry`,
 `HistoryLog`, and `Transition` are only defined in
 `spider/src/features/domain_state.rs`; no bare `Observation` or `Snapshot`
 type may be introduced anywhere (see §3.10). `DomainPersistence` is only
@@ -703,6 +753,10 @@ define its own change detection model. `HealthStatus`,
 are only defined in `spider/src/features/watch_health.rs` (see §3.17) —
 no interface may define its own health model, and no
 `ProviderHealth`/`SourceHealth` type may be introduced anywhere.
+`ResearchSession`, its source/count/state vocabulary, and all
+`DurableResearch*` DTOs are only defined in
+`spider/src/features/research_session.rs` (see §3.18); `spider_agent` remains
+provider-neutral and interfaces must not define a shadow session or result.
 
 ### 7.7 THIN INTERFACES
 
@@ -826,11 +880,16 @@ The following are intentionally not refactored in this frontier:
 - Thin interfaces: `spider_cli`/`spider_mcp` define no shadow canonical models
 - Negative scanner proofs: synthetic violations in every guarded class are
   proven detected (see `scanner_detects_every_violation_class`)
-- `EvidenceId`/`WatchId` are each defined in exactly one canonical module
+- `EvidenceId`/`ResearchId`/`WatchId`/`AuthSessionId` are each defined in exactly one canonical module
   (`features/identity.rs`), declared unconditionally (no feature gate),
   implement deterministic serialization/validation, and are not shadowed
   by `spider_cli`/`spider_mcp`; the identity module contains no
   persistence or state/lifecycle implementation
+- Durable research session/result ownership exists only in
+  `features/research_session.rs`; the shipping CLI calls
+  `run_durable_research`/`read_research_session`, uses one shared durable
+  formatter, and neither calls `Agent::research` nor constructs an acquirer,
+  mints identities, or defines another evidence/persistence path
 - `CurrentState`/`HistoryEntry`/`HistoryLog`/`Transition` are each defined
   in exactly one canonical module (`features/domain_state.rs`), declared
   unconditionally, contain no persistence or concrete product-model

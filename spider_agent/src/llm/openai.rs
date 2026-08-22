@@ -1,6 +1,9 @@
 //! OpenAI-compatible LLM provider implementation.
 
-use super::{CompletionOptions, CompletionResponse, LLMProvider, Message, TokenUsage};
+use super::{
+    CompletionOptions, CompletionResponse, FinishReason, LLMProvider, Message,
+    StructuredOutputConfig, TokenUsage,
+};
 use crate::error::{AgentError, AgentResult};
 use async_trait::async_trait;
 
@@ -221,10 +224,30 @@ fn build_completions_body(
         "temperature": options.temperature,
         "max_tokens": options.max_tokens,
     });
-    if options.json_mode {
+    if let Some(format) = options
+        .response_format
+        .as_ref()
+        .filter(|format| format.enabled)
+    {
+        body["response_format"] = completions_response_format(format);
+    } else if options.json_mode {
         body["response_format"] = serde_json::json!({ "type": "json_object" });
     }
     body
+}
+
+fn completions_response_format(format: &StructuredOutputConfig) -> serde_json::Value {
+    match &format.schema {
+        Some(schema) => serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": format.schema_name,
+                "strict": format.strict,
+                "schema": schema,
+            }
+        }),
+        None => serde_json::json!({ "type": "json_object" }),
+    }
 }
 
 fn parse_completions_response(json: serde_json::Value) -> AgentResult<CompletionResponse> {
@@ -237,8 +260,18 @@ fn parse_completions_response(json: serde_json::Value) -> AgentResult<Completion
         .ok_or_else(|| AgentError::MissingField("choices[0].message.content"))?
         .to_string();
 
+    let finish_reason = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|value| value.as_str())
+        .map(FinishReason::from_provider);
     let usage = extract_usage(&json);
-    Ok(CompletionResponse { content, usage })
+    Ok(CompletionResponse {
+        content,
+        usage,
+        finish_reason,
+    })
 }
 
 // --------------- Responses API helpers ---------------
@@ -276,7 +309,15 @@ fn build_responses_body(
         body["instructions"] = serde_json::json!(instructions);
     }
 
-    if options.json_mode {
+    if let Some(format) = options
+        .response_format
+        .as_ref()
+        .filter(|format| format.enabled)
+    {
+        body["text"] = serde_json::json!({
+            "format": responses_response_format(format)
+        });
+    } else if options.json_mode {
         body["text"] = serde_json::json!({
             "format": { "type": "json_object" }
         });
@@ -285,12 +326,25 @@ fn build_responses_body(
     body
 }
 
+fn responses_response_format(format: &StructuredOutputConfig) -> serde_json::Value {
+    match &format.schema {
+        Some(schema) => serde_json::json!({
+            "type": "json_schema",
+            "name": format.schema_name,
+            "strict": format.strict,
+            "schema": schema,
+        }),
+        None => serde_json::json!({ "type": "json_object" }),
+    }
+}
+
 fn parse_responses_response(json: serde_json::Value) -> AgentResult<CompletionResponse> {
     // Try the `output_text` shorthand first (present in newer API responses).
     if let Some(text) = json.get("output_text").and_then(|v| v.as_str()) {
         return Ok(CompletionResponse {
             content: text.to_string(),
             usage: extract_usage(&json),
+            finish_reason: None,
         });
     }
 
@@ -318,6 +372,7 @@ fn parse_responses_response(json: serde_json::Value) -> AgentResult<CompletionRe
     Ok(CompletionResponse {
         content,
         usage: extract_usage(&json),
+        finish_reason: None,
     })
 }
 
@@ -636,6 +691,63 @@ mod tests {
         assert_eq!(body["response_format"]["type"], "json_object");
     }
 
+    #[test]
+    fn test_build_completions_body_without_schema_preserves_json_mode() {
+        let mut opts = CompletionOptions::default();
+        opts.response_format = None;
+        let body = build_completions_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({"type":"json_object"})
+        );
+
+        opts.json_mode = false;
+        let body = build_completions_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert!(body.get("response_format").is_none());
+    }
+
+    #[test]
+    fn test_build_completions_body_explicit_json_object_remains_available() {
+        let mut opts = CompletionOptions::default();
+        opts.json_mode = false;
+        opts.response_format = Some(StructuredOutputConfig {
+            enabled: true,
+            schema: None,
+            schema_name: "response".into(),
+            strict: false,
+        });
+        let body = build_completions_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({"type":"json_object"})
+        );
+    }
+
+    #[test]
+    fn test_build_completions_body_strict_json_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+        let mut opts = CompletionOptions::default();
+        opts.response_format =
+            Some(StructuredOutputConfig::strict(schema.clone()).with_name("research_extraction"));
+        let body = build_completions_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "research_extraction",
+                    "strict": true,
+                    "schema": schema
+                }
+            })
+        );
+    }
+
     // --------------- Response parsers ---------------
 
     #[test]
@@ -664,6 +776,24 @@ mod tests {
     fn test_parse_responses_missing_output() {
         let err = parse_responses_response(serde_json::json!({})).unwrap_err();
         assert!(format!("{}", err).contains("Missing field"));
+    }
+
+    #[test]
+    fn test_parse_completions_preserves_finish_reason() {
+        for (raw, expected) in [
+            ("stop", FinishReason::Stop),
+            ("length", FinishReason::Length),
+            ("tool_calls", FinishReason::Other("tool_calls".into())),
+        ] {
+            let response = parse_completions_response(serde_json::json!({
+                "choices": [{
+                    "finish_reason": raw,
+                    "message": {"content": "{}"}
+                }]
+            }))
+            .unwrap();
+            assert_eq!(response.finish_reason, Some(expected));
+        }
     }
 
     // --------------- Usage extraction ---------------

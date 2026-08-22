@@ -80,9 +80,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     for extraction in &research.extractions {
         println!(
-            "Successful extraction: url={} acquisition_id={} json={}",
+            "Successful extraction: url={} acquisition_id={} status={:?} facts={} missing_evidence={} finish_reason={:?} json={}",
             extraction.url,
             extraction.acquisition_id.as_deref().unwrap_or("none"),
+            extraction.extracted.status,
+            extraction.extracted.facts.len(),
+            extraction.extracted.missing_evidence.len(),
+            extraction.finish_reason,
             bounded_preview(&serde_json::to_string_pretty(&extraction.extracted)?)
         );
     }

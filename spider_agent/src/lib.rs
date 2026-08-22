@@ -168,14 +168,18 @@ pub mod temp;
 pub mod scripting;
 
 // Re-exports
-pub use agent::{AcquiredSource, Agent, AgentBuilder, FetchResult, PageAcquirer, PageExtraction};
+pub use agent::{
+    AcquiredSource, Agent, AgentBuilder, FetchResult, PageAcquirer, PageExtraction,
+    ResearchExtraction, ResearchExtractionFact, ResearchExtractionStatus,
+};
 pub use config::{
     AgentConfig, HtmlCleaningMode, LimitType, ResearchOptions, RetryConfig, SearchOptions,
     TimeRange, UsageLimits, UsageSnapshot, UsageStats,
 };
 pub use error::{AgentError, AgentResult, SearchError};
 pub use llm::{
-    CompletionOptions, CompletionResponse, LLMProvider, Message, MessageContent, TokenUsage,
+    CompletionOptions, CompletionResponse, FinishReason, LLMProvider, Message, MessageContent,
+    TokenUsage,
 };
 pub use memory::AgentMemory;
 pub use tools::{

@@ -10,6 +10,7 @@ pub use openai::{OpenAIProvider, OpenAiApiMode};
 use crate::error::AgentResult;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+pub use spider_agent_types::StructuredOutputConfig;
 
 /// LLM provider trait for abstracting different LLM APIs.
 #[async_trait]
@@ -168,6 +169,9 @@ pub struct CompletionOptions {
     pub max_tokens: u16,
     /// Request JSON output.
     pub json_mode: bool,
+    /// Optional structured response format. When set, this takes precedence
+    /// over the compatibility `json_mode` flag.
+    pub response_format: Option<StructuredOutputConfig>,
 }
 
 impl Default for CompletionOptions {
@@ -176,6 +180,30 @@ impl Default for CompletionOptions {
             temperature: 0.1,
             max_tokens: 4096,
             json_mode: true,
+            response_format: None,
+        }
+    }
+}
+
+/// Why a provider stopped generating a completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishReason {
+    /// The provider reached a natural stop condition.
+    Stop,
+    /// The configured generation limit was exhausted.
+    Length,
+    /// A provider-specific finish reason.
+    Other(String),
+}
+
+impl FinishReason {
+    /// Preserve a provider's raw finish-reason value.
+    pub fn from_provider(value: &str) -> Self {
+        match value {
+            "stop" => Self::Stop,
+            "length" => Self::Length,
+            other => Self::Other(other.to_string()),
         }
     }
 }
@@ -187,6 +215,8 @@ pub struct CompletionResponse {
     pub content: String,
     /// Token usage.
     pub usage: TokenUsage,
+    /// Provider-reported reason generation stopped, when available.
+    pub finish_reason: Option<FinishReason>,
 }
 
 /// Token usage from a completion.

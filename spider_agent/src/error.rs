@@ -16,6 +16,10 @@ pub enum AgentError {
     MissingField(&'static str),
     /// Invalid field type in response.
     InvalidField(&'static str),
+    /// Strict structured generation exhausted its output budget.
+    IncompleteGeneration,
+    /// Strict research extraction failed schema or semantic validation.
+    InvalidExtraction(String),
     /// Remote API error.
     Remote(String),
     /// Feature not enabled or configured.
@@ -50,6 +54,8 @@ impl fmt::Display for AgentError {
             Self::Json(e) => write!(f, "JSON error: {}", e),
             Self::MissingField(field) => write!(f, "Missing field: {}", field),
             Self::InvalidField(field) => write!(f, "Invalid field: {}", field),
+            Self::IncompleteGeneration => write!(f, "Incomplete structured generation"),
+            Self::InvalidExtraction(msg) => write!(f, "Invalid research extraction: {}", msg),
             Self::Remote(msg) => write!(f, "Remote error: {}", msg),
             Self::NotConfigured(what) => write!(f, "Not configured: {}", what),
             Self::Search(e) => write!(f, "Search error: {}", e),

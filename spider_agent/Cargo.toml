@@ -143,9 +143,13 @@ search_serper = ["search", "spider_search/search_serper"]
 search_brave = ["search", "spider_search/search_brave"]
 search_bing = ["search", "spider_search/search_bing"]
 search_tavily = ["search", "spider_search/search_tavily"]
+# SearXNG: a free, self-hosted metasearch engine — no commercial API key,
+# no public default instance (operator always supplies a base URL they
+# control). Reuses spider_search's existing `SearxngProvider` unchanged.
+search_searxng = ["search", "spider_search/search_searxng"]
 
 # Full feature set
-full = ["openai", "chrome", "webdriver", "fs", "skills", "memvid", "scripting", "search_serper", "search_brave", "search_bing", "search_tavily", "skills_s3"]
+full = ["openai", "chrome", "webdriver", "fs", "skills", "memvid", "scripting", "search_serper", "search_brave", "search_bing", "search_tavily", "search_searxng", "skills_s3"]
 
 [[example]]
 name = "basic_search"
@@ -154,6 +158,10 @@ required-features = ["search_serper"]
 [[example]]
 name = "research"
 required-features = ["openai", "search_serper"]
+
+[[example]]
+name = "research_searxng"
+required-features = ["openai", "search_searxng"]
 
 [[example]]
 name = "extract"

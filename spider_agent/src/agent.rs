@@ -310,6 +310,30 @@ impl Agent {
             // Fetch page
             match self.fetch(&result.url).await {
                 Ok(fetch_result) => {
+                    if !(200..300).contains(&fetch_result.status) {
+                        log::warn!(
+                            "Skipping {}: HTTP status {} is not successful",
+                            result.url,
+                            fetch_result.status
+                        );
+                        continue;
+                    }
+                    if !is_supported_research_content_type(&fetch_result.content_type) {
+                        log::warn!(
+                            "Skipping {}: unsupported content type {:?}",
+                            result.url,
+                            fetch_result.content_type
+                        );
+                        continue;
+                    }
+                    if is_obvious_block_document(&fetch_result.html) {
+                        log::warn!(
+                            "Skipping {}: response appears to be a block or challenge document",
+                            result.url
+                        );
+                        continue;
+                    }
+
                     // Extract
                     match self.extract(&fetch_result.html, &extraction_prompt).await {
                         Ok(extracted) => {
@@ -1017,10 +1041,45 @@ impl Agent {
             }
         }
 
+        log::warn!(
+            "Failed to parse LLM JSON response; raw content: {:?}",
+            content
+        );
+
         Err(AgentError::Json(
             serde_json::from_str::<serde_json::Value>(content).unwrap_err(),
         ))
     }
+}
+
+fn is_supported_research_content_type(content_type: &str) -> bool {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    media_type.is_empty() || media_type == "text/html" || media_type == "application/xhtml+xml"
+}
+
+fn is_obvious_block_document(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    [
+        "/cdn-cgi/challenge-platform/",
+        "cf-chl-",
+        "<title>just a moment...</title>",
+        "<title>attention required! | cloudflare</title>",
+        "cloudflare ray id",
+        "cf-error-details",
+        "<title>access denied</title>",
+        "<title>verify you are human</title>",
+        "<title>robot check</title>",
+        "g-recaptcha",
+        "hcaptcha",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// Remove specified HTML tags (and their content) from HTML.
@@ -1349,6 +1408,16 @@ impl AgentBuilder {
     #[cfg(feature = "search_tavily")]
     pub fn with_search_tavily(mut self, api_key: impl Into<String>) -> Self {
         self.search_provider = Some(Box::new(crate::search::TavilyProvider::new(api_key)));
+        self
+    }
+
+    /// Configure with a self-hosted SearXNG search provider — no
+    /// commercial API key. `base_url` is the operator's own SearXNG
+    /// instance (e.g. `"http://localhost:8080"`); there is no public
+    /// default instance and none is ever assumed.
+    #[cfg(feature = "search_searxng")]
+    pub fn with_search_searxng(mut self, base_url: impl Into<String>) -> Self {
+        self.search_provider = Some(Box::new(crate::search::SearxngProvider::new(base_url)));
         self
     }
 

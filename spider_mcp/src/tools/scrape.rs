@@ -352,6 +352,7 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
     let mut results = Vec::new();
 
     while let Ok(page) = rx.recv().await {
+        let response_observed = page.observed_status_code.is_some();
         let content_result = if wants_auto {
             auto_content(&page, used_browser).await
         } else {
@@ -389,6 +390,12 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
                 "provenance": spider::utils::evidence::page_provenance(&page),
             })
         };
+
+        if !response_observed {
+            let diagnostic =
+                serde_json::to_string_pretty(&result).map_err(|error| error.to_string())?;
+            return Err(diagnostic);
+        }
 
         results.push(result);
     }
@@ -1590,11 +1597,9 @@ mod tests {
 
     /// V12: a SOCKS-layer failure causes zero direct hits on a target
     /// that would have responded if contacted directly, bypassing Tor.
-    /// Matches Spider's established "network failure is truthful
-    /// degraded-status evidence, not a hard process `Err`" contract (see
-    /// `discovery::fetch_tests::fetch_connection_failure_is_truthful_evidence_not_a_process_error`
-    /// in the CLI) — the proof here is the target fixture, never
-    /// reached, not the tool call's `Result` variant.
+    /// The truthful degraded-status evidence is returned through the MCP
+    /// tool-error channel because no HTTP response was observed. The target
+    /// fixture proves that the failure never falls back to a direct route.
     #[cfg(feature = "transport_tor")]
     #[tokio::test]
     async fn tor_scrape_socks_failure_causes_no_direct_fallback() {
@@ -1616,7 +1621,7 @@ mod tests {
             },
         ))
         .await
-        .unwrap();
+        .unwrap_err();
 
         assert_eq!(
             http.hit_count(),
@@ -1626,6 +1631,7 @@ mod tests {
         assert!(socks.connect_count() >= 1);
         let evidence: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_ne!(evidence["status_code"], 200);
+        assert_eq!(evidence["observed_status_code"], serde_json::Value::Null);
         assert_eq!(evidence["transport"], serde_json::Value::Null);
     }
 

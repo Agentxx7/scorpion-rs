@@ -552,6 +552,36 @@ fn scrape_output_surfaces_page_provenance() {
     assert_eq!(value["provenance"]["dns"], serde_json::Value::Null);
 }
 
+/// A refused Scrape acquisition still prints the canonical synthetic-status
+/// Page, but cannot report shell success when no HTTP response was observed.
+#[test]
+fn refused_scrape_prints_truthful_output_and_exits_nonzero() {
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = unused.local_addr().unwrap();
+    drop(unused);
+
+    let output = scorpion()
+        .args(["--url", &format!("http://{addr}/"), "scrape"])
+        .output()
+        .expect("scorpion must run");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status_code"], 521);
+    assert_eq!(value["content"], "");
+    assert_eq!(
+        value["provenance"]["observed_status_code"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        value["provenance"]["response_origin"],
+        serde_json::Value::Null
+    );
+    assert_eq!(value["provenance"]["transport"], serde_json::Value::Null);
+    assert_eq!(value["provenance"]["backend_provenance"], "reqwest");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("server error"));
+}
+
 /// T17: a genuine Tor crawl preflight rejection (Tor + legacy proxy, in
 /// this case) is a nonzero exit with a stderr message — never a
 /// successful command with empty stdout.

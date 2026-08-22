@@ -893,6 +893,12 @@ async fn main() {
                     ..
                 }) => {
                     let mut stdout = tokio::io::stdout();
+                    // A failed attempted acquisition is still broadcast as a
+                    // truthful synthetic-status Page and must still be
+                    // presented. Track the canonical observed-response field
+                    // separately so that presentation does not imply process
+                    // success when no HTTP response existed.
+                    let mut response_observed = false;
 
                     if output_links {
                         website.configuration.return_page_links = true;
@@ -916,6 +922,7 @@ async fn main() {
                     });
 
                     while let Ok(res) = rx2.recv().await {
+                        response_observed |= res.observed_status_code.is_some();
                         let content = {
                             let input = TransformInput {
                                 url: res.get_url_parsed_ref().as_ref(),
@@ -958,6 +965,9 @@ async fn main() {
                     }
 
                     exit_on_transport_error(crawl_task.await);
+                    if !response_observed {
+                        std::process::exit(2);
+                    }
                 }
                 Some(Commands::AUTHENTICATE { .. }) => {},
                 // Discovery/fetch commands are handled earlier and always

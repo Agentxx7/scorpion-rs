@@ -67,6 +67,9 @@ pub mod solvers;
 /// already requires); does not require `transport_tor`.
 #[cfg(feature = "evidence")]
 pub mod acquisition_binding;
+/// Canonical Spider acquisition adapter for `spider_agent` research.
+#[cfg(all(feature = "agent", feature = "evidence"))]
+pub mod agent_acquisition;
 /// Pure provider-neutral binding from resolved artifact metadata to future
 /// download execution intent. Performs no acquisition or filesystem work.
 pub mod artifact_download_binding;

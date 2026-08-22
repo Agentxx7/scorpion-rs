@@ -477,6 +477,8 @@ agent_search_serper = ["agent", "spider_agent/search_serper"]
 agent_search_brave = ["agent", "spider_agent/search_brave"]
 agent_search_bing = ["agent", "spider_agent/search_bing"]
 agent_search_tavily = ["agent", "spider_agent/search_tavily"]
+agent_search_searxng = ["agent", "spider_agent/search_searxng"]
+agent_acquisition = ["agent", "evidence", "spider_agent/search"]
 agent_full = ["agent", "agent_skills", "spider_agent/full"]
 
 # Adaptive wait-for timeout guard — tracks domains that repeatedly produce

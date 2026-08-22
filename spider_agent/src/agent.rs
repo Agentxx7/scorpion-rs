@@ -14,6 +14,33 @@ use crate::tools::{
 };
 use std::sync::Arc;
 
+/// Neutral page acquisition contract used by [`Agent::research`].
+///
+/// Implementations own acquisition. Spider-specific page, evidence, and
+/// transport types deliberately do not cross this boundary.
+#[async_trait::async_trait]
+pub trait PageAcquirer: Send + Sync {
+    /// Acquire one URL for research without performing extraction.
+    async fn acquire(&self, url: &str) -> AgentResult<AcquiredSource>;
+}
+
+/// Page content and admission metadata supplied to the research loop.
+#[derive(Debug, Clone)]
+pub struct AcquiredSource {
+    /// URL requested by the search result.
+    pub requested_url: String,
+    /// Final URL after redirects.
+    pub final_url: String,
+    /// Effective HTTP status presented by the acquirer.
+    pub status: u16,
+    /// Declared response content type, or an empty string when absent.
+    pub content_type: String,
+    /// Acquired textual content.
+    pub content: String,
+    /// Opaque acquisition identity supplied by the acquirer.
+    pub acquisition_id: Option<String>,
+}
+
 /// Check if an API key is a placeholder or empty.
 fn is_placeholder_api_key(key: &str) -> bool {
     let trimmed = key.trim();
@@ -63,6 +90,9 @@ pub struct Agent {
 
     /// HTTP client for requests.
     client: reqwest::Client,
+
+    /// Optional injected acquisition authority for research pages.
+    page_acquirer: Option<Box<dyn PageAcquirer>>,
 
     /// Search provider (if configured).
     #[cfg(feature = "search")]
@@ -306,27 +336,45 @@ impl Agent {
 
         let max_pages = options.max_pages.min(search_results.results.len());
 
+        #[derive(Clone, Copy)]
+        enum AcquisitionMode<'a> {
+            Injected(&'a dyn PageAcquirer),
+            Compatibility,
+        }
+
+        let acquisition_mode = match self.page_acquirer.as_deref() {
+            Some(acquirer) => AcquisitionMode::Injected(acquirer),
+            None => AcquisitionMode::Compatibility,
+        };
+
         for result in search_results.results.iter().take(max_pages) {
-            // Fetch page
-            match self.fetch(&result.url).await {
-                Ok(fetch_result) => {
-                    if !(200..300).contains(&fetch_result.status) {
+            let acquisition = match acquisition_mode {
+                AcquisitionMode::Injected(acquirer) => {
+                    self.usage.increment_fetch_calls();
+                    acquirer.acquire(&result.url).await
+                }
+                AcquisitionMode::Compatibility => self.fetch(&result.url).await.map(Into::into),
+            };
+
+            match acquisition {
+                Ok(source) => {
+                    if !(200..300).contains(&source.status) {
                         log::warn!(
                             "Skipping {}: HTTP status {} is not successful",
                             result.url,
-                            fetch_result.status
+                            source.status
                         );
                         continue;
                     }
-                    if !is_supported_research_content_type(&fetch_result.content_type) {
+                    if !is_supported_research_content_type(&source.content_type) {
                         log::warn!(
                             "Skipping {}: unsupported content type {:?}",
                             result.url,
-                            fetch_result.content_type
+                            source.content_type
                         );
                         continue;
                     }
-                    if is_obvious_block_document(&fetch_result.html) {
+                    if is_obvious_block_document(&source.content) {
                         log::warn!(
                             "Skipping {}: response appears to be a block or challenge document",
                             result.url
@@ -335,12 +383,13 @@ impl Agent {
                     }
 
                     // Extract
-                    match self.extract(&fetch_result.html, &extraction_prompt).await {
+                    match self.extract(&source.content, &extraction_prompt).await {
                         Ok(extracted) => {
                             extractions.push(PageExtraction {
-                                url: result.url.clone(),
+                                url: source.final_url,
                                 title: result.title.clone(),
                                 extracted,
+                                acquisition_id: source.acquisition_id,
                             });
                         }
                         Err(e) => {
@@ -1132,6 +1181,19 @@ pub struct FetchResult {
     pub html: String,
 }
 
+impl From<FetchResult> for AcquiredSource {
+    fn from(fetch: FetchResult) -> Self {
+        Self {
+            requested_url: fetch.url.clone(),
+            final_url: fetch.url,
+            status: fetch.status,
+            content_type: fetch.content_type,
+            content: fetch.html,
+            acquisition_id: None,
+        }
+    }
+}
+
 /// Result from research.
 #[cfg(feature = "search")]
 #[derive(Debug, Clone)]
@@ -1157,6 +1219,9 @@ pub struct PageExtraction {
     pub title: String,
     /// Extracted data.
     pub extracted: serde_json::Value,
+    /// Opaque identity of the acquisition used for this extraction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition_id: Option<String>,
 }
 
 /// Agent builder for configuring and creating agents.
@@ -1167,6 +1232,7 @@ pub struct AgentBuilder {
     spider_browser: Option<SpiderBrowserToolConfig>,
     proxies: Option<Vec<String>>,
     client: Option<reqwest::Client>,
+    page_acquirer: Option<Box<dyn PageAcquirer>>,
     #[cfg(feature = "search")]
     search_provider: Option<Box<dyn SearchProvider>>,
     #[cfg(feature = "chrome")]
@@ -1187,6 +1253,7 @@ impl AgentBuilder {
             spider_browser: None,
             proxies: None,
             client: None,
+            page_acquirer: None,
             #[cfg(feature = "search")]
             search_provider: None,
             #[cfg(feature = "chrome")]
@@ -1357,6 +1424,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Inject the exclusive acquisition authority used by [`Agent::research`].
+    ///
+    /// Acquisition errors are surfaced directly and never fall back to the
+    /// Agent's compatibility HTTP client.
+    pub fn with_page_acquirer(mut self, acquirer: Box<dyn PageAcquirer>) -> Self {
+        self.page_acquirer = Some(acquirer);
+        self
+    }
+
     /// Configure one or more HTTP/SOCKS proxies.
     ///
     /// Each entry is a proxy URL (e.g. `http://host:port`, `socks5://host:port`).
@@ -1505,6 +1581,7 @@ impl AgentBuilder {
         Ok(Agent {
             llm: self.llm,
             client,
+            page_acquirer: self.page_acquirer,
             #[cfg(feature = "search")]
             search_provider: self.search_provider,
             #[cfg(feature = "chrome")]
@@ -1722,5 +1799,226 @@ mod tests {
         // Both sets of tools registered.
         assert!(agent.has_custom_tool("spider_cloud_crawl"));
         assert!(agent.has_custom_tool("spider_browser_navigate"));
+    }
+
+    #[cfg(feature = "search")]
+    mod research_acquisition {
+        use super::*;
+        use crate::llm::{CompletionOptions, LLMProvider};
+        use crate::search::{SearchResult, SearchResults};
+        use async_trait::async_trait;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct StaticSearch {
+            urls: Vec<String>,
+        }
+
+        #[async_trait]
+        impl SearchProvider for StaticSearch {
+            async fn search(
+                &self,
+                query: &str,
+                _options: &SearchOptions,
+            ) -> Result<SearchResults, crate::error::SearchError> {
+                let mut results = SearchResults::new(query);
+                for (index, url) in self.urls.iter().enumerate() {
+                    results.push(SearchResult::new(
+                        format!("Source {}", index + 1),
+                        url,
+                        index + 1,
+                    ));
+                }
+                Ok(results)
+            }
+
+            fn provider_name(&self) -> &'static str {
+                "static"
+            }
+
+            fn is_configured(&self) -> bool {
+                true
+            }
+        }
+
+        struct JsonLlm {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl LLMProvider for JsonLlm {
+            async fn complete(
+                &self,
+                _messages: Vec<Message>,
+                _options: &CompletionOptions,
+                _client: &reqwest::Client,
+            ) -> AgentResult<CompletionResponse> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(CompletionResponse {
+                    content: r#"{"ok":true}"#.to_string(),
+                    usage: TokenUsage::default(),
+                })
+            }
+
+            fn provider_name(&self) -> &'static str {
+                "json-test"
+            }
+
+            fn is_configured(&self) -> bool {
+                true
+            }
+        }
+
+        struct StaticAcquirer {
+            calls: Arc<AtomicUsize>,
+            fail: bool,
+            status: u16,
+        }
+
+        #[async_trait]
+        impl PageAcquirer for StaticAcquirer {
+            async fn acquire(&self, url: &str) -> AgentResult<AcquiredSource> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail {
+                    return Err(AgentError::Remote("injected acquisition failed".into()));
+                }
+                Ok(AcquiredSource {
+                    requested_url: url.to_string(),
+                    final_url: format!("{url}/final"),
+                    status: self.status,
+                    content_type: "text/html".to_string(),
+                    content: "<html><body>research source</body></html>".to_string(),
+                    acquisition_id: Some(format!("opaque-{call}")),
+                })
+            }
+        }
+
+        fn agent(
+            urls: Vec<String>,
+            acquirer: Option<Box<dyn PageAcquirer>>,
+            llm_calls: Arc<AtomicUsize>,
+        ) -> Agent {
+            let mut builder = Agent::builder();
+            builder.search_provider = Some(Box::new(StaticSearch { urls }));
+            builder.llm = Some(Box::new(JsonLlm { calls: llm_calls }));
+            if let Some(acquirer) = acquirer {
+                builder = builder.with_page_acquirer(acquirer);
+            }
+            builder.build().unwrap()
+        }
+
+        fn options(max_pages: usize) -> ResearchOptions {
+            ResearchOptions::new()
+                .with_max_pages(max_pages)
+                .with_synthesize(false)
+        }
+
+        #[tokio::test]
+        async fn injected_acquirer_handles_selected_urls_and_preserves_lineage() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let llm_calls = Arc::new(AtomicUsize::new(0));
+            let agent = agent(
+                vec![
+                    "https://one.example".into(),
+                    "https://two.example".into(),
+                    "https://three.example".into(),
+                ],
+                Some(Box::new(StaticAcquirer {
+                    calls: calls.clone(),
+                    fail: false,
+                    status: 200,
+                })),
+                llm_calls.clone(),
+            );
+
+            let result = agent.research("topic", options(2)).await.unwrap();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(llm_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(result.extractions.len(), 2);
+            assert_eq!(
+                result.extractions[0].acquisition_id.as_deref(),
+                Some("opaque-0")
+            );
+            assert_eq!(
+                result.extractions[1].acquisition_id.as_deref(),
+                Some("opaque-1")
+            );
+            assert_eq!(result.extractions[0].url, "https://one.example/final");
+        }
+
+        #[tokio::test]
+        async fn injected_failure_never_falls_back_to_agent_fetch() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let url = format!("http://{}/must-not-connect", listener.local_addr().unwrap());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let agent = agent(
+                vec![url],
+                Some(Box::new(StaticAcquirer {
+                    calls: calls.clone(),
+                    fail: true,
+                    status: 200,
+                })),
+                Arc::new(AtomicUsize::new(0)),
+            );
+
+            let result = agent.research("topic", options(1)).await.unwrap();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert!(result.extractions.is_empty());
+            assert!(matches!(
+                listener.accept(),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+            ));
+        }
+
+        #[tokio::test]
+        async fn injected_http_rejection_skips_extraction() {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let llm_calls = Arc::new(AtomicUsize::new(0));
+            let agent = agent(
+                vec!["https://forbidden.example".into()],
+                Some(Box::new(StaticAcquirer {
+                    calls: calls.clone(),
+                    fail: false,
+                    status: 403,
+                })),
+                llm_calls.clone(),
+            );
+
+            let result = agent.research("topic", options(1)).await.unwrap();
+
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(llm_calls.load(Ordering::SeqCst), 0);
+            assert!(result.extractions.is_empty());
+        }
+
+        #[tokio::test]
+        async fn research_without_acquirer_uses_compatibility_fetch() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/compatibility", listener.local_addr().unwrap());
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let body = b"<html><body>compatibility research</body></html>";
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+            });
+            let agent = agent(vec![url], None, Arc::new(AtomicUsize::new(0)));
+
+            let result = agent.research("topic", options(1)).await.unwrap();
+            handle.join().unwrap();
+
+            assert_eq!(result.extractions.len(), 1);
+            assert_eq!(result.extractions[0].acquisition_id, None);
+        }
     }
 }

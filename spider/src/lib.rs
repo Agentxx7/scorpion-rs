@@ -323,6 +323,7 @@ pub mod agent {
     //!
     //! This provides convenient access to the multimodal agent functionality.
     pub use spider_agent::{
+        AcquiredSource,
         Agent,
         AgentBuilder,
         AgentConfig,
@@ -339,6 +340,7 @@ pub mod agent {
         HttpMethod,
         LimitType,
         Message,
+        PageAcquirer,
         RetryConfig,
         SpiderCloudToolConfig,
         UsageLimits,
@@ -362,7 +364,8 @@ pub mod agent {
         feature = "agent_search_serper",
         feature = "agent_search_brave",
         feature = "agent_search_bing",
-        feature = "agent_search_tavily"
+        feature = "agent_search_tavily",
+        feature = "agent_search_searxng"
     ))]
     pub use spider_agent::{
         ResearchOptions, ResearchResult, SearchOptions, SearchProvider, SearchResult,
@@ -380,6 +383,9 @@ pub mod agent {
 
     #[cfg(feature = "agent_search_tavily")]
     pub use spider_agent::TavilyProvider;
+
+    #[cfg(feature = "agent_search_searxng")]
+    pub use spider_agent::SearxngProvider;
 }
 
 #[cfg(all(feature = "cache_request", not(feature = "wreq")))]

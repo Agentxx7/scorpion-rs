@@ -168,7 +168,7 @@ pub mod temp;
 pub mod scripting;
 
 // Re-exports
-pub use agent::{Agent, AgentBuilder, FetchResult, PageExtraction};
+pub use agent::{AcquiredSource, Agent, AgentBuilder, FetchResult, PageAcquirer, PageExtraction};
 pub use config::{
     AgentConfig, HtmlCleaningMode, LimitType, ResearchOptions, RetryConfig, SearchOptions,
     TimeRange, UsageLimits, UsageSnapshot, UsageStats,
@@ -307,6 +307,9 @@ pub use search::BingProvider;
 
 #[cfg(feature = "search_tavily")]
 pub use search::TavilyProvider;
+
+#[cfg(feature = "search_searxng")]
+pub use search::SearxngProvider;
 
 #[cfg(feature = "memvid")]
 pub use automation::{

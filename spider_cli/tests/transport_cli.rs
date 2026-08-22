@@ -183,6 +183,42 @@ fn default_clearnet_unchanged() {
     assert_eq!(http.hit_count(), 1);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["observed_status_code"], 200);
+    assert!(value["content"]
+        .as_str()
+        .is_some_and(|body| !body.is_empty()));
+    assert!(value["response_body_hash"].as_str().is_some());
+    assert!(value["retrieved_at"].as_u64().is_some());
+    assert_eq!(value["response_origin"], "network");
+}
+
+/// An attempted fetch with no HTTP response preserves its structured
+/// synthetic failure evidence, but the shipping process must fail so shell
+/// automation cannot mistake acquisition failure for success.
+#[test]
+fn refused_fetch_prints_truthful_evidence_and_exits_nonzero() {
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = unused.local_addr().unwrap();
+    drop(unused);
+
+    let output = scorpion()
+        .args(["fetch", &format!("http://{addr}/")])
+        .output()
+        .expect("scorpion must run");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(
+        output.stderr.is_empty(),
+        "structured failure stays on stdout"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["status_code"], 521);
+    assert_eq!(value["observed_status_code"], serde_json::Value::Null);
+    assert_eq!(value["content"], serde_json::Value::Null);
+    assert_eq!(value["response_body_hash"], serde_json::Value::Null);
+    assert_eq!(value["transformed_content_hash"], serde_json::Value::Null);
+    assert_eq!(value["response_origin"], serde_json::Value::Null);
+    assert_eq!(value["retrieved_at"], serde_json::Value::Null);
+    assert_eq!(value["backend_provenance"], "reqwest");
 }
 
 /// T2: Default transport rejects an onion target before any network

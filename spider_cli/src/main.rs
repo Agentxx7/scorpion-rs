@@ -246,6 +246,26 @@ async fn print_discovery_result(result: Result<String, String>) {
     }
 }
 
+/// Print the canonical fetch evidence even when an attempted acquisition did
+/// not observe an HTTP response, while mapping that typed distinction to a
+/// truthful nonzero shipping-process exit. The synthetic operational status
+/// remains useful JSON data; it is never treated as an observed response.
+#[cfg(feature = "fetch")]
+async fn print_fetch_result(result: Result<discovery::FetchOutput, String>) {
+    match result {
+        Ok(output) => {
+            println!("{}", output.json);
+            if !output.response_observed {
+                std::process::exit(2);
+            }
+        }
+        Err(message) => {
+            eprintln!("Error: {message}");
+            std::process::exit(2);
+        }
+    }
+}
+
 #[cfg(feature = "research")]
 fn print_research_result(result: Result<research::CommandOutput, String>) {
     match result {
@@ -431,7 +451,7 @@ async fn main() {
                 Ok(policy) => discovery::run_fetch(url, policy).await,
                 Err(message) => Err(message),
             };
-            return print_discovery_result(result).await;
+            return print_fetch_result(result).await;
         }
         #[cfg(feature = "feed")]
         if let Some(Commands::FEED {

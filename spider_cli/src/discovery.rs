@@ -50,18 +50,32 @@ async fn fetch_document(
 /// `spider fetch <url>` — exactly one evidence-first resource acquisition.
 /// No crawl following, no browser, no content transformation, no
 /// discovery. The output losslessly exposes the canonical `EvidenceBundle`.
+#[derive(Debug)]
+pub struct FetchOutput {
+    pub json: String,
+    /// True only when the canonical page records an actually observed HTTP
+    /// status. Spider's synthetic operational status remains in `json` for a
+    /// failed attempt, but must not make the shipping process report success.
+    pub response_observed: bool,
+}
+
 #[cfg(feature = "fetch")]
 pub async fn run_fetch(
     url: &str,
     transport: spider::features::transport::TransportPolicy,
-) -> Result<String, String> {
+) -> Result<FetchOutput, String> {
     let page = fetch_document(url, transport).await?;
     let content = page
         .get_bytes()
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .map(str::to_string);
     let evidence = build_evidence(&page, content, false, false);
-    serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())
+    let response_observed = evidence.observed_status_code.is_some();
+    let json = serde_json::to_string_pretty(&evidence).map_err(|error| error.to_string())?;
+    Ok(FetchOutput {
+        json,
+        response_observed,
+    })
 }
 
 #[cfg(all(test, feature = "fetch"))]
@@ -120,7 +134,8 @@ mod fetch_tests {
         handle.join().unwrap();
 
         assert_eq!(requests.load(Ordering::Relaxed), 1);
-        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(output.response_observed);
+        let value: serde_json::Value = serde_json::from_str(&output.json).unwrap();
         assert_eq!(value["observed_status_code"], 200);
         assert!(value["retrieved_at"].as_u64().is_some());
         assert_eq!(value["content"], std::str::from_utf8(BODY).unwrap());
@@ -144,15 +159,13 @@ mod fetch_tests {
     /// A connection-level failure (DNS/connect refused) is NOT a
     /// `fetch_single_page` `Err` — Spider represents it as a successful
     /// `Page` whose internal status reflects the failure. Empirically
-    /// confirmed: `status_code` is reclassified (503), `observed_status_code`
-    /// stays `None` because no real wire response was ever received, and no
-    /// bytes/hash/content are present. This is the same "retrieval status
-    /// != process failure" distinction every other command preserves — the
-    /// CLI process succeeds and reports truthful, absent evidence, it does
-    /// not fabricate an error exit for a condition Spider itself can
-    /// truthfully represent as data.
+    /// confirmed: `status_code` is a synthetic operational classification,
+    /// `observed_status_code` stays `None` because no real wire response was
+    /// ever received, and no bytes/hash/content are present. The structured
+    /// evidence remains available while the shipping boundary uses the typed
+    /// `response_observed` signal for its process exit status.
     #[tokio::test]
-    async fn fetch_connection_failure_is_truthful_evidence_not_a_process_error() {
+    async fn fetch_connection_failure_preserves_truthful_unobserved_evidence() {
         // Port chosen to be almost certainly unbound in any test environment.
         let output = run_fetch(
             "http://127.0.0.1:1/resource",
@@ -160,10 +173,15 @@ mod fetch_tests {
         )
         .await
         .expect("a connection failure is representable as evidence, not an Err");
-        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(!output.response_observed);
+        let value: serde_json::Value = serde_json::from_str(&output.json).unwrap();
+        assert_eq!(value["status_code"], 521);
         assert_eq!(value["observed_status_code"], serde_json::Value::Null);
         assert_eq!(value["response_body_hash"], serde_json::Value::Null);
+        assert_eq!(value["transformed_content_hash"], serde_json::Value::Null);
         assert_eq!(value["content"], serde_json::Value::Null);
+        assert_eq!(value["response_origin"], serde_json::Value::Null);
+        assert_eq!(value["retrieved_at"], serde_json::Value::Null);
     }
 }
 

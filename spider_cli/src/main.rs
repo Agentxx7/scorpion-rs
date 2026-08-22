@@ -848,9 +848,11 @@ async fn main() {
                         website.last_transport_error().cloned()
                     });
 
+                    let mut successful_materializations = 0usize;
                     while let Ok(res) = rx2.recv().await {
                         #[allow(unused_mut)]
                         let mut res = res;
+                        let response_observed = res.observed_status_code.is_some();
                         if let Some(parsed_url) = res.get_url_parsed() {
                             log("Storing", parsed_url);
                             let mut url_path = parsed_url.path().to_string();
@@ -881,6 +883,8 @@ async fn main() {
                                     Ok(mut file) => {
                                         if let Err(e) = file.write_all(bytes).await {
                                             eprintln!("Failed to write {:?}: {e}", final_path);
+                                        } else if response_observed {
+                                            successful_materializations += 1;
                                         }
                                     }
                                     Err(e) => {
@@ -892,6 +896,9 @@ async fn main() {
                     }
 
                     exit_on_transport_error(crawl_task.await);
+                    if successful_materializations == 0 {
+                        std::process::exit(2);
+                    }
                 }
                 Some(Commands::SCRAPE {
                     output_html,

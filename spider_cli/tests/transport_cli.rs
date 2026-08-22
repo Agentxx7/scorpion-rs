@@ -618,6 +618,71 @@ fn refused_crawl_preserves_link_output_and_exits_nonzero() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("server error"));
 }
 
+/// A Download succeeds only after bytes from an observed HTTP response are
+/// written to the existing destination layout.
+#[test]
+fn download_with_observed_response_materializes_bytes_and_exits_zero() {
+    const BODY: &str = "<html><body>download success fixture</body></html>";
+    let http = HttpFixture::start(BODY);
+    let url = format!("http://{}/", http.addr);
+    let destination = std::env::temp_dir().join(format!(
+        "scorpion-download-success-{}-{}",
+        std::process::id(),
+        http.addr.port()
+    ));
+    let _ = std::fs::remove_dir_all(&destination);
+
+    let output = scorpion()
+        .args([
+            "--url",
+            &url,
+            "download",
+            "--target-destination",
+            &destination.to_string_lossy(),
+        ])
+        .output()
+        .expect("scorpion must run");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read(destination.join("index.html")).unwrap(),
+        BODY.as_bytes()
+    );
+    assert!(http.hit_count() >= 1, "the local server was never reached");
+    std::fs::remove_dir_all(destination).unwrap();
+}
+
+/// A refused Download receives no observed response, creates no placeholder
+/// file, and cannot report shell success.
+#[test]
+fn refused_download_materializes_nothing_and_exits_nonzero() {
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = unused.local_addr().unwrap();
+    drop(unused);
+    let destination = std::env::temp_dir().join(format!(
+        "scorpion-download-refused-{}-{}",
+        std::process::id(),
+        addr.port()
+    ));
+    let _ = std::fs::remove_dir_all(&destination);
+
+    let output = scorpion()
+        .args([
+            "--url",
+            &format!("http://{addr}/"),
+            "download",
+            "--target-destination",
+            &destination.to_string_lossy(),
+        ])
+        .output()
+        .expect("scorpion must run");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("server error"));
+    assert_eq!(std::fs::read_dir(&destination).unwrap().count(), 0);
+    std::fs::remove_dir_all(destination).unwrap();
+}
+
 /// T17: a genuine Tor crawl preflight rejection (Tor + legacy proxy, in
 /// this case) is a nonzero exit with a stderr message — never a
 /// successful command with empty stdout.

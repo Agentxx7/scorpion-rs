@@ -2626,8 +2626,8 @@ fn canonical_executor_scope_established_at_every_chrome_crawl_entry_point() {
 // --- SECTION: SCORPION_PERSISTED_DOMAIN_IDENTITY_001 ---
 //
 // Track 1 of the frozen roadmap: identity for persisted domain objects.
-// `EvidenceId` (SCORPION.md §3) and `WatchId` (SCORPION_SDD.md §5.2) are
-// defined exactly once, in `spider/src/features/identity.rs` — identity
+// Canonical persisted-domain IDs are defined exactly once, in
+// `spider/src/features/identity.rs` — identity
 // only: explicit type, deterministic serialization, validating parse,
 // value equality/hash/ordering. No persistence, no state/lifecycle, no
 // domain object, no interface-local shadow type. WATCH/MONITOR's actual
@@ -2635,11 +2635,16 @@ fn canonical_executor_scope_established_at_every_chrome_crawl_entry_point() {
 // remains BLOCKED per SCORPION_SDD.md §5.2 — only identity exists.
 
 #[test]
-fn evidence_id_and_watch_id_are_defined_exactly_once() {
+fn canonical_persisted_ids_are_defined_exactly_once() {
     assert_pattern_only_in_files(
         "struct EvidenceId",
         &["features/identity.rs"],
         "EvidenceId must only be defined in the canonical identity module",
+    );
+    assert_pattern_only_in_files(
+        "struct ResearchId",
+        &["features/identity.rs"],
+        "ResearchId must only be defined in the canonical identity module",
     );
     assert_pattern_only_in_files(
         "struct WatchId",
@@ -2707,6 +2712,8 @@ fn identity_types_have_deterministic_serialization_and_validation() {
     for marker in [
         "impl fmt::Display for EvidenceId",
         "impl FromStr for EvidenceId",
+        "impl fmt::Display for ResearchId",
+        "impl FromStr for ResearchId",
         "impl fmt::Display for WatchId",
         "impl FromStr for WatchId",
         "pub const PREFIX",
@@ -2721,7 +2728,10 @@ fn identity_types_have_deterministic_serialization_and_validation() {
     // identity kinds — an EvidenceId string must never be a valid WatchId
     // string, and vice versa.
     assert!(identity.contains("\"evid_\""));
+    assert!(identity.contains("\"research_\""));
     assert!(identity.contains("\"watch_\""));
+    assert!(!identity.contains("pub struct CrawlId"));
+    assert!(!identity.contains("pub struct FetchId"));
 }
 
 #[test]
@@ -2741,15 +2751,66 @@ fn no_shadow_ids_in_cli_or_mcp() {
                 "struct WatchId",
                 "enum WatchId",
                 "type EvidenceId",
+                "struct ResearchId",
+                "enum ResearchId",
+                "type ResearchId",
                 "type WatchId",
             ] {
                 assert!(
                     !file.contents.contains(shadow),
-                    "{crate_dir}/{} must not define its own {shadow:?} — EvidenceId/WatchId \
+                    "{crate_dir}/{} must not define its own {shadow:?} — canonical persisted IDs \
                      are owned exclusively by spider::features::identity",
                     file.relative_path
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn durable_research_session_has_one_spider_owned_store_and_neutral_agent_boundary() {
+    let session =
+        fs::read_to_string(workspace_root().join("spider/src/features/research_session.rs"))
+            .unwrap();
+    for required in [
+        "pub struct ResearchSession",
+        "ResearchId::new()",
+        "DomainPersistence",
+        "CanonicalPageAcquirer::new_durable",
+        ".with_page_acquirer(Box::new(acquirer.clone()))",
+        "EvidenceRef::new(id)",
+        ".resolve(store)",
+        "write_current(",
+        "append_history(",
+    ] {
+        assert!(
+            session.contains(required),
+            "canonical durable research session is missing ownership invariant {required:?}"
+        );
+    }
+    for forbidden in [
+        "sqlx::",
+        "CREATE TABLE",
+        "INSERT INTO",
+        "struct CrawlId",
+        "struct FetchId",
+    ] {
+        assert!(
+            !session.contains(forbidden),
+            "research session must reuse canonical identity/persistence: found {forbidden:?}"
+        );
+    }
+
+    let agent_dir = workspace_root().join("spider_agent/src");
+    let mut agent_files = Vec::new();
+    collect_rust_files(&agent_dir, &agent_dir, &mut agent_files);
+    for file in agent_files {
+        for forbidden in ["ResearchId", "DomainPersistence", "EvidenceRef"] {
+            assert!(
+                !file.contents.contains(forbidden),
+                "spider_agent/{} must remain Spider-identity/persistence neutral: found {forbidden:?}",
+                file.relative_path
+            );
         }
     }
 }
@@ -5507,5 +5568,29 @@ fn research_page_extraction_preserves_the_canonical_acquisition_identity() {
     assert!(
         agent.contains("acquisition_id: source.acquisition_id,"),
         "successful PageExtraction must carry the exact acquisition identity supplied by PageAcquirer"
+    );
+}
+
+#[test]
+fn durable_research_example_reports_counts_from_the_session_owner() {
+    let example =
+        fs::read_to_string(workspace_root().join("spider/examples/research_canonical_searxng.rs"))
+            .unwrap();
+    for required in [
+        "if let Some(session) = durable_session.as_ref()",
+        "session.counts.acquisition_attempts",
+        "session.counts.durable_sources",
+        "Durable canonical evidence count",
+    ] {
+        assert!(
+            example.contains(required),
+            "durable operator diagnostics must use the returned ResearchSession: missing {required:?}"
+        );
+    }
+    assert!(
+        !example.contains(
+            ".map(CanonicalPageAcquirer::retained_evidence)\n        .unwrap_or_default()"
+        ),
+        "durable reporting must not turn its intentionally absent process-local acquirer handle into zero counts"
     );
 }

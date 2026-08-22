@@ -46,11 +46,12 @@
 //!   authentication). None of those three are redefined, renamed, or
 //!   touched by this type.
 //!
-//! Only these three identity types exist. Do not add `ResearchId`,
-//! `CrawlId`, `FetchId`, a bare `SessionId`, `JobId`, `OperationId`, or any
-//! other identity "for symmetry" — each new identity type is its own
-//! frontier, scoped to a concept that is actually locked and actually
-//! needed next.
+//! Only these four identity types exist. Do not add `CrawlId`, `FetchId`, a
+//! bare `SessionId`, `JobId`, `OperationId`, or any other identity "for
+//! symmetry" — each new identity type is its own frontier, scoped to a
+//! concept that is actually locked and actually needed next. [`ResearchId`]
+//! names one canonical durable research invocation; its session record and
+//! persistence remain outside this identity-only module.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -248,6 +249,85 @@ impl serde::Serialize for EvidenceId {
 
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for EvidenceId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Canonical identity for one durable canonical-research invocation.
+///
+/// Each invocation receives a fresh identity, including repeated executions
+/// of an identical topic. This identity is never derived from a topic, URL,
+/// source set, evidence identity, result, or content hash. The durable session
+/// record it names is owned by `features::research_session`; this type owns no
+/// lifecycle or persistence behavior.
+///
+/// Serialized form: `research_` followed by 32 lowercase hex characters.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ResearchId([u8; ID_BYTES]);
+
+impl ResearchId {
+    /// Wire-format prefix. Part of the type's serialization contract.
+    pub const PREFIX: &'static str = "research_";
+
+    /// Mint a fresh identity for one new research invocation.
+    pub fn new() -> Self {
+        Self(random_bytes())
+    }
+}
+
+impl Default for ResearchId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for ResearchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_id(Self::PREFIX, &self.0))
+    }
+}
+
+impl fmt::Debug for ResearchId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ResearchId({self})")
+    }
+}
+
+impl FromStr for ResearchId {
+    type Err = IdentityParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_id(Self::PREFIX, s).map(Self)
+    }
+}
+
+impl TryFrom<&str> for ResearchId {
+    type Error = IdentityParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl TryFrom<String> for ResearchId {
+    type Error = IdentityParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for ResearchId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ResearchId {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
         raw.parse().map_err(serde::de::Error::custom)
@@ -463,6 +543,26 @@ mod tests {
     }
 
     #[test]
+    fn research_id_round_trips_through_display_and_parse() {
+        let id = ResearchId::new();
+        let text = id.to_string();
+        assert!(text.starts_with(ResearchId::PREFIX));
+        assert_eq!(text.len(), ResearchId::PREFIX.len() + ID_BYTES * 2);
+        assert_eq!(text.parse::<ResearchId>().unwrap(), id);
+    }
+
+    #[test]
+    fn research_id_is_distinct_from_every_existing_identity_kind() {
+        assert_ne!(ResearchId::PREFIX, EvidenceId::PREFIX);
+        assert_ne!(ResearchId::PREFIX, WatchId::PREFIX);
+        assert_ne!(ResearchId::PREFIX, AuthSessionId::PREFIX);
+        let research = ResearchId::new().to_string();
+        assert!(EvidenceId::from_str(&research).is_err());
+        assert!(WatchId::from_str(&research).is_err());
+        assert!(AuthSessionId::from_str(&research).is_err());
+    }
+
+    #[test]
     fn evidence_id_and_watch_id_are_distinct_types_with_distinct_prefixes() {
         assert_ne!(EvidenceId::PREFIX, WatchId::PREFIX);
         // An EvidenceId's serialized form must never parse as a WatchId,
@@ -561,6 +661,13 @@ mod tests {
                 "collision in freshly minted IDs"
             );
         }
+        let mut seen = HashSet::new();
+        for _ in 0..256 {
+            assert!(
+                seen.insert(ResearchId::new()),
+                "collision in freshly minted IDs"
+            );
+        }
     }
 
     #[test]
@@ -587,6 +694,12 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("{:?}", id.to_string()));
         let back: EvidenceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+
+        let id = ResearchId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, format!("{:?}", id.to_string()));
+        let back: ResearchId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, back);
     }
 }

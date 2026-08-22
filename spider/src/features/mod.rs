@@ -140,8 +140,8 @@ pub mod github_source_provider;
 #[cfg(feature = "source_hugging_face")]
 pub mod hugging_face_source_provider;
 /// Canonical identity for persisted Scorpion domain objects: `EvidenceId`,
-/// `WatchId`. Identity only — no persistence, no state/lifecycle, no
-/// domain object. Always available; no feature gate. See
+/// `ResearchId`, `WatchId`, and `AuthSessionId`. Identity only — no
+/// persistence, no state/lifecycle, no domain object. Always available. See
 /// `SCORPION.md` §3 (`EvidenceId`) and `SCORPION_SDD.md` §5.2 (`WatchId`).
 pub mod identity;
 /// Provider-neutral immutable local multi-file model installation, identity,
@@ -192,6 +192,11 @@ pub mod qwen3_vl_runtime;
 /// intent variants are individually gated behind their respective existing
 /// feed/sitemap/news_sitemap features.
 pub mod research_scope;
+/// Durable owner for one canonical research invocation: claims a fresh
+/// `ResearchId`, forces durable canonical source acquisition, and records
+/// evidence accounting, Source-N bindings, counts, and terminal outcome.
+#[cfg(all(feature = "agent_acquisition", feature = "disk"))]
+pub mod research_session;
 /// robots.txt `Sitemap:` directive discovery.
 #[cfg(feature = "robots_sitemap")]
 pub mod robots_sitemap;

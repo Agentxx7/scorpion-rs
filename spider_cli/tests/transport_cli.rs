@@ -582,6 +582,42 @@ fn refused_scrape_prints_truthful_output_and_exits_nonzero() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("server error"));
 }
 
+/// A Crawl with a real observed HTTP response preserves normal link output
+/// and exits successfully.
+#[test]
+fn crawl_with_observed_response_outputs_url_and_exits_zero() {
+    let http = HttpFixture::start("<html><body>crawl success fixture</body></html>");
+    let url = format!("http://{}/", http.addr);
+
+    let output = scorpion()
+        .args(["--url", &url, "crawl", "--output-links"])
+        .output()
+        .expect("scorpion must run");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), url);
+    assert!(http.hit_count() >= 1, "the local server was never reached");
+}
+
+/// A refused Crawl preserves the existing attempted-page link output, but
+/// cannot report shell success when no HTTP response was observed.
+#[test]
+fn refused_crawl_preserves_link_output_and_exits_nonzero() {
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = unused.local_addr().unwrap();
+    drop(unused);
+    let url = format!("http://{addr}/");
+
+    let output = scorpion()
+        .args(["--url", &url, "crawl", "--output-links"])
+        .output()
+        .expect("scorpion must run");
+
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), url);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("server error"));
+}
+
 /// T17: a genuine Tor crawl preflight rejection (Tor + legacy proxy, in
 /// this case) is a nonzero exit with a stderr message — never a
 /// successful command with empty stdout.

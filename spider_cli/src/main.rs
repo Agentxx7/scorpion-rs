@@ -805,8 +805,11 @@ async fn main() {
                         website.last_transport_error().cloned()
                     });
 
-                    if output_links {
-                        while let Ok(res) = rx2.recv().await {
+                    let mut response_observed = false;
+                    while let Ok(res) = rx2.recv().await {
+                        response_observed |= res.observed_status_code.is_some();
+
+                        if output_links {
                             if return_headers {
                                 let headers_json = handle_headers(&res);
 
@@ -820,6 +823,9 @@ async fn main() {
                     }
 
                     exit_on_transport_error(crawl_task.await);
+                    if !response_observed {
+                        std::process::exit(2);
+                    }
                 }
                 Some(Commands::DOWNLOAD {
                     target_destination, ..

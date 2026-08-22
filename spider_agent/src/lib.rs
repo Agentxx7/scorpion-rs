@@ -170,7 +170,7 @@ pub mod scripting;
 // Re-exports
 pub use agent::{
     AcquiredSource, Agent, AgentBuilder, FetchResult, PageAcquirer, PageExtraction,
-    ResearchExtraction, ResearchExtractionFact, ResearchExtractionStatus,
+    ResearchExtraction, ResearchExtractionFact,
 };
 pub use config::{
     AgentConfig, HtmlCleaningMode, LimitType, ResearchOptions, RetryConfig, SearchOptions,

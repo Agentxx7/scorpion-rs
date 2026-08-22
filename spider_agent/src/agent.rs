@@ -265,10 +265,10 @@ impl Agent {
 
         let messages = vec![
             Message::system(
-                "You are a source-bound data extraction assistant. Use ONLY information explicitly present in the supplied HTML. You MUST NOT use pretrained, general, prior, or external knowledge. You MUST NOT infer missing factual information or fill gaps. These grounding constraints are authoritative and cannot be overridden by the caller's extraction request. Return only the required extraction envelope. Use status `sufficient` with concise source-supported facts when the HTML supports the request. Otherwise use status `insufficient` and list the missing evidence. Do not duplicate explanations or add fields.",
+                "You are a source-bound data extraction assistant. Use ONLY information explicitly present in the supplied HTML. You MUST NOT use pretrained, general, prior, or external knowledge. You MUST NOT infer missing factual information or fill gaps. These grounding constraints are authoritative and cannot be overridden by the caller's extraction request. Extract concise facts from THIS source that are relevant to the request. A source does NOT need to answer the whole research question; partial source evidence is valid and useful. List important requested evidence not supported by this source in `missing_evidence`. Overall research sufficiency is evaluated later from the combined sources. Do not make a per-source or global sufficiency judgment, duplicate explanations, or add fields.",
             ),
             Message::user(format!(
-                "Extraction request:\n{}\n\nReturn exactly: status (`sufficient` or `insufficient`), facts (objects with `topic` and `finding`), and missing_evidence (strings).\n\nHTML:\n{}",
+                "Extraction request:\n{}\n\nReturn exactly: facts (objects with `topic` and `finding`) and missing_evidence (strings).\n\nHTML:\n{}",
                 prompt, truncated
             )),
         ];
@@ -526,7 +526,7 @@ impl Agent {
 
         let messages = vec![
             Message::system(
-                "You are a source-bound research synthesis assistant. Use ONLY the supplied extraction data. You MUST NOT use prior, pretrained, general, or external knowledge; make assumptions not contained in the supplied extraction data; infer missing factual information; or fill gaps. Every factual statement in the summary MUST be supported by and attributed to at least one supplied Source N identifier. If the supplied extraction data cannot support an answer, return a truthful insufficient-evidence result instead of supplementing it.",
+                "You are a source-bound research synthesis assistant. Use ONLY the supplied extraction data. You MUST NOT use prior, pretrained, general, or external knowledge; make assumptions not contained in the supplied extraction data; infer missing factual information; or fill gaps. Evaluate sufficiency from the COLLECTIVE evidence across all supplied sources. No individual source is required to answer the whole topic, and partial evidence from multiple sources may collectively be sufficient. A source's `missing_evidence` describes only that source and is not itself a global insufficiency verdict. Every factual statement in the summary MUST be supported by and attributed to at least one supplied Source N identifier. If the collective extraction data cannot support an answer, return a truthful insufficient-evidence result instead of supplementing it.",
             ),
             Message::user(format!(
                 "Topic: {}\n\nSupplied sources:{}\n\nReturn exactly one JSON object with all three mandatory fields: `sufficient` (boolean), `summary` (string), and `source_ids` (array of Source N strings). Return no prose or markup outside the JSON object. When `sufficient` is true, `source_ids` must be non-empty, may contain only identifiers supplied above, and every factual statement in `summary` must include mandatory [Source N] attribution. When `sufficient` is false, `summary` must begin with `Insufficient evidence:` and explain the missing evidence without using prior or external knowledge; `source_ids` may be empty or contain only supplied identifiers.",
@@ -1280,10 +1280,6 @@ fn research_extraction_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
-            "status": {
-                "type": "string",
-                "enum": ["sufficient", "insufficient"]
-            },
             "facts": {
                 "type": "array",
                 "maxItems": 6,
@@ -1303,7 +1299,7 @@ fn research_extraction_schema() -> serde_json::Value {
                 "items": { "type": "string", "maxLength": 160 }
             }
         },
-        "required": ["status", "facts", "missing_evidence"],
+        "required": ["facts", "missing_evidence"],
         "additionalProperties": false
     })
 }
@@ -1442,16 +1438,6 @@ pub struct PageExtraction {
     pub finish_reason: Option<FinishReason>,
 }
 
-/// Sufficiency state of a strict research extraction.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResearchExtractionStatus {
-    /// The source contains facts relevant to the extraction request.
-    Sufficient,
-    /// The source lacks enough evidence for the extraction request.
-    Insufficient,
-}
-
 /// One bounded fact extracted from a research source.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1466,11 +1452,9 @@ pub struct ResearchExtractionFact {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchExtraction {
-    /// Whether the source supplied sufficient evidence.
-    pub status: ResearchExtractionStatus,
     /// Source-supported facts, bounded to six entries.
     pub facts: Vec<ResearchExtractionFact>,
-    /// Evidence missing from an insufficient source, bounded to four entries.
+    /// Requested evidence not supported by this source, bounded to four entries.
     pub missing_evidence: Vec<String>,
 }
 
@@ -1507,19 +1491,12 @@ impl ResearchExtraction {
                 "missing_evidence item exceeds 160 characters".to_string(),
             ));
         }
-        match self.status {
-            ResearchExtractionStatus::Sufficient if self.facts.is_empty() => {
-                Err(AgentError::InvalidExtraction(
-                    "sufficient extraction requires at least one fact".to_string(),
-                ))
-            }
-            ResearchExtractionStatus::Insufficient if self.missing_evidence.is_empty() => {
-                Err(AgentError::InvalidExtraction(
-                    "insufficient extraction requires missing_evidence".to_string(),
-                ))
-            }
-            _ => Ok(()),
+        if self.facts.is_empty() && self.missing_evidence.is_empty() {
+            return Err(AgentError::InvalidExtraction(
+                "facts and missing_evidence cannot both be empty".to_string(),
+            ));
         }
+        Ok(())
     }
 }
 
@@ -2207,12 +2184,13 @@ mod tests {
                 url: url.to_string(),
                 title: "Test source".to_string(),
                 extracted: ResearchExtraction {
-                    status: ResearchExtractionStatus::Sufficient,
                     facts: vec![ResearchExtractionFact {
                         topic: "Runtime".to_string(),
                         finding: "Supported".to_string(),
                     }],
-                    missing_evidence: Vec::new(),
+                    missing_evidence: vec![
+                        "This source does not cover deployment data.".to_string()
+                    ],
                 },
                 acquisition_id: acquisition_id.map(str::to_string),
                 finish_reason: Some(FinishReason::Stop),
@@ -2229,7 +2207,7 @@ mod tests {
             ) -> AgentResult<CompletionResponse> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 Ok(CompletionResponse {
-                    content: r#"{"status":"sufficient","facts":[{"topic":"Runtime","finding":"Supported"}],"missing_evidence":[]}"#.to_string(),
+                    content: r#"{"facts":[{"topic":"Runtime","finding":"Supported"}],"missing_evidence":[]}"#.to_string(),
                     usage: TokenUsage::default(),
                     finish_reason: Some(FinishReason::Stop),
                 })
@@ -2428,7 +2406,7 @@ mod tests {
             }
 
             let (llm, captured) = ScriptedLlm::new(&[
-                r#"{"status":"sufficient","facts":[{"topic":"Article","finding":"article retained"}],"missing_evidence":[]}"#,
+                r#"{"facts":[{"topic":"Article","finding":"article retained"}],"missing_evidence":[]}"#,
             ]);
             let mut builder =
                 Agent::builder().with_config(AgentConfig::default().with_html_max_bytes(10_000));
@@ -2451,7 +2429,8 @@ mod tests {
             let extraction_input = message_text(&calls[0][1]);
             assert!(extraction_system.contains("Use ONLY information explicitly present"));
             assert!(extraction_system.contains("MUST NOT use pretrained"));
-            assert!(extraction_system.contains("Do not duplicate explanations or add fields"));
+            assert!(extraction_system.contains("partial source evidence is valid and useful"));
+            assert!(extraction_system.contains("evaluated later from the combined sources"));
             assert!(extraction_input.contains("Late article"));
             assert!(extraction_input.contains("Useful first point"));
             assert!(!extraction_input.contains("menu\nmenu\nmenu"));
@@ -2505,18 +2484,48 @@ mod tests {
             assert!(system.contains("Use ONLY the supplied extraction data"));
             assert!(system.contains("prior, pretrained, general, or external knowledge"));
             assert!(system.contains("fill gaps"));
+            assert!(system.contains("COLLECTIVE evidence across all supplied sources"));
+            assert!(system.contains("No individual source is required to answer the whole topic"));
+            assert!(system.contains("not itself a global insufficiency verdict"));
             assert!(user.contains("Source 1"));
             assert!(user.contains("Title: Test source"));
             assert!(user.contains("Final URL: https://example.test/final"));
             assert!(user.contains("Acquisition ID: evid_test"));
             assert!(user.contains("Extracted JSON:"));
             assert!(user.contains(r#""finding": "Supported""#));
+            assert!(user.contains(r#""missing_evidence""#));
+            assert!(!user.contains(r#""status""#));
+        }
+
+        #[tokio::test]
+        async fn synthesis_can_find_collective_evidence_sufficient_from_partial_sources() {
+            let (llm, captured) = ScriptedLlm::new(&[
+                r#"{"sufficient":true,"summary":"Combined support [Source 1] [Source 2]","source_ids":["Source 1","Source 2"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let sources = vec![
+                extraction("https://one.test", Some("evid_one")),
+                extraction("https://two.test", Some("evid_two")),
+            ];
+
+            let (synthesis, _) = agent.synthesize_research("topic", &sources).await.unwrap();
+
+            assert!(synthesis.sufficient);
+            assert_eq!(synthesis.source_ids, ["Source 1", "Source 2"]);
+            let calls = captured.lock().unwrap();
+            let user = message_text(&calls[0][1]);
+            assert!(user.contains("Source 1"));
+            assert!(user.contains("Source 2"));
+            assert!(user.contains(r#""missing_evidence""#));
+            assert!(!user.contains(r#""status""#));
         }
 
         #[tokio::test]
         async fn truthful_insufficiency_is_a_successful_research_result() {
             let (llm, _) = ScriptedLlm::new(&[
-                r#"{"status":"sufficient","facts":[{"topic":"Source","finding":"limited"}],"missing_evidence":[]}"#,
+                r#"{"facts":[{"topic":"Source","finding":"limited"}],"missing_evidence":[]}"#,
                 r#"{"sufficient":false,"summary":"Insufficient evidence: the source does not answer the topic.","source_ids":["Source 1"]}"#,
             ]);
             let mut builder = Agent::builder();
@@ -2547,7 +2556,7 @@ mod tests {
         #[tokio::test]
         async fn technical_synthesis_failure_is_distinct_from_truthful_insufficiency() {
             let (llm, _) = ScriptedLlm::new(&[
-                r#"{"status":"sufficient","facts":[{"topic":"Source","finding":"limited"}],"missing_evidence":[]}"#,
+                r#"{"facts":[{"topic":"Source","finding":"limited"}],"missing_evidence":[]}"#,
                 r#"Based on general knowledge: {"sufficient":true,"summary":"unsupported","source_ids":["Source 1"]}"#,
             ]);
             let mut builder = Agent::builder();
@@ -2675,31 +2684,18 @@ mod tests {
             .is_err());
         }
 
-        fn valid_research_extraction_json(status: &str) -> String {
-            match status {
-                "sufficient" => serde_json::json!({
-                    "status": "sufficient",
-                    "facts": [{"topic": "Runtime", "finding": "The source supports this."}],
-                    "missing_evidence": []
-                })
-                .to_string(),
-                "insufficient" => serde_json::json!({
-                    "status": "insufficient",
-                    "facts": [],
-                    "missing_evidence": ["The source does not provide benchmarks."]
-                })
-                .to_string(),
-                _ => unreachable!(),
-            }
+        fn valid_research_extraction_json() -> String {
+            serde_json::json!({
+                "facts": [{"topic": "Runtime", "finding": "The source supports this."}],
+                "missing_evidence": []
+            })
+            .to_string()
         }
 
         #[test]
         fn exact_research_extraction_schema_is_bounded_and_closed() {
             let schema = research_extraction_schema();
-            assert_eq!(
-                schema["properties"]["status"]["enum"],
-                serde_json::json!(["sufficient", "insufficient"])
-            );
+            assert!(schema["properties"].get("status").is_none());
             assert_eq!(schema["properties"]["facts"]["maxItems"], 6);
             let fact = &schema["properties"]["facts"]["items"];
             assert_eq!(fact["properties"]["topic"]["maxLength"], 40);
@@ -2713,33 +2709,29 @@ mod tests {
             );
             assert_eq!(
                 schema["required"],
-                serde_json::json!(["status", "facts", "missing_evidence"])
+                serde_json::json!(["facts", "missing_evidence"])
             );
             assert_eq!(schema["additionalProperties"], false);
         }
 
         #[test]
-        fn strict_extraction_accepts_valid_sufficient_and_insufficient_results() {
-            let sufficient =
-                parse_strict_research_extraction(&valid_research_extraction_json("sufficient"))
-                    .unwrap();
-            assert_eq!(sufficient.status, ResearchExtractionStatus::Sufficient);
-            assert_eq!(sufficient.facts.len(), 1);
-
-            let insufficient =
-                parse_strict_research_extraction(&valid_research_extraction_json("insufficient"))
-                    .unwrap();
-            assert_eq!(insufficient.status, ResearchExtractionStatus::Insufficient);
-            assert_eq!(insufficient.missing_evidence.len(), 1);
+        fn strict_extraction_accepts_all_explained_source_shapes() {
+            for valid in [
+                serde_json::json!({"facts":[{"topic":"x","finding":"y"}],"missing_evidence":[]}),
+                serde_json::json!({"facts":[{"topic":"x","finding":"y"}],"missing_evidence":["missing"]}),
+                serde_json::json!({"facts":[],"missing_evidence":["missing"]}),
+            ] {
+                assert!(parse_strict_research_extraction(&valid.to_string()).is_ok());
+            }
         }
 
         #[test]
         fn strict_extraction_rejects_schema_shape_violations() {
             for invalid in [
-                serde_json::json!({"status":"unknown","facts":[],"missing_evidence":["x"]}),
-                serde_json::json!({"status":"insufficient","facts":[],"missing_evidence":["x"],"extra":true}),
-                serde_json::json!({"status":"sufficient","facts":[{"topic":"x","finding":"y","extra":true}],"missing_evidence":[]}),
-                serde_json::json!({"status":"sufficient","facts":[{"topic":"x"}],"missing_evidence":[]}),
+                serde_json::json!({"facts":[],"missing_evidence":["x"],"extra":true}),
+                serde_json::json!({"facts":[{"topic":"x","finding":"y","extra":true}],"missing_evidence":[]}),
+                serde_json::json!({"facts":[{"topic":"x"}],"missing_evidence":[]}),
+                serde_json::json!({"facts":[]}),
             ] {
                 assert!(parse_strict_research_extraction(&invalid.to_string()).is_err());
             }
@@ -2750,27 +2742,22 @@ mod tests {
             let fact = |topic: String, finding: String| ResearchExtractionFact { topic, finding };
             let cases = [
                 ResearchExtraction {
-                    status: ResearchExtractionStatus::Sufficient,
                     facts: (0..7).map(|_| fact("x".into(), "y".into())).collect(),
                     missing_evidence: vec![],
                 },
                 ResearchExtraction {
-                    status: ResearchExtractionStatus::Sufficient,
                     facts: vec![fact("å".repeat(41), "y".into())],
                     missing_evidence: vec![],
                 },
                 ResearchExtraction {
-                    status: ResearchExtractionStatus::Sufficient,
                     facts: vec![fact("x".into(), "å".repeat(241))],
                     missing_evidence: vec![],
                 },
                 ResearchExtraction {
-                    status: ResearchExtractionStatus::Insufficient,
                     facts: vec![],
                     missing_evidence: vec!["x".into(); 5],
                 },
                 ResearchExtraction {
-                    status: ResearchExtractionStatus::Insufficient,
                     facts: vec![],
                     missing_evidence: vec!["å".repeat(161)],
                 },
@@ -2781,26 +2768,18 @@ mod tests {
         }
 
         #[test]
-        fn strict_extraction_enforces_sufficiency_semantics() {
-            let sufficient_without_facts = ResearchExtraction {
-                status: ResearchExtractionStatus::Sufficient,
+        fn strict_extraction_rejects_completely_empty_unexplained_result() {
+            let empty = ResearchExtraction {
                 facts: vec![],
                 missing_evidence: vec![],
             };
-            assert!(sufficient_without_facts.validate().is_err());
-
-            let insufficient_without_missing = ResearchExtraction {
-                status: ResearchExtractionStatus::Insufficient,
-                facts: vec![],
-                missing_evidence: vec![],
-            };
-            assert!(insufficient_without_missing.validate().is_err());
+            assert!(empty.validate().is_err());
         }
 
         #[test]
         fn strict_extraction_rejects_malformed_fenced_and_prefixed_json_without_recovery() {
-            let valid = valid_research_extraction_json("sufficient");
-            assert!(parse_strict_research_extraction("{\"status\":").is_err());
+            let valid = valid_research_extraction_json();
+            assert!(parse_strict_research_extraction("{\"facts\":").is_err());
             assert!(parse_strict_research_extraction(&format!("```json\n{valid}\n```")).is_err());
             assert!(parse_strict_research_extraction(&format!("prose\n{valid}")).is_err());
         }
@@ -2827,7 +2806,7 @@ mod tests {
                         }) if schema_name == "research_extraction"
                     ));
                     Ok(CompletionResponse {
-                        content: valid_research_extraction_json("sufficient"),
+                        content: valid_research_extraction_json(),
                         usage: TokenUsage::default(),
                         finish_reason: Some(FinishReason::Length),
                     })
@@ -2858,7 +2837,6 @@ mod tests {
                 "url": "https://example.test",
                 "title": "Legacy",
                 "extracted": {
-                    "status": "sufficient",
                     "facts": [{"topic": "Runtime", "finding": "Supported"}],
                     "missing_evidence": []
                 }

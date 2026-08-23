@@ -3997,6 +3997,13 @@ pub struct ChromeFetchParams<'a> {
     /// full-resource capture, so replacing the body can never eat link
     /// discovery.
     pub prefer_native_markdown: bool,
+    /// Explicit CAPTCHA-provider selection — borrowed from
+    /// `Configuration::captcha_provider`. `None` (default) means the
+    /// canonical browser-challenge router
+    /// (`crate::features::solvers::route_detected_browser_challenge`)
+    /// records a detected challenge as unrouted without constructing any
+    /// provider or registry.
+    pub captcha_provider: &'a Option<crate::features::captcha::CaptchaProviderId>,
 }
 
 #[cfg(feature = "chrome")]

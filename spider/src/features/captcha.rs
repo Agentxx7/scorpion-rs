@@ -53,6 +53,9 @@ pub(crate) enum BrowserChallengeObservation {
         captured_pixel_width: u32,
         /// Exact PNG height in pixels.
         captured_pixel_height: u32,
+        /// Outcome of routing this challenge through
+        /// [`crate::features::solvers::route_detected_browser_challenge`].
+        route_outcome: CaptchaRouteOutcomeSummary,
     },
     /// A supported challenge was found inside a same-session child frame.
     /// Not materialized — see
@@ -70,6 +73,40 @@ pub(crate) enum BrowserChallengeObservation {
     /// Distinct from `NoChallenge`: this means the observation itself could
     /// not be trusted, not that the page was inspected and found clean.
     DetectionFailed,
+}
+
+/// Crate-private, `Clone + Debug + PartialEq`-safe summary of one canonical
+/// provider-routing attempt for a detected browser challenge, retained
+/// alongside [`BrowserChallengeObservation::TopLevel`]. Reduced from
+/// [`CaptchaSolveOutcome`] the same way `BrowserChallengeObservation` itself
+/// is reduced from the live `BrowserChallengeSnapshot` — `CaptchaSolveFailure`
+/// is intentionally not `Clone`/`PartialEq`, so its debug text is retained
+/// rather than the value itself.
+///
+/// `SolutionProduced` is deliberately not named `Solved`: a provider
+/// returning a normalized answer is not a claim that the browser challenge
+/// was actually solved — applying the answer to the real page is a later,
+/// separate frontier's arrow (`SOLUTION -> BROWSER ACTION`), not this one's.
+#[cfg(feature = "chrome")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CaptchaRouteOutcomeSummary {
+    /// No provider was configured (`Configuration::captcha_provider` is
+    /// `None`); the router returns this without constructing any registry
+    /// or provider — no model init, no credential lookup, no external call.
+    NotConfigured,
+    /// The configured provider could not be resolved (not registered in
+    /// this build/runtime) or reported itself unavailable / missing
+    /// credentials before execution.
+    ProviderUnavailable,
+    /// The configured, resolved provider does not support this challenge's
+    /// kind, media type, or input shape. `solve()` was never called.
+    UnsupportedChallenge,
+    /// The provider executed and returned a typed failure, preserved as
+    /// its `Debug` text (`CaptchaSolveFailure` is not `Clone`/`PartialEq`).
+    ProviderFailed(String),
+    /// The provider executed and returned a normalized solution. Not a
+    /// claim of "solved" — see the type doc comment.
+    SolutionProduced,
 }
 
 /// One explicitly identified cell in a materialized full-grid image.
@@ -412,6 +449,51 @@ impl CaptchaProviderId {
     /// Return the stable provider label.
     pub const fn as_str(self) -> &'static str {
         self.0
+    }
+
+    /// The complete, closed set of known provider identities. Used to
+    /// validate configuration/deserialization input against exactly the
+    /// providers this crate's vocabulary actually knows about — never an
+    /// open string.
+    const KNOWN: &'static [Self] = &[
+        Self::LOCAL_LANGUAGE_MODEL,
+        Self::EXTERNAL_GEMINI,
+        Self::OPENAI_VISION,
+        Self::QWEN3_VL_LOCAL,
+        Self::PALIGEMMA_LOCAL,
+    ];
+
+    /// Resolve a stable label back to its known provider identity. `None`
+    /// for any string outside the closed set above — never a fabricated
+    /// identity.
+    pub fn from_str_exact(label: &str) -> Option<Self> {
+        Self::KNOWN.iter().copied().find(|id| id.0 == label)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for CaptchaProviderId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.0)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for CaptchaProviderId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        Self::from_str_exact(&label).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown captcha provider id {label:?}; expected one of {:?}",
+                Self::KNOWN.iter().map(|id| id.as_str()).collect::<Vec<_>>()
+            ))
+        })
     }
 }
 
@@ -1372,5 +1454,190 @@ mod tests {
             CaptchaImageGridInput::new(remote, (30, 30), 3, 3, cells(3, 3), false).unwrap_err(),
             CaptchaImageGridValidationError::FullGridNotMaterialized
         );
+    }
+
+    // --- SCORPION_CANONICAL_CAPTCHA_PROVIDER_ROUTING_BINDING_001: deterministic
+    // routing-machinery proof. These prove `CaptchaProviderRegistry` /
+    // `CaptchaRouteAttempts::execute_explicit_attempt` / `solve_captcha`
+    // routing semantics with deterministic test-double providers registered
+    // through the real canonical registry — never real model inference.
+
+    static SECOND_CAPS: CaptchaProviderCapabilities = CaptchaProviderCapabilities {
+        provider: CaptchaProviderId::EXTERNAL_GEMINI,
+        locality: CaptchaProviderLocality::External,
+        supported_kinds: &[CaptchaChallengeKind::HorizontalOffset],
+        supported_media_types: &["image/png"],
+        maximum_inputs: 1,
+        requires_credentials: false,
+    };
+
+    struct SecondProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CaptchaProvider for SecondProvider {
+        fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+            &SECOND_CAPS
+        }
+
+        async fn solve(&self, _request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::HorizontalOffset(4.0),
+                provenance: CaptchaSolveProvenance::local(SECOND_CAPS.provider),
+            }
+        }
+    }
+
+    fn offset_request(selected_provider: CaptchaProviderId) -> CaptchaSolveRequest {
+        CaptchaSolveRequest {
+            correlation_id: "routing-matrix".into(),
+            selected_provider,
+            challenge: CaptchaChallenge {
+                kind: CaptchaChallengeKind::HorizontalOffset,
+                instruction: String::new(),
+                visuals: vec![CaptchaVisualInput::materialized(
+                    None,
+                    "image/png",
+                    Vec::<u8>::new(),
+                )],
+            },
+            deadline: Duration::from_secs(1),
+        }
+    }
+
+    /// ROUTING PROOF — NOT REAL INFERENCE. Case B: two providers registered,
+    /// configuration selects one; only the selected provider executes.
+    #[tokio::test]
+    async fn two_registered_providers_only_the_selected_one_executes() {
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let provider_a = Provider {
+            calls: Arc::clone(&calls_a),
+        };
+        let provider_b = SecondProvider {
+            calls: Arc::clone(&calls_b),
+        };
+        let mut registry = CaptchaProviderRegistry::new();
+        registry.register(&provider_a).unwrap();
+        registry.register(&provider_b).unwrap();
+
+        let request = offset_request(CaptchaProviderId::EXTERNAL_GEMINI);
+        let mut route = CaptchaRouteAttempts::new();
+        let outcome = route.execute_explicit_attempt(&registry, &request).await;
+
+        assert!(matches!(
+            outcome,
+            CaptchaSolveOutcome::Solved {
+                solution: CaptchaSolution::HorizontalOffset(offset),
+                ..
+            } if *offset == 4.0
+        ));
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            0,
+            "provider A must never execute"
+        );
+        assert_eq!(
+            calls_b.load(Ordering::SeqCst),
+            1,
+            "provider B must execute exactly once"
+        );
+    }
+
+    /// ROUTING PROOF — NOT REAL INFERENCE. Case C: the configured provider
+    /// identity is not registered at all. Typed `ProviderUnavailable`, never
+    /// a panic or a silently-substituted provider.
+    #[tokio::test]
+    async fn unregistered_provider_id_is_typed_provider_unavailable() {
+        let registry = CaptchaProviderRegistry::new();
+        let request = offset_request(CaptchaProviderId::QWEN3_VL_LOCAL);
+        let mut route = CaptchaRouteAttempts::new();
+        let outcome = route.execute_explicit_attempt(&registry, &request).await;
+        assert!(matches!(
+            outcome,
+            CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::ProviderUnavailable,
+                provenance: None,
+            }
+        ));
+    }
+
+    /// ROUTING PROOF — NOT REAL INFERENCE. Case F: the provider returns a
+    /// structurally valid-looking `CaptchaSolveOutcome::Solved`, but the
+    /// solution variant does not match the requested challenge kind.
+    /// `solve_captcha` must fail closed, never pass through a mismatched
+    /// solution.
+    #[tokio::test]
+    async fn mismatched_solution_kind_fails_closed() {
+        struct WrongKindProvider;
+        #[async_trait::async_trait]
+        impl CaptchaProvider for WrongKindProvider {
+            fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+                &CAPS
+            }
+            async fn solve(&self, _request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+                // CAPS advertises HorizontalOffset; return a Point instead.
+                CaptchaSolveOutcome::Solved {
+                    solution: CaptchaSolution::Point { x: 1.0, y: 1.0 },
+                    provenance: CaptchaSolveProvenance::local(CAPS.provider),
+                }
+            }
+        }
+        let provider = WrongKindProvider;
+        let request = offset_request(CAPS.provider);
+        assert!(matches!(
+            solve_captcha(&provider, &request).await,
+            CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::InvalidProviderResponse,
+                ..
+            }
+        ));
+    }
+
+    /// ROUTING PROOF — NOT REAL INFERENCE. Case F (continued): a
+    /// non-finite coordinate is not a valid solution value either.
+    #[tokio::test]
+    async fn non_finite_solution_value_fails_closed() {
+        struct NonFiniteProvider;
+        #[async_trait::async_trait]
+        impl CaptchaProvider for NonFiniteProvider {
+            fn capabilities(&self) -> &'static CaptchaProviderCapabilities {
+                &CAPS
+            }
+            async fn solve(&self, _request: &CaptchaSolveRequest) -> CaptchaSolveOutcome {
+                CaptchaSolveOutcome::Solved {
+                    solution: CaptchaSolution::HorizontalOffset(f64::NAN),
+                    provenance: CaptchaSolveProvenance::local(CAPS.provider),
+                }
+            }
+        }
+        let provider = NonFiniteProvider;
+        let request = offset_request(CAPS.provider);
+        assert!(matches!(
+            solve_captcha(&provider, &request).await,
+            CaptchaSolveOutcome::Failed {
+                failure: CaptchaSolveFailure::InvalidProviderResponse,
+                ..
+            }
+        ));
+    }
+
+    /// ROUTING PROOF — NOT REAL INFERENCE. `CaptchaProviderId` round-trips
+    /// through its `serde` representation, and an unknown label is rejected
+    /// rather than fabricated into some default provider — this is the same
+    /// validation `Configuration::captcha_provider` relies on when read
+    /// from a serialized config.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn provider_id_serde_round_trips_and_rejects_unknown_labels() {
+        let json = serde_json::to_string(&CaptchaProviderId::LOCAL_LANGUAGE_MODEL).unwrap();
+        assert_eq!(json, "\"local-language-model\"");
+        let parsed: CaptchaProviderId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, CaptchaProviderId::LOCAL_LANGUAGE_MODEL);
+
+        let unknown: Result<CaptchaProviderId, _> = serde_json::from_str("\"not-a-real-provider\"");
+        assert!(unknown.is_err());
     }
 }

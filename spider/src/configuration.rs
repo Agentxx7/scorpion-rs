@@ -642,6 +642,15 @@ pub struct Configuration {
     /// Setup network interception for request. This does nothing without the flag `chrome_intercept` enabled.
     #[cfg(feature = "chrome")]
     pub chrome_intercept: RequestInterceptConfiguration,
+    /// Explicit CAPTCHA-provider selection for the canonical browser
+    /// challenge router (`crate::features::solvers::route_detected_browser_challenge`).
+    /// `None` (the default) means no provider is configured: a detected
+    /// challenge is routed to a typed `ProviderUnavailable` outcome without
+    /// constructing any provider or registry — no model download, no
+    /// external call, no browser probe. Never inferred or defaulted to a
+    /// specific provider automatically.
+    #[cfg(feature = "chrome")]
+    pub captcha_provider: Option<crate::features::captcha::CaptchaProviderId>,
     /// The referer to use.
     pub referer: Option<String>,
     /// Determine the max bytes per page.
@@ -1067,6 +1076,7 @@ impl Configuration {
             chrome_intercept: RequestInterceptConfiguration::new(cfg!(
                 feature = "chrome_intercept"
             )),
+            captcha_provider: None,
             user_agent: Some(Box::new(get_ua(true).into())),
             only_html: true,
             cache: true,
@@ -2735,6 +2745,7 @@ impl Configuration {
                 .or(self.chrome_connection_url.as_deref()),
             enhancements: self.enhancements,
             prefer_native_markdown: self.prefer_native_markdown && self.native_markdown_safe(),
+            captcha_provider: &self.captcha_provider,
         }
     }
 

@@ -104,8 +104,10 @@ async fn case_b_supported_challenge_is_detected_and_materialized() {
         Some(DetectedBrowserChallenge::TopLevel {
             snapshot,
             challenge_element_id,
+            instruction,
         }) => {
             assert_eq!(challenge_element_id, "challenge-1");
+            assert_eq!(instruction, "select the matching point");
             assert!(snapshot.targets.contains_key("pick-1"));
             assert!(!snapshot.visual_bytes.is_empty());
             assert!(snapshot.captured_pixel_width > 0);

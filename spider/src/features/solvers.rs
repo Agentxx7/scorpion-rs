@@ -10,14 +10,17 @@ use chromiumoxide::{
 #[cfg(feature = "chrome")]
 use std::time::Duration;
 
+// Shared with the stub arm of `route_detected_browser_challenge` below,
+// which must compile under plain `chrome` even without `real_browser`.
 #[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
 use crate::features::captcha::{
-    solve_captcha, CaptchaChallenge, CaptchaChallengeKind, CaptchaProvider,
-    CaptchaProviderAvailability, CaptchaProviderCapabilities, CaptchaProviderId,
-    CaptchaProviderLocality, CaptchaProviderRegistry, CaptchaRouteAttempts, CaptchaSolution,
-    CaptchaSolveFailure, CaptchaSolveOutcome, CaptchaSolveProvenance, CaptchaSolveRequest,
-    CaptchaVisualInput,
+    solve_captcha, CaptchaChallengeKind, CaptchaProvider, CaptchaProviderAvailability,
+    CaptchaProviderCapabilities, CaptchaProviderLocality, CaptchaProviderRegistry,
+    CaptchaRouteAttempts, CaptchaSolution, CaptchaSolveFailure, CaptchaSolveOutcome,
+    CaptchaSolveProvenance, CaptchaSolveRequest, CaptchaVisualInput,
 };
+#[cfg(feature = "chrome")]
+use crate::features::captcha::{CaptchaChallenge, CaptchaProviderId, CaptchaRouteOutcomeSummary};
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use crate::utils::{page_wait, perform_smart_mouse_movement, CF_WAIT_FOR};
 #[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
@@ -934,6 +937,94 @@ impl CaptchaProvider for LocalLanguageModelProvider<'_> {
             solution,
             provenance: CaptchaSolveProvenance::local(CaptchaProviderId::LOCAL_LANGUAGE_MODEL),
         }
+    }
+}
+
+/// The one canonical production entry point from a detected browser
+/// challenge to a provider-routed outcome —
+/// `CANONICAL CHALLENGE -> PROVIDER ROUTER -> PROVIDER RESOLUTION -> CANONICAL PROVIDER OUTCOME`.
+///
+/// Composes only canonical primitives already defined in
+/// [`crate::features::captcha`] ([`CaptchaProviderRegistry`],
+/// [`CaptchaRouteAttempts::execute_explicit_attempt`], which itself already
+/// gates on [`CaptchaProvider::availability`] and, through
+/// [`solve_captcha`], on challenge/provider compatibility) — it owns no
+/// retry, fallback, or provider-substitution policy of its own, and
+/// performs exactly one explicit attempt against exactly the
+/// caller-configured `selected_provider`, or none at all when
+/// `selected_provider` is `None`.
+///
+/// Registers, at most, the one provider this build can construct with no
+/// external credential and no browser probe beyond the live page already in
+/// hand: [`CaptchaProviderId::LOCAL_LANGUAGE_MODEL`], and only when this
+/// build actually compiles it (`real_browser`). `EXTERNAL_GEMINI` /
+/// `OPENAI_VISION` need caller-supplied API keys this router has no
+/// canonical source for; `QWEN3_VL_LOCAL` / `PALIGEMMA_LOCAL` are gated
+/// behind non-default, non-shipping features entirely. Selecting any of
+/// those today resolves to `ProviderUnavailable` — a truthful "not
+/// registered", never a silent no-op or a fabricated credential.
+///
+/// Never applies the resulting solution to the browser — that is a
+/// separate, later frontier's arrow.
+#[cfg(feature = "chrome")]
+pub(crate) async fn route_detected_browser_challenge(
+    page: &chromiumoxide::Page,
+    challenge: CaptchaChallenge,
+    selected_provider: Option<CaptchaProviderId>,
+    deadline: Duration,
+) -> CaptchaRouteOutcomeSummary {
+    let Some(selected_provider) = selected_provider else {
+        return CaptchaRouteOutcomeSummary::NotConfigured;
+    };
+
+    #[cfg(feature = "real_browser")]
+    {
+        let local_provider = LocalLanguageModelProvider { page };
+        let mut registry = CaptchaProviderRegistry::new();
+        // A registration failure here can only be `DuplicateProvider`,
+        // structurally unreachable with a single `register` call — ignored
+        // rather than unwrapped so a future second registration fails
+        // closed (resolve() simply won't find the duplicate) instead of
+        // panicking the whole page construction.
+        let _ = registry.register(&local_provider);
+
+        let request = CaptchaSolveRequest {
+            correlation_id: "browser-challenge-point-selection".into(),
+            selected_provider,
+            challenge,
+            deadline,
+        };
+        let mut attempts = CaptchaRouteAttempts::new();
+        let outcome = attempts.execute_explicit_attempt(&registry, &request).await;
+        summarize_route_outcome(outcome)
+    }
+
+    #[cfg(not(feature = "real_browser"))]
+    {
+        // No provider this router can construct is compiled into this
+        // build at all — truthfully unavailable, not a silent no-op.
+        let _ = (page, challenge, selected_provider, deadline);
+        CaptchaRouteOutcomeSummary::ProviderUnavailable
+    }
+}
+
+/// Reduce a live [`CaptchaSolveOutcome`] to the `Clone + Debug + PartialEq`
+/// summary retained on [`crate::page::Page`] — see
+/// [`CaptchaRouteOutcomeSummary`]'s doc comment for why.
+#[cfg(all(feature = "chrome", feature = "real_browser"))]
+fn summarize_route_outcome(outcome: &CaptchaSolveOutcome) -> CaptchaRouteOutcomeSummary {
+    match outcome {
+        CaptchaSolveOutcome::Solved { .. } => CaptchaRouteOutcomeSummary::SolutionProduced,
+        CaptchaSolveOutcome::Failed { failure, .. } => match failure {
+            CaptchaSolveFailure::ProviderUnavailable
+            | CaptchaSolveFailure::CredentialUnavailable => {
+                CaptchaRouteOutcomeSummary::ProviderUnavailable
+            }
+            CaptchaSolveFailure::UnsupportedChallenge => {
+                CaptchaRouteOutcomeSummary::UnsupportedChallenge
+            }
+            other => CaptchaRouteOutcomeSummary::ProviderFailed(format!("{other:?}")),
+        },
     }
 }
 
@@ -3815,5 +3906,104 @@ mod cf_turnstile_detection_tests {
         let body =
             br#"<HTML><BODY><DIV CLASS="CF-TURNSTILE" DATA-SITEKEY="abc"></DIV></BODY></HTML>"#;
         assert!(detect_cf_embedded_turnstile(body));
+    }
+}
+
+/// Real-Chrome production proof for `route_detected_browser_challenge`
+/// (SCORPION_CANONICAL_CAPTCHA_PROVIDER_ROUTING_BINDING_001). Inline (not
+/// under `spider/tests/`) because `route_detected_browser_challenge` and
+/// `CaptchaRouteOutcomeSummary` are deliberately `pub(crate)` — this
+/// binding is production wiring, not a public API expansion — so only an
+/// in-crate test can observe the outcome directly. `about:blank` is enough:
+/// this suite proves *routing* behavior (no provider configured; unknown
+/// provider; the real, non-mocked `LOCAL_LANGUAGE_MODEL` provider genuinely
+/// failing in this environment), not detection, which is already proven
+/// separately against real fixtures in
+/// `spider/tests/browser_challenge_detection_real.rs`.
+#[cfg(all(test, feature = "chrome"))]
+mod route_detected_browser_challenge_tests {
+    use super::route_detected_browser_challenge;
+    use crate::features::captcha::{
+        CaptchaChallenge, CaptchaChallengeKind, CaptchaProviderId, CaptchaRouteOutcomeSummary,
+        CaptchaVisualInput,
+    };
+
+    async fn launch() -> chromiumoxide::Browser {
+        let config = crate::configuration::Configuration::default();
+        let Some((browser, _handler, _, _, _)) =
+            crate::features::chrome::launch_browser(&config, &None).await
+        else {
+            panic!("real-browser production routing proof requires local Chrome");
+        };
+        browser
+    }
+
+    fn dummy_challenge() -> CaptchaChallenge {
+        CaptchaChallenge {
+            kind: CaptchaChallengeKind::PointSelection,
+            instruction: "select the matching point".into(),
+            visuals: vec![CaptchaVisualInput::materialized(
+                None,
+                "image/png",
+                vec![1u8, 2, 3],
+            )],
+        }
+    }
+
+    /// Zero-provider-cost default: no provider configured, no registry or
+    /// provider constructed — proven by getting `NotConfigured` back
+    /// without the call ever needing the live page beyond the parameter
+    /// itself.
+    #[tokio::test]
+    async fn no_provider_configured_returns_not_configured() {
+        let browser = launch().await;
+        let page = browser.new_page("about:blank").await.unwrap();
+        let outcome = route_detected_browser_challenge(
+            &page,
+            dummy_challenge(),
+            None,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(outcome, CaptchaRouteOutcomeSummary::NotConfigured);
+    }
+
+    /// A configured provider this build never registers (Qwen/PaliGemma are
+    /// non-default, non-shipping features; this router registers only
+    /// `LOCAL_LANGUAGE_MODEL`) fails typed, not silently, not with a panic.
+    #[tokio::test]
+    async fn unregistered_provider_selection_is_typed_unavailable() {
+        let browser = launch().await;
+        let page = browser.new_page("about:blank").await.unwrap();
+        let outcome = route_detected_browser_challenge(
+            &page,
+            dummy_challenge(),
+            Some(CaptchaProviderId::QWEN3_VL_LOCAL),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(outcome, CaptchaRouteOutcomeSummary::ProviderUnavailable);
+    }
+
+    /// REAL CHROME PRODUCTION ROUTING PROOF (not real inference): the only
+    /// provider this router can construct with no external credential,
+    /// `LOCAL_LANGUAGE_MODEL`, genuinely gets registered, resolved, and
+    /// invoked — and genuinely fails, because this environment's Chromium
+    /// build has no `window.LanguageModel` API. Truthful
+    /// `ProviderUnavailable`, not a fabricated success, not a hang, not a
+    /// panic.
+    #[cfg(feature = "real_browser")]
+    #[tokio::test]
+    async fn local_language_model_selected_genuinely_fails_in_this_environment() {
+        let browser = launch().await;
+        let page = browser.new_page("about:blank").await.unwrap();
+        let outcome = route_detected_browser_challenge(
+            &page,
+            dummy_challenge(),
+            Some(CaptchaProviderId::LOCAL_LANGUAGE_MODEL),
+            std::time::Duration::from_secs(15),
+        )
+        .await;
+        assert_eq!(outcome, CaptchaRouteOutcomeSummary::ProviderUnavailable);
     }
 }

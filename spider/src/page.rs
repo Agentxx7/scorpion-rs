@@ -5759,10 +5759,30 @@ impl Page {
         // is no live page to inspect there, so leaving that return's
         // `detected_browser_challenge` as `None` is correct, not an
         // oversight.
+        // Provider routing (SCORPION_CANONICAL_CAPTCHA_PROVIDER_ROUTING_BINDING_001):
+        // runs only when a challenge was actually detected in the top-level
+        // document — no registry, no provider construction, no credential
+        // lookup for an ordinary page or a framed-only detection. `route`
+        // itself further short-circuits to `NotConfigured` before touching
+        // any provider type when `params.captcha_provider` is `None`,
+        // keeping the zero-provider-cost default true all the way through.
+        // Still stops after the canonical outcome: no click/type/submit is
+        // ever dispatched from this seam.
         p.detected_browser_challenge = Some(
             match crate::features::browser_challenge_detection::detect_browser_challenge(page).await
             {
-                Ok(Some(detected)) => detected.into_observation(),
+                Ok(Some(detected)) => {
+                    let route_outcome = detected
+                        .route(
+                            page,
+                            *params.captcha_provider,
+                            params
+                                .request_timeout
+                                .unwrap_or(std::time::Duration::from_secs(20)),
+                        )
+                        .await;
+                    detected.into_observation(route_outcome)
+                }
                 Ok(None) => crate::features::captcha::BrowserChallengeObservation::NoChallenge,
                 Err(_) => crate::features::captcha::BrowserChallengeObservation::DetectionFailed,
             },

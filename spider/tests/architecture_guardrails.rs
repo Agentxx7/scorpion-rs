@@ -5698,3 +5698,142 @@ fn shipping_research_cli_is_a_thin_canonical_session_binding() {
         assert!(manifest.contains(feature));
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_CAPTCHA_PROVIDER_ROUTING_BINDING_001
+// ---------------------------------------------------------------------------
+
+/// The browser challenge detector must stay provider-neutral: it composes
+/// [`crate::features::captcha`]'s vocabulary types only, never a specific
+/// provider implementation, and calls the router through exactly one named
+/// function rather than constructing a registry itself.
+#[test]
+fn browser_challenge_detection_does_not_reference_provider_implementations() {
+    let source = read_src_file("features/browser_challenge_detection.rs");
+    for forbidden in [
+        "LocalLanguageModelProvider",
+        "OpenAiVisionCaptchaProvider",
+        "ExternalGeminiProvider",
+        "Qwen3VlLocalCaptchaProvider",
+        "PaligemmaLocalCaptchaProvider",
+        "CaptchaProviderRegistry",
+        "CaptchaRouteAttempts",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "browser_challenge_detection.rs must not reference provider \
+             implementation type {forbidden:?} — provider resolution is \
+             solvers::route_detected_browser_challenge's job alone"
+        );
+    }
+    assert!(
+        source.contains("route_detected_browser_challenge"),
+        "expected the detector to call the canonical router by name"
+    );
+}
+
+/// `Page::new_base` (the canonical Chrome integration point) must not
+/// construct a provider registry or reference a provider implementation
+/// type directly — only the detector's `route` seam and the canonical
+/// router function.
+#[test]
+fn page_new_base_does_not_construct_captcha_providers_directly() {
+    let source = read_src_file("page.rs");
+    for forbidden in [
+        "CaptchaProviderRegistry::new()",
+        "LocalLanguageModelProvider",
+        "OpenAiVisionCaptchaProvider",
+        "ExternalGeminiProvider",
+        "Qwen3VlLocalCaptchaProvider",
+        "PaligemmaLocalCaptchaProvider",
+        "Qwen3Vl",
+        "qwen3_vl",
+        "PaligemmaLocal",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "page.rs must not reference {forbidden:?} directly — provider \
+             selection belongs to the canonical router alone, not the \
+             Chrome page-construction seam"
+        );
+    }
+}
+
+/// Neither shipping binary performs its own CAPTCHA-provider switching —
+/// that decision is entirely owned by the canonical router the `spider`
+/// crate already binds into `Page::new_base`.
+#[test]
+fn cli_and_mcp_do_not_perform_captcha_provider_switching() {
+    for (label, dir) in [
+        ("spider_cli", "spider_cli/src"),
+        ("spider_mcp", "spider_mcp/src"),
+    ] {
+        let root = workspace_root().join(dir);
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap_or_else(|_| panic!("missing dir: {dir:?}")) {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = fs::read_to_string(&path).unwrap();
+                for forbidden in [
+                    "CaptchaProviderRegistry",
+                    "CaptchaRouteAttempts",
+                    "LocalLanguageModelProvider",
+                    "OpenAiVisionCaptchaProvider",
+                    "ExternalGeminiProvider",
+                    "route_detected_browser_challenge",
+                ] {
+                    assert!(
+                        !source.contains(forbidden),
+                        "{label}:{path:?} must not reference {forbidden:?} — \
+                         provider routing is production-owned by the \
+                         spider crate's canonical router alone, never \
+                         reimplemented or bypassed in a shipping binary"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The canonical router never applies its outcome to the browser — no
+/// click/type/submit dispatcher may be reachable from
+/// `route_detected_browser_challenge`'s own source. Applying a solution to
+/// a live page remains a separate, later frontier's arrow.
+#[test]
+fn provider_router_binding_never_dispatches_browser_actions() {
+    let source = read_src_file("features/solvers.rs");
+    let router_start = source
+        .find("pub(crate) async fn route_detected_browser_challenge")
+        .expect("route_detected_browser_challenge must exist in solvers.rs");
+    // Slice from the router's own definition through the end of its
+    // immediately following helper (summarize_route_outcome) — narrow
+    // enough to avoid false positives from unrelated legacy solver code
+    // elsewhere in this large file, wide enough to cover everything the
+    // router itself can reach.
+    let router_and_helper_end = source[router_start..]
+        .find("\n#[cfg(all(feature = \"chrome\", feature = \"real_browser\"))]\nstruct ExternalGeminiProvider")
+        .map(|offset| router_start + offset)
+        .unwrap_or(source.len());
+    let router_source = &source[router_start..router_and_helper_end];
+    for forbidden in [
+        "execute_browser_captcha_attempt",
+        "BrowserChallengeAction",
+        ".click(",
+        ".apply(",
+    ] {
+        assert!(
+            !router_source.contains(forbidden),
+            "route_detected_browser_challenge must never reach browser \
+             action dispatch ({forbidden:?} found) — this frontier stops \
+             at the canonical provider outcome"
+        );
+    }
+}

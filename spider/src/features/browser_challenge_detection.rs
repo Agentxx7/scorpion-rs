@@ -98,6 +98,10 @@ pub enum DetectedBrowserChallenge {
         /// only retains stable ids for *targets*, not for the challenge
         /// element.
         challenge_element_id: String,
+        /// The matched challenge candidate's own `aria-label` — the page
+        /// author's real accessible name, used as the canonical challenge
+        /// instruction. Never caller-supplied prompt text.
+        instruction: String,
     },
     /// Evidence found inside a same-session child frame. Frame identity is
     /// real and correct; materialization is intentionally not attempted —
@@ -120,6 +124,11 @@ struct Evidence {
     frame_id: String,
     parent_frame_id: Option<String>,
     challenge_id: String,
+    /// The matched challenge candidate's own `aria-label` value — a real
+    /// accessible name the page's author wrote, not a caller-supplied
+    /// prompt. Carried through so a later provider-routing frontier can use
+    /// it as the canonical challenge instruction without re-querying.
+    instruction: String,
     target_ids: Vec<String>,
 }
 
@@ -159,6 +168,7 @@ pub async fn detect_browser_challenge(
     }
 
     let challenge_element_id = matched.challenge_id;
+    let instruction = matched.instruction;
     let challenge_element = page
         .find_element_pierced(id_selector(&challenge_element_id))
         .await
@@ -180,21 +190,75 @@ pub async fn detect_browser_challenge(
     Ok(Some(DetectedBrowserChallenge::TopLevel {
         snapshot,
         challenge_element_id,
+        instruction,
     }))
 }
 
 impl DetectedBrowserChallenge {
+    /// Route this challenge through the canonical provider router
+    /// (`crate::features::solvers::route_detected_browser_challenge`) if,
+    /// and only if, it was fully materialized in the top-level document.
+    /// Framed evidence is never routed in this frontier — see the
+    /// module-level "Frame scope" section. Never mutates the browser: the
+    /// router itself performs no click/type/submit, only an explicit
+    /// provider `solve()` attempt (or none, when no provider is
+    /// configured).
+    pub(crate) async fn route(
+        &self,
+        page: &Page,
+        selected_provider: Option<crate::features::captcha::CaptchaProviderId>,
+        deadline: std::time::Duration,
+    ) -> Option<crate::features::captcha::CaptchaRouteOutcomeSummary> {
+        let Self::TopLevel {
+            snapshot,
+            instruction,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let challenge = crate::features::captcha::CaptchaChallenge {
+            kind: crate::features::captcha::CaptchaChallengeKind::PointSelection,
+            instruction: instruction.clone(),
+            visuals: vec![crate::features::captcha::CaptchaVisualInput::materialized(
+                None,
+                "image/png",
+                snapshot.visual_bytes.clone(),
+            )],
+        };
+        Some(
+            crate::features::solvers::route_detected_browser_challenge(
+                page,
+                challenge,
+                selected_provider,
+                deadline,
+            )
+            .await,
+        )
+    }
+
     /// Reduce this live-handle-bearing result to the plain, `Clone + Debug`
     /// evidence [`crate::page::Page`] retains once `Page::new_base` (the
     /// caller) returns. See
     /// [`crate::features::captcha::BrowserChallengeObservation`]'s doc
     /// comment for why the live snapshot itself is not what gets retained.
-    pub(crate) fn into_observation(self) -> crate::features::captcha::BrowserChallengeObservation {
-        use crate::features::captcha::{BrowserChallengeObservation, CaptchaChallengeKind};
+    /// `route_outcome` is `None` only for the framed-evidence case (never
+    /// routed); the top-level case must always have attempted routing —
+    /// callers pass `CaptchaRouteOutcomeSummary::NotConfigured` themselves
+    /// when no provider was configured, so this never silently drops a
+    /// route attempt.
+    pub(crate) fn into_observation(
+        self,
+        route_outcome: Option<crate::features::captcha::CaptchaRouteOutcomeSummary>,
+    ) -> crate::features::captcha::BrowserChallengeObservation {
+        use crate::features::captcha::{
+            BrowserChallengeObservation, CaptchaChallengeKind, CaptchaRouteOutcomeSummary,
+        };
         match self {
             Self::TopLevel {
                 snapshot,
                 challenge_element_id,
+                ..
             } => BrowserChallengeObservation::TopLevel {
                 kind: CaptchaChallengeKind::PointSelection,
                 frame_id: snapshot.frame_id.clone(),
@@ -203,6 +267,7 @@ impl DetectedBrowserChallenge {
                 visual_bytes: std::sync::Arc::from(snapshot.visual_bytes.as_slice()),
                 captured_pixel_width: snapshot.captured_pixel_width,
                 captured_pixel_height: snapshot.captured_pixel_height,
+                route_outcome: route_outcome.unwrap_or(CaptchaRouteOutcomeSummary::NotConfigured),
             },
             Self::FramedEvidence {
                 frame_id,
@@ -302,6 +367,10 @@ fn scan_node(
             frame_id: frame_id.to_string(),
             parent_frame_id: parent_frame_id.map(str::to_string),
             challenge_id: attr(node, "id").expect("checked above").to_string(),
+            instruction: attr(node, "aria-label")
+                .expect("checked above")
+                .trim()
+                .to_string(),
             target_ids: std::mem::take(&mut collected),
         });
     }

@@ -19,6 +19,59 @@ pub enum CaptchaChallengeKind {
     PointSelection,
 }
 
+/// Crate-private summary of one passive browser-challenge detection pass,
+/// retained on [`crate::page::Page`] so a later provider-routing frontier
+/// can observe what [`crate::features::browser_challenge_detection`] found.
+/// Deliberately not the live `BrowserChallengeSnapshot` — that snapshot's
+/// CDP object handles stop being valid the moment `Page::new_base` returns
+/// and the navigating tab's caller proceeds, which happens before any
+/// caller outside that construction could observe this field, so retaining
+/// only plain evidence (frame identity, element ids, captured bytes) is
+/// what a later frontier can actually act on, not a papered-over
+/// `Clone`/`Debug` workaround.
+#[cfg(feature = "chrome")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum BrowserChallengeObservation {
+    /// The page was inspected under Chrome and no supported challenge
+    /// evidence was found. Distinct from the field being `None`, which
+    /// means detection was never attempted (e.g. HTTP-only transport).
+    NoChallenge,
+    /// A supported challenge was found and fully materialized in the
+    /// page's top-level document.
+    TopLevel {
+        /// Provider-neutral challenge shape.
+        kind: CaptchaChallengeKind,
+        /// Exact top-level `FrameId` (as reported by Chromium).
+        frame_id: String,
+        /// `id` attribute of the matched challenge-candidate element.
+        challenge_element_id: String,
+        /// `id` attributes of the matched target-candidate elements.
+        target_element_ids: Vec<String>,
+        /// Captured PNG bytes of the challenge region at detection time.
+        visual_bytes: std::sync::Arc<[u8]>,
+        /// Exact PNG width in pixels.
+        captured_pixel_width: u32,
+        /// Exact PNG height in pixels.
+        captured_pixel_height: u32,
+    },
+    /// A supported challenge was found inside a same-session child frame.
+    /// Not materialized — see
+    /// [`crate::features::browser_challenge_detection`]'s module docs for
+    /// why.
+    Framed {
+        /// Exact `FrameId` owning the matched challenge evidence.
+        frame_id: String,
+        /// Exact `FrameId` of the parent document, when known.
+        parent_frame_id: Option<String>,
+        /// `id` attribute of the matched challenge-candidate element.
+        challenge_element_id: String,
+    },
+    /// Detection was attempted and failed with a typed observation error.
+    /// Distinct from `NoChallenge`: this means the observation itself could
+    /// not be trusted, not that the page was inspected and found clean.
+    DetectionFailed,
+}
+
 /// One explicitly identified cell in a materialized full-grid image.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptchaImageGridCell {

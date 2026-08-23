@@ -2257,6 +2257,13 @@ pub struct Page {
     pub(crate) backend: Option<spider_transport::BackendProvenance>,
     /// Neutral origin reported by the crawler response seam.
     pub(crate) response_origin: Option<spider_transport::ResponseOrigin>,
+    /// Outcome of one passive browser-challenge detection pass
+    /// (`Page::new_base`). `None` means detection was never attempted for
+    /// this page (e.g. HTTP-only transport, or Chrome rendering was not
+    /// used) — never inferred from any other field.
+    #[cfg(feature = "chrome")]
+    pub(crate) detected_browser_challenge:
+        Option<crate::features::captcha::BrowserChallengeObservation>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -2435,6 +2442,13 @@ pub struct Page {
     pub(crate) backend: Option<spider_transport::BackendProvenance>,
     /// Neutral response origin.
     pub(crate) response_origin: Option<spider_transport::ResponseOrigin>,
+    /// Outcome of one passive browser-challenge detection pass
+    /// (`Page::new_base`). `None` means detection was never attempted for
+    /// this page (e.g. HTTP-only transport, or Chrome rendering was not
+    /// used) — never inferred from any other field.
+    #[cfg(feature = "chrome")]
+    pub(crate) detected_browser_challenge:
+        Option<crate::features::captcha::BrowserChallengeObservation>,
     /// Base absolute url for page.
     pub(crate) base: Option<Url>,
     /// The raw url for the page. Useful since Url::parse adds a trailing slash.
@@ -3504,6 +3518,8 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
                 .backend
                 .or_else(|| res.failure.as_ref().map(|failure| failure.backend())),
             response_origin: res.response_origin,
+            #[cfg(feature = "chrome")]
+            detected_browser_challenge: None,
             binary_file: spool.vitals.binary_file,
             is_valid_utf8: spool.vitals.is_valid_utf8,
             is_xml: spool.vitals.is_xml,
@@ -3623,6 +3639,8 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
             .backend
             .or_else(|| res.failure.as_ref().map(|failure| failure.backend())),
         response_origin: res.response_origin,
+        #[cfg(feature = "chrome")]
+        detected_browser_challenge: None,
         binary_file,
         is_valid_utf8,
         is_xml,
@@ -5724,6 +5742,31 @@ impl Page {
             std::time::Duration::from_millis(1_500),
         )
         .await;
+
+        // Passive, provider-neutral challenge detection
+        // (SCORPION_CANONICAL_CAPTCHA_CHALLENGE_DETECTION_BINDING_001). This
+        // is the single canonical binding point: `new_base` is the shared
+        // constructor every chrome-backed `Page` (via `Page::new`,
+        // `Page::new_streaming`, and every real navigation call site in
+        // `website.rs`) already funnels through, so wiring it here — once —
+        // covers every real Chrome caller without duplicating the call in
+        // CLI, MCP, or any individual navigation site. `page` (the live
+        // `chromiumoxide::Page`) is still the exact tab that was just
+        // navigated; detection never mutates it and never fails page
+        // construction — a typed detection failure is recorded on `p`, not
+        // propagated. Skipped only on the reactive-NXDOMAIN shortcircuit
+        // above, which returns before any real navigation happened — there
+        // is no live page to inspect there, so leaving that return's
+        // `detected_browser_challenge` as `None` is correct, not an
+        // oversight.
+        p.detected_browser_challenge = Some(
+            match crate::features::browser_challenge_detection::detect_browser_challenge(page).await
+            {
+                Ok(Some(detected)) => detected.into_observation(),
+                Ok(None) => crate::features::captcha::BrowserChallengeObservation::NoChallenge,
+                Err(_) => crate::features::captcha::BrowserChallengeObservation::DetectionFailed,
+            },
+        );
 
         p
     }

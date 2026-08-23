@@ -42,6 +42,11 @@ pub mod gemini_common;
 /// Immutable browser challenge snapshot, revalidation and exact action seam.
 #[cfg(feature = "chrome")]
 pub mod browser_challenge;
+/// Passive, provider-neutral browser challenge detector: real Chrome page →
+/// evidence-based detection → canonical [`browser_challenge::BrowserChallengeSnapshot`].
+/// No provider routing, no solving, no browser mutation.
+#[cfg(feature = "chrome")]
+pub mod browser_challenge_detection;
 /// Provider-neutral CAPTCHA solver capability.
 pub mod captcha;
 /// Thin canonical binding between browser attempts and CAPTCHA providers.

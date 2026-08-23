@@ -1,7 +1,4 @@
-//! Request-isolated generation-state seam for Candle PaliGemma.
-//!
-//! Mirrors [`crate::features::qwen3_vl_generation`]'s own established
-//! design exactly, for a genuinely different model
+//! Request-isolated generation-state seam for Candle PaliGemma
 //! (`candle_transformers::models::paligemma::Model`, SigLIP + Gemma-1):
 //! Candle's `paligemma::Model` owns private mutable KV caches and exposes no
 //! reset, so this seam deliberately does not retain a model between

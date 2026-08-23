@@ -12,8 +12,8 @@
 //! answers; a returned point is the deterministic center of the model's own
 //! real bounding box, not a corrected or leaked one.
 //! `ImageGridSelection` reuses the same JSON string-id-array structured
-//! contract already proven for `qwen3-vl-local`, since categorical choice
-//! selection is not a spatial-precision task.
+//! contract already proven elsewhere in this crate, since categorical
+//! choice selection is not a spatial-precision task.
 
 use crate::features::captcha::{
     CaptchaCapabilityQualification, CaptchaChallengeKind, CaptchaImageGridInput,
@@ -34,8 +34,8 @@ const IMAGE_GRID_GRAMMAR: &str = "paligemma-captcha-image-grid-json-v1";
 /// This provider's own documented convention for `HorizontalOffset`: the
 /// instruction names the handle description and the target description,
 /// separated by this literal delimiter, so two independent `detect` queries
-/// can be issued — mirrors how `qwen3_vl_captcha`'s own prompt-building
-/// functions each embed the instruction into a provider-specific template.
+/// can be issued, each embedding the instruction into a provider-specific
+/// template.
 const HORIZONTAL_OFFSET_DELIMITER: &str = " -> ";
 
 static CAPABILITIES: CaptchaProviderCapabilities = CaptchaProviderCapabilities {

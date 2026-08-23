@@ -22,10 +22,9 @@ compatibility — checked before implementing anything:
 | Candidate | Grounding training | Runtime fit | Verdict |
 |---|---|---|---|
 | Moondream2 (`vikhyatk/moondream2`) | Real, purpose-built `point`/`detect` capability — but implemented via a **separate coordinate-regression head** (`region.py`/`region_model.py`: Fourier-feature coordinate encoder/decoder MLPs interleaved into the generation stream), not plain text tokens. Current checkpoint's tensor layout (`model.region.*`, `model.text.blocks.N.*`) no longer matches the vendored `candle-transformers` `moondream.rs` port at all (that port is an older `text_model`/`vision_encoder` architecture). | Would require a genuinely new generation-loop mechanism plus new tensors — real new Rust runtime work, not a config/weights swap. | Rejected: would trigger `CROSS_MODEL_RUNTIME_PREREQUISITE_REQUIRED` on its own. |
-| PaliGemma (`google/paligemma-3b-mix-224`) | Real, purpose-built `detect {label}` grounding via `<locNNNN>` **vocabulary tokens** (1024 quantized coordinate bins, ordinary next-token generation — no special head). | `candle-transformers` already ships `paligemma.rs`/`siglip.rs`/`gemma.rs`; config values match the pinned checkpoint's real `config.json` exactly. Output is plain text tokens, directly compatible with the same grammar-constrained greedy-decode pattern already proven for Qwen3-VL. | **Selected.** Gated on HuggingFace (resolved: user provided an authenticated, license-accepted access token). |
+| PaliGemma (`google/paligemma-3b-mix-224`) | Real, purpose-built `detect {label}` grounding via `<locNNNN>` **vocabulary tokens** (1024 quantized coordinate bins, ordinary next-token generation — no special head). | `candle-transformers` already ships `paligemma.rs`/`siglip.rs`/`gemma.rs`; config values match the pinned checkpoint's real `config.json` exactly. Output is plain text tokens, directly compatible with a grammar-constrained greedy-decode pattern. | **Selected.** Gated on HuggingFace (resolved: user provided an authenticated, license-accepted access token). |
 | Florence-2, OWL-ViT, GroundingDINO | Excellent, purpose-built detection/grounding. | Not present in `candle-transformers` at all (novel vision encoders / encoder-decoder architectures) — would need a full new port. | Not pursued: real new runtime work, and PaliGemma already satisfied the requirement. |
-| LLaVA, Pixtral, SmolVLM, base (text-only) Moondream path | General VQA/captioning; no dedicated grounding training. | Already Rust-feasible. | Not pursued: no credible reason to expect materially better pointing than the already-rejected Qwen3-VL 2B/4B (same class of general-VQA coordinate answering). |
-| Qwen2-VL and other same-lineage Qwen checkpoints | Real grounding support exists. | Feasible. | Excluded on principle: not "genuinely architecturally distinct" in the spirit of this frontier's own instruction to move away from the already-rejected Qwen family. |
+| LLaVA, Pixtral, SmolVLM, base (text-only) Moondream path | General VQA/captioning; no dedicated grounding training. | Already Rust-feasible. | Not pursued: no credible reason to expect materially better pointing than a general-VQA model's free-text coordinate guessing. |
 
 One candidate selected, one implemented — no model zoo.
 
@@ -36,9 +35,8 @@ three genuine correctness defects found and fixed (Branch-C-scale "small
 upstream-compatible extension," not a new runtime prerequisite) — see the
 vendored fork's own README for full technical detail. Root-caused against a
 pinned Hugging Face `transformers` reference oracle running the identical
-weights/config/tokenizer/image/prompt, using the same methodology as the
-prerequisite Qwen3-VL frontier. All three were required together; fixing
-any two alone still produced degenerate or incoherent output:
+weights/config/tokenizer/image/prompt. All three were required together;
+fixing any two alone still produced degenerate or incoherent output:
 
 1. **Spurious image-embedding L2 normalization** in `paligemma::Model::setup`
    — the real architecture's projector output is used raw (`masked_scatter`,
@@ -59,9 +57,9 @@ any two alone still produced degenerate or incoherent output:
    Fixed by passing only the text-only suffix.
 
 A fourth attempted fix was **found wrong and reverted**: adding a causal
-mask to `forward_embeds`'s prefill call, by false analogy with the
-unrelated (and genuinely causal-decoder-only) Qwen3-VL prefill defect.
-PaliGemma's real architecture gives the *entire* image+prompt prefix full
+mask to `forward_embeds`'s prefill call, by false analogy with an unrelated,
+genuinely causal-decoder-only model's prefill defect. PaliGemma's real
+architecture gives the *entire* image+prompt prefix full
 bidirectional attention (`modeling_paligemma.py`: "can attend bidirectionally
 in prefix and only causally in suffix"); only tokens generated *after* the
 prefill are causal. Per-layer hidden-state statistics, checked against the
@@ -81,10 +79,10 @@ frontier's controlled fixture, independently verified against
 ## Provider architecture
 
 New, explicit `CaptchaProviderId::PALIGEMMA_LOCAL` (`"paligemma-local"`) —
-not a generic "local vision-language provider" abstraction. The existing
-`qwen3-vl-local` precedent already names the model family in its identity
-string; inventing a new provider-neutral abstraction now would itself be an
-unrequested provider-routing redesign ("do not redesign provider routing
+not a generic "local vision-language provider" abstraction: the model
+family is named directly in its identity string. Inventing a new
+provider-neutral abstraction now would itself be an unrequested
+provider-routing redesign ("do not redesign provider routing
 unless a genuine canonical gap exists" — none was found: the existing
 `CaptchaProvider` trait, `CaptchaProviderCapabilities`,
 `CaptchaLocalRuntimeProvenance` contract already accommodate a second local
@@ -94,8 +92,8 @@ frontier does not (yet) promote it to `EmpiricallyQualified`; that is a
 separate, deliberate decision left to whoever resumes the CAPTCHA browser
 binding frontier with real Turnstile evidence in hand.
 
-`ImageGridSelection` reuses the identical JSON string-id-array structured
-grammar shape already proven for `qwen3-vl-local` (independently
+`ImageGridSelection` reuses the same JSON string-id-array structured
+grammar shape already proven elsewhere in this crate (independently
 implemented in `paligemma_runtime.rs`, not extracted into a shared
 cross-model module — matching this frontier's explicit instruction not to
 expand structured-generation machinery beyond what this candidate genuinely
@@ -122,13 +120,11 @@ already parse structured JSON into `CaptchaSolution`), not a correction.
 
 ## Point-precision qualification (PRIMARY REQUIREMENT — passed)
 
-Identical methodology to the closed Qwen3-VL 2B/4B frontiers: the same
-required 8-fixture position matrix, the same WCAG 2.5.5 44px actionable-region
-tolerance (fixed before this frontier's trial ran), the same anti-degeneracy
-assertions, the same determinism proof, through the real production
-`CaptchaProvider::solve` seam. Canvas is 224x224 (PaliGemma's single fixed
-processor envelope, vs. Qwen3-VL's 320x224 qualified envelope) — fixture
-proportions are otherwise directly analogous.
+A required 8-fixture position matrix, a WCAG 2.5.5 44px actionable-region
+tolerance (fixed before this frontier's trial ran), anti-degeneracy
+assertions, and a determinism proof, through the real production
+`CaptchaProvider::solve` seam. Canvas is 224x224, PaliGemma's single fixed
+processor envelope.
 
 | target | true center | predicted | error (px) | contained |
 |---|---|---|---|---|
@@ -142,9 +138,8 @@ proportions are otherwise directly analogous.
 | distractor | (72, 112) | (72.5, 111.9) | 0.5 | yes |
 
 **Standard-size (44px) actionable containment: 7/7 (100%)**, clearing the
-predefined 6/7 reliable-single-shot threshold with margin, and materially
-beating both the Qwen3-VL 2B baseline (3/7) and 4B baseline (3/7) — not a
-tie, not a marginal +1. Mean absolute error across all 8 fixtures (including
+predefined 6/7 reliable-single-shot threshold with margin. Mean absolute
+error across all 8 fixtures (including
 the deliberately-hard, below-tolerance small_isolated target): ~0.96px —
 essentially exact, not merely "inside the tolerance region." Determinism:
 the repeated `center` trial reproduced the identical point exactly.
@@ -155,9 +150,7 @@ regardless of target).
 This confirms the frontier's own hypothesis: purpose-trained spatial
 grounding (vocabulary-token detection, explicitly fine-tuned into the "mix"
 checkpoint's task mixture) is a categorically better fit for pixel-precise
-`PointSelection` than a general-VQA model's free-text coordinate guessing,
-regardless of parameter count (Qwen3-VL 4B, nearly 1.5x PaliGemma's
-parameter count, still only reached 3/7).
+`PointSelection` than a general-VQA model's free-text coordinate guessing.
 
 ## Grid and offset qualification (passed)
 
@@ -183,8 +176,8 @@ alongside `PointSelection`, with truthful per-request provenance
 | minimum RAM declared | 25.5 GB (measured peak + margin) |
 
 Peak RSS is ~76% of this host's 31 GB total system RAM — real, honest
-headroom exists (unlike the Qwen3-VL 4B frontier's ~85%+ figure), consistent
-with PaliGemma's smaller, F32-native (no BF16→F32 doubling) weight
+headroom exists, consistent with PaliGemma's smaller, F32-native (no
+BF16→F32 doubling) weight
 footprint despite comparable total parameters. `PALIGEMMA_MINIMUM_RAM_BYTES`
 fails closed exactly as intended: two of several attempts during this same
 frontier's own development, under ordinary concurrent desktop load, keyed
@@ -199,21 +192,9 @@ bit-for-bit reference match, determinism, content-dependence),
 `real_structured_ids_generation_is_valid_and_deterministic`,
 `real_provider_registry_runtime_and_strict_outcome` (all three challenge
 kinds through the real registry+solve seam),
-`real_point_selection_precision_matrix` (7/7, material improvement over
-both Qwen3-VL baselines, threshold cleared) all pass. The existing Qwen3-VL
-2B real semantic suite (3/3) was re-run and reproduces byte-identical
-results to the prior closed frontier — this frontier's `gemma.rs`/
-`paligemma.rs` edits do not touch `qwen3_vl/`. The Qwen3-VL 4B suite was
-independently reconfirmed reproducible earlier in this same session (three
-separate successful real loads, ~26–27 GB peak, matching the prior closed
-frontier's own measurement) — later re-attempts in this exact session hit
-real, honest `ResourceLimitExceeded` preflight rejections under concurrent
-desktop memory load while developing this frontier, not a regression (the
-capability itself, not moment-to-moment host availability, is what "remains
-reproducible" asserts). Vendored `candle-transformers-qwen3vl-fix` tests
-pass (8/8 + doctest). Static acceptance suites (`qwen3_vl_cpu_runtime`,
-`qwen3_vl_generation_state`, `qwen3_vl_local_captcha_provider`,
-`qwen3_vl_structured_generation`, `canonical_captcha_solver_capability`,
+`real_point_selection_precision_matrix` (7/7, threshold cleared) all pass.
+Vendored `candle-transformers-qwen3vl-fix` tests pass (8/8 + doctest).
+Static acceptance suites (`canonical_captcha_solver_capability`,
 `canonical_captcha_provider_routing`, `canonical_captcha_image_grid_input`,
 architecture guardrails 113/113) all pass unchanged. Spider default (0
 failures; the same two pre-existing, diff-independent environmental flakes
@@ -221,13 +202,21 @@ documented in the prior two frontiers reproduced identically) and
 `spider_transport` (36/36) pass. Changed-surface clippy and full-workspace
 rustfmt clean; both diff checks clean.
 
+(This frontier also re-ran the then-still-present local Qwen3-VL runtime's
+own regression suites and confirmed they were unaffected by these edits —
+`gemma.rs`/`paligemma.rs` do not touch `qwen3_vl/`. That runtime and its
+regression suites no longer exist: `SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001`
+removed them entirely, unrelated to anything this frontier qualified.)
+
 ## What did not change
 
 Browser/frame architecture, the blocked CAPTCHA browser binding frontier's
 own preserved implementation (`stash@{1}`, untouched), Turnstile (never
 rerun during this frontier's development, per its own explicit
-instruction), provider-selection/fallback policy, retry/voting/ensemble
-inference, and the Qwen3-VL runtime/provider code are all untouched.
+instruction), provider-selection/fallback policy, and retry/voting/ensemble
+inference are all untouched. (The then-still-present local Qwen3-VL
+runtime/provider code was also untouched by this frontier — see the
+regression-gates note above for its subsequent, unrelated removal.)
 
 ## Successor
 
@@ -235,6 +224,6 @@ Per this frontier's own Decision-A instruction: resume
 `SCORPION_CANONICAL_CAPTCHA_BROWSER_EXECUTION_BINDING_001`, restoring
 `stash@{1}`'s preserved implementation, and rerun genuine Turnstile
 acceptance through canonical `FrameContext` → frame-aware snapshot →
-`paligemma-local` (not `qwen3-vl-local`) → `CaptchaSolveOutcome` →
-revalidation → exact canonical browser action → observable Turnstile
-progression, without reopening browser/frame architecture.
+`paligemma-local` → `CaptchaSolveOutcome` → revalidation → exact canonical
+browser action → observable Turnstile progression, without reopening
+browser/frame architecture.

@@ -20,10 +20,11 @@ pub enum CaptchaChallengeKind {
 }
 
 /// Crate-private summary of one passive browser-challenge detection pass,
-/// retained on [`crate::page::Page`] so a later provider-routing frontier
-/// can observe what [`crate::features::browser_challenge_detection`] found.
-/// Deliberately not the live `BrowserChallengeSnapshot` — that snapshot's
-/// CDP object handles stop being valid the moment `Page::new_base` returns
+/// retained on the crawled-result record (`crate::page`'s result type) so a
+/// later provider-routing frontier can observe what
+/// [`crate::features::browser_challenge_detection`] found. Deliberately not
+/// the live `BrowserChallengeSnapshot` — that snapshot's CDP object handles
+/// stop being valid the moment the shared chrome-backed constructor returns
 /// and the navigating tab's caller proceeds, which happens before any
 /// caller outside that construction could observe this field, so retaining
 /// only plain evidence (frame identity, element ids, captured bytes) is
@@ -439,11 +440,8 @@ impl CaptchaProviderId {
     pub const EXTERNAL_GEMINI: Self = Self("external-gemini");
     /// OpenAI vision provider reached through canonical transport.
     pub const OPENAI_VISION: Self = Self("openai-vision");
-    /// Embedded Qwen3-VL runtime using the canonical local-model contract.
-    pub const QWEN3_VL_LOCAL: Self = Self("qwen3-vl-local");
-    /// Embedded PaliGemma runtime using the canonical local-model contract —
-    /// a genuinely different model family (SigLIP + Gemma), not a Qwen3-VL
-    /// checkpoint variant.
+    /// Embedded PaliGemma runtime using the canonical local-model contract
+    /// (SigLIP + Gemma).
     pub const PALIGEMMA_LOCAL: Self = Self("paligemma-local");
 
     /// Return the stable provider label.
@@ -459,7 +457,6 @@ impl CaptchaProviderId {
         Self::LOCAL_LANGUAGE_MODEL,
         Self::EXTERNAL_GEMINI,
         Self::OPENAI_VISION,
-        Self::QWEN3_VL_LOCAL,
         Self::PALIGEMMA_LOCAL,
     ];
 
@@ -1552,7 +1549,7 @@ mod tests {
     #[tokio::test]
     async fn unregistered_provider_id_is_typed_provider_unavailable() {
         let registry = CaptchaProviderRegistry::new();
-        let request = offset_request(CaptchaProviderId::QWEN3_VL_LOCAL);
+        let request = offset_request(CaptchaProviderId::PALIGEMMA_LOCAL);
         let mut route = CaptchaRouteAttempts::new();
         let outcome = route.execute_explicit_attempt(&registry, &request).await;
         assert!(matches!(

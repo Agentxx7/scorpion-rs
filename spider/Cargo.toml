@@ -337,20 +337,7 @@ news_sitemap = ["dep:chrono"]
 robots_sitemap = []
 feed = ["dep:feed-rs"]
 evidence = ["dep:infer", "serde"]
-local_qwen3_vl = [
-    "dep:candle",
-    "dep:candle-nn",
-    "dep:candle-transformers",
-    "dep:image",
-    "dep:tokenizers",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:sysinfo",
-    "dep:tempfile",
-    "tokio/sync",
-]
-# Canonical local PaliGemma CAPTCHA provider — a genuinely different model
-# family (SigLIP + Gemma) from local_qwen3_vl, independently enableable.
+# Canonical local PaliGemma CAPTCHA provider (SigLIP + Gemma).
 local_paligemma = [
     "dep:candle",
     "dep:candle-nn",

@@ -959,10 +959,10 @@ impl CaptchaProvider for LocalLanguageModelProvider<'_> {
 /// hand: [`CaptchaProviderId::LOCAL_LANGUAGE_MODEL`], and only when this
 /// build actually compiles it (`real_browser`). `EXTERNAL_GEMINI` /
 /// `OPENAI_VISION` need caller-supplied API keys this router has no
-/// canonical source for; `QWEN3_VL_LOCAL` / `PALIGEMMA_LOCAL` are gated
-/// behind non-default, non-shipping features entirely. Selecting any of
-/// those today resolves to `ProviderUnavailable` — a truthful "not
-/// registered", never a silent no-op or a fabricated credential.
+/// canonical source for; `PALIGEMMA_LOCAL` is gated behind a non-default,
+/// non-shipping feature entirely. Selecting either today resolves to
+/// `ProviderUnavailable` — a truthful "not registered", never a silent
+/// no-op or a fabricated credential.
 ///
 /// Never applies the resulting solution to the browser — that is a
 /// separate, later frontier's arrow.
@@ -3968,8 +3968,8 @@ mod route_detected_browser_challenge_tests {
         assert_eq!(outcome, CaptchaRouteOutcomeSummary::NotConfigured);
     }
 
-    /// A configured provider this build never registers (Qwen/PaliGemma are
-    /// non-default, non-shipping features; this router registers only
+    /// A configured provider this build never registers (PaliGemma is a
+    /// non-default, non-shipping feature; this router registers only
     /// `LOCAL_LANGUAGE_MODEL`) fails typed, not silently, not with a panic.
     #[tokio::test]
     async fn unregistered_provider_selection_is_typed_unavailable() {
@@ -3978,7 +3978,7 @@ mod route_detected_browser_challenge_tests {
         let outcome = route_detected_browser_challenge(
             &page,
             dummy_challenge(),
-            Some(CaptchaProviderId::QWEN3_VL_LOCAL),
+            Some(CaptchaProviderId::PALIGEMMA_LOCAL),
             std::time::Duration::from_secs(5),
         )
         .await;

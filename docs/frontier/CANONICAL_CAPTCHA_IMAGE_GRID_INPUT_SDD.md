@@ -37,5 +37,5 @@ compatible. CAPTCHA vocabulary currently has no serde contract; consequently
 there is no pre-existing serialization identity to migrate or alias.
 
 Provider-local compositing, resizing, inferred layout, invented geometry and
-ID reordering remain forbidden. Qwen provider/runtime work, empirical
+ID reordering remain forbidden. Provider/runtime work, empirical
 qualification, corpus work and routing are outside this frontier.

@@ -754,7 +754,7 @@ mod tests {
             rights_review_record: "rights-review-001".into(),
             annotation_completion_record: "annotation-freeze-001".into(),
             qualification_seal_record: "sealed-test-split-001".into(),
-            threshold_policy_id: "qwen-captcha-thresholds-v1".into(),
+            threshold_policy_id: "captcha-thresholds-v1".into(),
             attestation_sha256: HASH.into(),
         }
     }

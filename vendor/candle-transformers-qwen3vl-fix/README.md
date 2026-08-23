@@ -1,53 +1,14 @@
-# candle-transformers (Qwen3-VL + PaliGemma correctness patches)
+# candle-transformers (PaliGemma / Gemma-1 correctness patches)
 
 Patched fork of `candle-transformers` 0.11.0, scoped to
-`src/models/qwen3_vl/`, `src/models/gemma.rs` and `src/models/paligemma.rs`,
-for `SCORPION_QWEN3_VL_CANDLE_REFERENCE_PARITY_ROOT_CAUSE_001` and
+`src/models/gemma.rs` and `src/models/paligemma.rs`, for
 `SCORPION_LOCAL_CROSS_MODEL_VISION_CAPTCHA_PROVIDER_QUALIFICATION_001`.
-
-## What's patched and why
-
-Root-caused against a pinned Hugging Face `transformers` 5.15.0 / PyTorch CPU
-reference oracle, running the identical model weights, config, tokenizer and
-prompt as `spider`'s own `qwen3_vl_runtime.rs` (see
-`docs/frontier/QWEN3_VL_CANDLE_REFERENCE_PARITY_ROOT_CAUSE_SDD.md` for the
-full diagnostic chain). Two independent, compounding defects were found and
-fixed here:
-
-1. **`MROPE_POSITIONAL_PARITY_FAILURE`** — Qwen3-VL's `rope_scaling`
-   (`mrope_section: [24, 20, 20]`) config key was not even present on
-   `TextConfig`, so it was silently dropped by `serde`. `RotaryEmbedding`
-   applied plain sequential 1D RoPE identically to every token — including
-   every image patch — instead of the model's real interleaved 3-axis
-   (temporal/height/width) positional scheme, destroying all spatial
-   position information the vision-language model needs to reason about
-   *where* something is in an image. Fixed in `text.rs`
-   (`RotaryEmbedding::cos_sin`, mirroring the reference's
-   `apply_interleaved_mrope`) and `config.rs` (`RopeScaling`); the actual
-   `[t, h, w]` position ids are computed by the new `compute_mrope_position_ids`
-   in `mod.rs`, mirroring the reference `Qwen3VLModel.get_rope_index`.
-2. **`KV_CACHE_GENERATION_PARITY_FAILURE`** — `Qwen3VLModel::forward`'s
-   causal-attention-mask condition was inverted: `if seqlen <= 1 { Some(mask)
-   } else { None }` meant the multi-token prefill pass (the entire prompt,
-   processed in one forward call) got **no** causal mask at all, letting
-   every position attend bidirectionally across the whole prompt including
-   tokens that come later — while the single-token incremental-decode case
-   (which needs no explicit mask; the KV cache already contains only past
-   tokens) got a mask instead. Fixed by flipping the condition (`if seqlen >
-   1`) in `mod.rs`.
-
-Both were verified against the reference oracle (position ids, per-index
-rotary frequencies, and vision-tower checkpoint statistics all match to
-float32 tolerance) and both were necessary: fixing only one still produced
-incoherent generation. With both fixed, real inference reproduces the
-reference's exact greedy output for the frontier's controlled fixtures.
 
 ## PaliGemma / Gemma-1 patches
 
-Root-caused against the same kind of pinned Hugging Face `transformers`
-reference oracle (running the identical `google/paligemma-3b-mix-224`
-weights/config/tokenizer/image/prompt as `spider`'s own
-`paligemma_runtime.rs`; see
+Root-caused against a pinned Hugging Face `transformers` reference oracle
+(running the identical `google/paligemma-3b-mix-224` weights/config/
+tokenizer/image/prompt as `spider`'s own `paligemma_runtime.rs`; see
 `docs/frontier/LOCAL_CROSS_MODEL_VISION_CAPTCHA_PROVIDER_QUALIFICATION_SDD.md`).
 Three independent defects were found and fixed, confirmed by an exact
 bit-for-bit match of real greedy `detect` output against the reference
@@ -93,17 +54,16 @@ oracle once all three were fixed together (none was sufficient alone):
    diagnostic pass.
 
 A fourth apparent fix was attempted and **reverted**: causally masking
-`forward_embeds`'s multi-position prefill call, by direct (and, on
-inspection, incorrect) analogy with the unrelated Qwen3-VL prefill-mask
-defect above. PaliGemma's real architecture is not a plain causal
-decoder-only prefill: `modeling_paligemma.py` explicitly gives the *entire*
-image+prompt prefix full bidirectional attention (driven by
-`token_type_ids`/`block_sequence_ids` — "can attend bidirectionally in
-prefix and only causally in suffix"), and only tokens *generated after* the
-prefill are causal. Adding a causal mask to the prefill call was itself a
-regression, confirmed empirically via per-layer hidden-state checkpoint
-comparison against the reference oracle: statistics only matched exactly
-with bidirectional prefill attention restored (the original, unmasked
+`forward_embeds`'s multi-position prefill call. PaliGemma's real
+architecture is not a plain causal decoder-only prefill:
+`modeling_paligemma.py` explicitly gives the *entire* image+prompt prefix
+full bidirectional attention (driven by `token_type_ids`/
+`block_sequence_ids` — "can attend bidirectionally in prefix and only
+causally in suffix"), and only tokens *generated after* the prefill are
+causal. Adding a causal mask to the prefill call was itself a regression,
+confirmed empirically via per-layer hidden-state checkpoint comparison
+against the reference oracle: statistics only matched exactly with
+bidirectional prefill attention restored (the original, unmasked
 `forward_embeds` behavior), and compounded to a ~2x final-layer divergence
 under the incorrectly-added mask. `forward_embeds`/
 `forward_embeds_without_projection` build no mask of their own; the caller
@@ -113,8 +73,18 @@ requires, same as the embedding-scale fix above.
 ## Provenance
 
 Base: `candle-transformers` 0.11.0 from crates.io (unpacked registry
-source). Diff is confined to `src/models/qwen3_vl/{mod,text,config}.rs`,
-`src/models/gemma.rs`, and `src/models/paligemma.rs`; no other model or
-shared utility code is touched. Not published; consumed only via this
-workspace's root `Cargo.toml` `[patch.crates-io]` entry, exactly like
-`vendor/chromey` patches `chromiumoxide`.
+source). Diff is confined to `src/models/gemma.rs` and
+`src/models/paligemma.rs`; no other model or shared utility code is
+touched. Not published; consumed only via this workspace's root
+`Cargo.toml` `[patch.crates-io]` entry, exactly like `vendor/chromey`
+patches `chromiumoxide`.
+
+This fork previously also carried a `src/models/qwen3_vl/` MRoPE/
+causal-mask correctness patch, used by `spider`'s own (now removed)
+Qwen3-VL CAPTCHA provider. That patch, and the module it patched, were
+deleted when Qwen3-VL was rejected as an architectural direction
+(`SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001`); this fork is kept
+solely for the PaliGemma/Gemma-1 patches above. The directory name and
+crate identity (`candle-transformers`, required for the
+`[patch.crates-io]` mechanism to apply) are otherwise unchanged from
+upstream and are not renamed by that removal.

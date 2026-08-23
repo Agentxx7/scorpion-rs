@@ -53,12 +53,12 @@ attempt ledger.
 ## Closure gates
 
 Controlled local Chromium fixtures prove grid, point and drag composition
-without model cost. A qualification-host test must additionally use the pinned
-Qwen installation. Final closure still requires an authorized genuine browser
-challenge with observable progression; synthetic fixtures cannot substitute
-for that external acceptance gate.
+without model cost. A qualification-host test must additionally use a real
+pinned local-model installation. Final closure still requires an authorized
+genuine browser challenge with observable progression; synthetic fixtures
+cannot substitute for that external acceptance gate.
 
-## Frame-aware resumption (still blocked)
+## Frame-aware resumption — closed with a genuine PaliGemma Turnstile acceptance
 
 Resumed after `SCORPION_CANONICAL_BROWSER_FRAME_CONTEXT_SNAPSHOT_AND_ACTION_001`
 closed. `execute_browser_captcha_attempt_in_frame` is the frame-aware sibling
@@ -77,25 +77,27 @@ in `architecture_guardrails.rs`).
 A genuine authorized-Cloudflare-Turnstile acceptance
 (`captcha_browser_turnstile_real.rs`, using Cloudflare's own documented
 "forces an interactive challenge" test sitekey `3x00000000000000000000FF`)
-proves every layer through the exact browser action genuinely correct: a
-real out-of-process Turnstile child frame resolves via `FrameContext`; the
-widget's real rendered content is captured via `capture_in_frame`; a
-hand-computed click dispatched through this identical `apply_in_frame` path
-reliably produces Cloudflare's real dummy success token and the widget's
-visible "Success!" state. The fully automated run still fails at the last
-step — no observable progression — because `qwen3-vl-2b`'s own visual
-grounding, at the qualified 320x224 CPU/F32 envelope, does not reliably
-locate the checkbox's small (~24x24px) clickable area from real inference
-alone (observed real outputs across several honestly-worded instructions:
-(8,8), (16,16), (1,1), against a true center near (21,32)). This is a
-provider-inference-layer model-precision finding, not a defect in frame
-context, snapshot capture, materialization, revalidation, action dispatch or
-progression observation — all independently proven correct above. Closing
-this for real (not by leaking the answer into the prompt, which would defeat
-the point of a genuine acceptance) needs a provider-inference capability
-change out of this frontier's scope: a higher-resolution qualified envelope,
-a larger/more precise model, or a legitimately larger effective click
-target — a decision for a future frontier.
+proves every layer through the exact browser action genuinely correct, fully
+automated, end to end: a real out-of-process Turnstile child frame resolves
+via `FrameContext`; the widget's real rendered content is captured via
+`capture_in_frame`; canonical CAPTCHA materialization routes to the explicit
+`paligemma-local` provider — the qualified PaliGemma 448 CUDA/F16 runtime
+(`initialize_448_cuda_f16_from_host`, closing two real gaps found and fixed
+by prior frontiers: CPU/F32 `detect()` at ~426s exceeded a real Turnstile
+challenge's own ~110s lifetime, closed by the CUDA/F16 runtime; the 224
+checkpoint's real-content X-axis grounding failure, closed by the qualified
+448 checkpoint) — produces `CaptchaSolveOutcome::Solved` with model
+image-space point `(20.125, 33.25)`, matching the frozen genuine raster
+qualification's own measurement almost exactly; the transformed browser
+point (1:1 scale, no letterboxing) is dispatched through this identical
+`apply_in_frame` path after frame-aware revalidation, reliably producing
+Cloudflare's real dummy success token and the widget's visible "Success!"
+state. Inference-through-action elapsed 11.012s, comfortably inside the
+frozen 55.03s budget. No retry, no model fallback, no CPU fallback, no
+coordinate repair, no DOM-assisted localization, no enlarged hitbox, no
+JavaScript click, no manual completion, no stale-target substitution. See
+`ff4c1291` ("feat: close canonical CAPTCHA browser execution binding with
+real Turnstile acceptance").
 
 Note: Turnstile's native rendered footprint (~300x65 CSS pixels) does not
 smart-resize onto the qualified 320x224 envelope at all (its aspect ratio is

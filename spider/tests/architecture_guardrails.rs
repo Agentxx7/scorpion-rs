@@ -1638,7 +1638,7 @@ fn canonical_captcha_full_grid_has_one_validated_provider_neutral_owner() {
     assert!(source.contains("MaterializedFullGrid(Box<CaptchaImageGridInput>)"));
     assert!(source.contains("pub fn image_grid(&self) -> Option<&CaptchaImageGridInput>"));
     for forbidden in [
-        "Qwen3",
+        "PaliGemma",
         "Gemini",
         "OpenAi",
         "compose_tiles",
@@ -1748,162 +1748,6 @@ fn scanner_rejects_synthetic_local_model_contract_violations() {
     ));
 }
 
-fn qwen_generation_state_violation(source: &str) -> bool {
-    [
-        "model: Mutex<Qwen3VLModel>",
-        "Arc<Qwen3VLModel>",
-        "recycle_session",
-        "session_pool",
-        "return_model",
-        "hf_hub",
-        "reqwest::Client",
-    ]
-    .iter()
-    .any(|pattern| source.contains(pattern))
-}
-
-#[test]
-fn qwen_generation_state_is_request_local_and_transport_free() {
-    let root = workspace_root();
-    let source =
-        fs::read_to_string(root.join("spider/src/features/qwen3_vl_generation.rs")).unwrap();
-    assert!(source.contains("weights: VarBuilder<'static>"));
-    assert!(source.contains("Qwen3VLModel::new(&self.config, self.weights.clone())"));
-    assert!(source.contains("_serialized_permit: tokio::sync::OwnedMutexGuard<()>"));
-    assert!(source.contains("lock_owned().await"));
-    assert!(!qwen_generation_state_violation(&source));
-}
-
-#[test]
-fn qwen_cpu_runtime_is_installation_only_and_transport_free() {
-    let source =
-        fs::read_to_string(workspace_root().join("spider/src/features/qwen3_vl_runtime.rs"))
-            .unwrap();
-    assert!(source.contains("installation.reverify()?"));
-    assert!(source.contains("Qwen3VlGenerationFactory"));
-    assert!(source.contains("Device::Cpu"));
-    for forbidden in ["reqwest::", "wreq::", "hf_hub", "Client::new", ".send()"] {
-        assert!(!source.contains(forbidden), "runtime contains {forbidden}");
-    }
-}
-
-#[test]
-fn scanner_rejects_synthetic_qwen_runtime_network_and_fallbacks() {
-    for fixture in [
-        "reqwest::Client::new()",
-        "wreq::Client::new()",
-        "hf_hub::api::sync::Api::new()",
-        "if cpu_fails { Device::new_cuda(0) }",
-    ] {
-        assert!(
-            fixture.contains("Client::new")
-                || fixture.contains("hf_hub")
-                || fixture.contains("new_cuda"),
-            "negative fixture was not detected"
-        );
-    }
-}
-
-#[test]
-fn scanner_rejects_synthetic_qwen_generation_state_leaks() {
-    for fixture in [
-        "model: Mutex<Qwen3VLModel>",
-        "Arc<Qwen3VLModel>",
-        "recycle_session(session)",
-        "session_pool.push(model)",
-        "return_model(model)",
-        "hf_hub::api::Api::new()",
-        "reqwest::Client::new()",
-    ] {
-        assert!(qwen_generation_state_violation(fixture));
-    }
-    assert!(!qwen_generation_state_violation(
-        "factory.begin_request().await?"
-    ));
-}
-
-fn qwen_structured_generation_violation(source: &str) -> bool {
-    [
-        "push_str(\"}\")",
-        "trim_end_matches",
-        "extract_first_valid",
-        "unwrap_or_default",
-        "CaptchaSolution",
-        "reqwest::Client",
-        "Device::new_cuda",
-    ]
-    .iter()
-    .any(|pattern| source.contains(pattern))
-}
-
-#[test]
-fn qwen_structured_generation_is_token_constrained_and_runtime_owned() {
-    let source =
-        fs::read_to_string(workspace_root().join("spider/src/features/qwen3_vl_runtime.rs"))
-            .unwrap();
-    assert!(source.contains("fn constrained_token("));
-    assert!(source.contains("NoValidStructuredContinuation"));
-    assert!(source.contains("schema_state(schema, &text)"));
-    assert!(!qwen_structured_generation_violation(&source));
-}
-
-#[test]
-fn scanner_rejects_synthetic_qwen_structured_output_repairs() {
-    for fixture in [
-        "output.push_str(\"}\")",
-        "output.trim_end_matches(',')",
-        "extract_first_valid(output)",
-        "parse(output).unwrap_or_default()",
-        "fn decode(value: CaptchaSolution)",
-        "reqwest::Client::new()",
-        "Device::new_cuda(0)",
-    ] {
-        assert!(qwen_structured_generation_violation(fixture));
-    }
-}
-
-fn qwen_captcha_provider_violation(source: &str) -> bool {
-    [
-        "Qwen3VLModel::new",
-        "VarBuilder::from_",
-        "fn constrained_token(",
-        "reqwest::Client",
-        "wreq::Client",
-        "Device::new_cuda",
-        "EmpiricallyQualified",
-        "fallback_provider",
-    ]
-    .iter()
-    .any(|pattern| source.contains(pattern))
-}
-
-#[test]
-fn qwen_captcha_provider_is_runtime_owned_and_unqualified() {
-    let source =
-        fs::read_to_string(workspace_root().join("spider/src/features/qwen3_vl_captcha.rs"))
-            .unwrap();
-    assert!(source.contains("Qwen3VlCpuRuntime"));
-    assert!(source.contains("generate_structured("));
-    assert!(source.contains("ExecutableUnqualified"));
-    assert!(!qwen_captcha_provider_violation(&source));
-}
-
-#[test]
-fn scanner_rejects_synthetic_qwen_captcha_authority_leaks() {
-    for fixture in [
-        "Qwen3VLModel::new(config, weights)",
-        "VarBuilder::from_mmaped_safetensors(files)",
-        "fn constrained_token(logits: Tensor)",
-        "reqwest::Client::new()",
-        "wreq::Client::new()",
-        "Device::new_cuda(0)",
-        "qualification = EmpiricallyQualified",
-        "fallback_provider.solve(request)",
-    ] {
-        assert!(qwen_captcha_provider_violation(fixture));
-    }
-}
-
 fn captcha_corpus_governance_violation(source: &str) -> bool {
     [
         "impl From<CaptchaCorpusDraft> for FrozenCaptchaCorpus",
@@ -1913,7 +1757,7 @@ fn captcha_corpus_governance_violation(source: &str) -> bool {
         "qualification_split.unsealed()",
         "provider_output.relabel",
         "reqwest::Client",
-        "Qwen3VlGenerationFactory",
+        "PaligemmaGenerationFactory",
     ]
     .iter()
     .any(|pattern| source.contains(pattern))
@@ -1941,7 +1785,7 @@ fn scanner_rejects_synthetic_captcha_corpus_governance_bypasses() {
         "qualification_split.unsealed()",
         "provider_output.relabel(case)",
         "impl CorpusLoader { reqwest::Client }",
-        "evaluate(Qwen3VlGenerationFactory, draft)",
+        "evaluate(PaligemmaGenerationFactory, draft)",
     ] {
         assert!(captcha_corpus_governance_violation(fixture));
     }
@@ -2130,7 +1974,7 @@ fn frame_context_owns_no_captcha_or_provider_vocabulary() {
         "provider.solve(",
         "Turnstile",
         "SpiderCloudMode",
-        "Qwen3",
+        "PaliGemma",
         "GeminiConfig",
         "GPTConfigs",
     ] {
@@ -2151,7 +1995,7 @@ fn captcha_and_browser_challenge_cannot_reconstruct_frame_identity() {
         "spider/src/features/solvers.rs",
         "spider/src/features/solvers",
         "spider/src/features/browser_challenge.rs",
-        "spider/src/features/qwen3_vl_captcha.rs",
+        "spider/src/features/paligemma_captcha.rs",
         "spider/src/features/captcha_browser.rs",
     ] {
         let path = root.join(relative);
@@ -2240,7 +2084,7 @@ fn frame_aware_browser_challenge_actions_are_the_only_frame_aware_action_stack()
 #[test]
 fn captcha_layers_cannot_own_frame_transforms_or_reach_browser_frame_handles() {
     // Scoped to the canonical CaptchaProvider seam only (`captcha.rs`'s
-    // trait/request/outcome vocabulary, its corpus, and the local Qwen
+    // trait/request/outcome vocabulary, its corpus, and the local PaliGemma
     // provider): `solvers.rs` is the separate, pre-existing legacy solving
     // pipeline (out of scope for this frontier — see
     // SCORPION_CANONICAL_BROWSER_FRAME_CONTEXT_SNAPSHOT_AND_ACTION_001's
@@ -2252,7 +2096,7 @@ fn captcha_layers_cannot_own_frame_transforms_or_reach_browser_frame_handles() {
         "spider/src/features/captcha.rs",
         "spider/src/features/captcha",
         "spider/src/features/captcha_evaluation_corpus.rs",
-        "spider/src/features/qwen3_vl_captcha.rs",
+        "spider/src/features/paligemma_captcha.rs",
     ] {
         let path = root.join(relative);
         let mut files = Vec::new();
@@ -2321,7 +2165,7 @@ fn captcha_browser_binding_violation(source: &str) -> bool {
         "click_smooth(",
         "click_and_drag_smooth(",
         "call_js_fn(",
-        "Qwen3VlCpuRuntime",
+        "PaligemmaCpuRuntime",
         "generate_structured(",
         "fallback_provider",
         "retry_challenge",
@@ -2352,7 +2196,7 @@ fn scanner_rejects_synthetic_captcha_browser_authority_leaks() {
         "page.click_smooth(point).await?",
         "page.click_and_drag_smooth(from, to).await?",
         "element.call_js_fn(script, false).await?",
-        "Qwen3VlCpuRuntime::initialize(installation, ram)",
+        "PaligemmaCpuRuntime::initialize(installation, ram)",
         "runtime.generate_structured(request).await?",
         "fallback_provider.solve(request).await",
         "retry_challenge(challenge).await",
@@ -5714,7 +5558,6 @@ fn browser_challenge_detection_does_not_reference_provider_implementations() {
         "LocalLanguageModelProvider",
         "OpenAiVisionCaptchaProvider",
         "ExternalGeminiProvider",
-        "Qwen3VlLocalCaptchaProvider",
         "PaligemmaLocalCaptchaProvider",
         "CaptchaProviderRegistry",
         "CaptchaRouteAttempts",
@@ -5744,10 +5587,7 @@ fn page_new_base_does_not_construct_captcha_providers_directly() {
         "LocalLanguageModelProvider",
         "OpenAiVisionCaptchaProvider",
         "ExternalGeminiProvider",
-        "Qwen3VlLocalCaptchaProvider",
         "PaligemmaLocalCaptchaProvider",
-        "Qwen3Vl",
-        "qwen3_vl",
         "PaligemmaLocal",
     ] {
         assert!(

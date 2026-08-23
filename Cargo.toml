@@ -21,13 +21,18 @@ resolver = "2"
 # transport-wrapper patch; Scorpion browser/CAPTCHA policy does not live here.
 chromey = { path = "vendor/chromey" }
 
-# SCORPION_QWEN3_VL_CANDLE_REFERENCE_PARITY_ROOT_CAUSE_001: candle-transformers
-# 0.11.0's Qwen3-VL text decoder silently dropped rope_scaling/mrope_section
-# and applied plain sequential 1D RoPE instead of the model's real
-# interleaved 3-axis MRoPE, plus inverted its prefill causal-mask condition
-# (every prompt token attended bidirectionally across the whole prompt).
-# Root-caused against a pinned transformers/PyTorch reference oracle; see
-# vendor/candle-transformers-qwen3vl-fix/README.md.
+# SCORPION_LOCAL_CROSS_MODEL_VISION_CAPTCHA_PROVIDER_QUALIFICATION_001:
+# candle-transformers 0.11.0's PaliGemma/Gemma-1 implementation applied a
+# spurious image-embedding L2 normalization and an incorrect text-embedding
+# scale on PaliGemma's multimodal prefill. Root-caused against a pinned
+# transformers/PyTorch reference oracle; see
+# vendor/candle-transformers-qwen3vl-fix/README.md. (This fork previously
+# also carried a Qwen3-VL correctness patch; that patch and the local
+# Qwen3-VL CAPTCHA provider it supported were both removed —
+# SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001 — leaving the fork's
+# directory name the only remaining trace, kept unchanged because renaming
+# it would touch ~200 unrelated unmodified upstream files for no functional
+# benefit.)
 candle-transformers = { path = "vendor/candle-transformers-qwen3vl-fix" }
 
 # Unify the external `spider_transformations` crate onto this workspace's

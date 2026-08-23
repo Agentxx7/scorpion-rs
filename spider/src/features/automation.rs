@@ -371,7 +371,7 @@ pub struct PromptConfiguration {
 ///
 /// # Arguments
 /// * `api_url` - OpenAI-compatible chat completions endpoint
-/// * `model_name` - Model identifier (e.g., "gpt-4", "llama3", "qwen2.5")
+/// * `model_name` - Model identifier (e.g., "gpt-4", "llama3", "mixtral")
 /// * `api_key` - Optional API key for authenticated endpoints
 /// * `prompt` - Natural language description of crawling requirements
 ///

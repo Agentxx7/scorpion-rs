@@ -3,15 +3,12 @@
 //! Construction accepts only a verified [`LocalModelInstallation`]. It never
 //! discovers or downloads files and it has no transport dependency.
 //!
-//! PaliGemma (SigLIP vision encoder + Gemma-1 language model) is a
-//! genuinely different model family from Qwen3-VL: no MRoPE, no
-//! multi-axis position encoding, no deepstack merger, and a single fixed
+//! PaliGemma (SigLIP vision encoder + Gemma-1 language model) has no MRoPE,
+//! no multi-axis position encoding, no deepstack merger, and a single fixed
 //! 224x224 input envelope (no dynamic smart-resize). Its detection
 //! grounding uses `<locNNNN>` tokens that are ordinary vocabulary entries —
-//! plain next-token generation, not a special regression head — so the
-//! same grammar-constrained greedy-decode pattern already proven for
-//! Qwen3-VL structured generation applies directly, just against a
-//! different vocabulary/grammar shape.
+//! plain next-token generation, not a special regression head — so an
+//! ordinary grammar-constrained greedy-decode pattern applies directly.
 //!
 //! Two genuine `candle-transformers` 0.11.0 defects were found and fixed in
 //! the vendored fork (`vendor/candle-transformers-qwen3vl-fix`) while
@@ -500,12 +497,10 @@ impl PaligemmaDetectionBox {
 }
 
 /// Neutral structured-output grammars for non-spatial local model consumers
-/// (categorical choice — `ImageGridSelection`). Mirrors
-/// `qwen3_vl_runtime::Qwen3VlStructuredSchema::StringIdArray` exactly; kept
-/// as an independent, self-contained copy rather than a shared cross-model
-/// module, matching this frontier's instruction not to redesign or expand
-/// structured-generation machinery beyond what this candidate genuinely
-/// needs.
+/// (categorical choice — `ImageGridSelection`). A self-contained definition
+/// rather than a shared cross-model module, matching this frontier's
+/// instruction not to redesign or expand structured-generation machinery
+/// beyond what this candidate genuinely needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaligemmaStringIdArraySchema {
     /// JSON object field name.
@@ -902,11 +897,9 @@ impl PaligemmaCpuRuntime {
         if !schema.allow_empty && schema.allowed_ids.is_empty() {
             return Err(PaligemmaRuntimeFailure::NoValidStructuredContinuation);
         }
-        // See the identical, documented workaround in
-        // `qwen3_vl_runtime`/`qwen3_vl_captcha`: pre-committing the
-        // deterministically-forced opening quote works around a real
-        // per-token search gap for an isolated opening quote when nothing
-        // has been generated yet.
+        // Pre-committing the deterministically-forced opening quote works
+        // around a real per-token search gap for an isolated opening quote
+        // when nothing has been generated yet.
         let assistant_prefill = if schema.allow_empty {
             "{\"selected_ids\":[".to_string()
         } else {
@@ -1184,8 +1177,7 @@ pub struct PaligemmaTensorDiagnostics {
 /// direct (non-aspect-preserving) resize to the runtime's fixed square
 /// envelope (`224x224` or `448x448`) — `SiglipImageProcessor`'s own real
 /// behavior, not a Scorpion approximation — then `(pixel/255 - 0.5) / 0.5`
-/// normalization (identical formula to the pinned Qwen3-VL processor,
-/// identical across both PaliGemma envelopes). Normalization itself always
+/// normalization (identical across both PaliGemma envelopes). Normalization itself always
 /// happens in F32 (matching the reference processor's own arithmetic); the
 /// result is then cast to the runtime's own weight dtype so the vision
 /// tower's first `conv2d` never sees a dtype mismatch against F16 (or any
@@ -1228,9 +1220,8 @@ fn process_image(
 /// (`f"{image_token * image_seq_len}{bos_token}{prompt}\n"`), validate its
 /// framing, then return only the text suffix (`<bos>` + `{prompt}\n`) —
 /// `<image>` and `<bos>` are recognized as literal added-token substrings by
-/// the tokenizer's own added-vocabulary matching (the same mechanism
-/// `qwen3_vl_runtime::build_prompt_tokens` already relies on for
-/// `<|image_pad|>`), so a single `encode(..., add_special_tokens=false)`
+/// the tokenizer's own added-vocabulary matching, so a single
+/// `encode(..., add_special_tokens=false)`
 /// call — bypassing the tokenizer's own `TemplateProcessing` post-processor,
 /// which would otherwise inject a second, redundant BOS — produces the
 /// exact reference sequence, letting this validate real tokenization

@@ -793,7 +793,7 @@ mod tests {
         .await;
         let outputs = provider(&server)
             .discover_artifacts(
-                &HuggingFaceArtifactDiscoveryRequest::new("Qwen/Model")
+                &HuggingFaceArtifactDiscoveryRequest::new("ExampleOrg/Model")
                     .with_revision("refs/pr/1")
                     .with_limit(6),
             )
@@ -803,7 +803,7 @@ mod tests {
         assert_eq!(server.hits.load(Ordering::SeqCst), 1);
         let raw_request = server.request.lock().unwrap().clone();
         assert!(raw_request.starts_with(
-            "GET /api/models/Qwen/Model/tree/refs%2Fpr%2F1?recursive=false&expand=false HTTP/1.1"
+            "GET /api/models/ExampleOrg/Model/tree/refs%2Fpr%2F1?recursive=false&expand=false HTTP/1.1"
         ));
         assert!(!raw_request.contains("Range:"));
         assert_eq!(outputs.len(), 6);
@@ -818,7 +818,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(artifacts[0].provider_id, ProviderId::from("hugging_face"));
-        assert_eq!(artifacts[0].repository_id, "Qwen/Model");
+        assert_eq!(artifacts[0].repository_id, "ExampleOrg/Model");
         assert_eq!(artifacts[0].path, "weights/model.gguf");
         assert_eq!(
             artifacts[0].requested_revision.as_deref(),
@@ -845,13 +845,15 @@ mod tests {
         );
         assert_eq!(
             artifacts[0].download_url.as_deref(),
-            Some("https://huggingface.co/Qwen/Model/resolve/refs%2Fpr%2F1/weights/model.gguf")
+            Some(
+                "https://huggingface.co/ExampleOrg/Model/resolve/refs%2Fpr%2F1/weights/model.gguf"
+            )
         );
         assert!(artifacts[0]
             .discovered_via
             .as_deref()
             .unwrap()
-            .contains("/api/models/Qwen/Model/tree/refs%2Fpr%2F1?"));
+            .contains("/api/models/ExampleOrg/Model/tree/refs%2Fpr%2F1?"));
         assert_eq!(
             artifacts
                 .iter()

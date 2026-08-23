@@ -219,8 +219,8 @@ pinned shards, computed **twice** per process lifetime — once in
 `PaligemmaCpuRuntime::initialize`'s `installation.reverify()`) is real,
 measured overhead, unrelated to device/dtype. It was also traced to a
 second, separate finding during this frontier's resource-preflight work: a
-~4 GB stale `tmpfs` allocation from an old Qwen model installation,
-retained through three hard links across abandoned staging/qualification
+~4 GB stale `tmpfs` allocation from an old, unrelated local-model
+installation, retained through three hard links across abandoned staging/qualification
 directories, was consuming host memory headroom until manually identified
 and removed. Both are candidates for a future, separately-scoped canonical
 model-artifact staging/cleanup frontier — not addressed here, per this

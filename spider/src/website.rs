@@ -14476,7 +14476,7 @@ impl Website {
     /// // Build the engine configs (similar to GPTConfigs::new(...))
     /// let mm_cfgs = RemoteMultimodalConfigs::new(
     ///     "http://localhost:11434/v1/chat/completions",
-    ///     "qwen2.5-vl", // any OpenAI-compatible model id your endpoint understands
+    ///     "llava-v1.6", // any OpenAI-compatible model id your endpoint understands
     /// )
     /// // .with_api_key("your-api-key-if-needed")
     /// .with_system_prompt_extra("Never log in. Prefer closing popups and continuing.")
@@ -15575,7 +15575,7 @@ impl Website {
     ///
     /// # Arguments
     /// * `api_url` - OpenAI-compatible chat completions endpoint
-    /// * `model_name` - Model identifier (e.g., "gpt-4", "llama3", "qwen2.5")
+    /// * `model_name` - Model identifier (e.g., "gpt-4", "llama3", "mixtral")
     /// * `api_key` - Optional API key for authenticated endpoints
     /// * `prompt` - Natural language description of crawling requirements
     ///

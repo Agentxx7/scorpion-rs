@@ -24,7 +24,7 @@ fn thin_binding_composes_only_canonical_owners() {
         assert!(source.contains(required), "missing {required}");
     }
     for forbidden in [
-        "Qwen3VlCpuRuntime",
+        "PaligemmaCpuRuntime",
         "generate_structured",
         "find_element(",
         "find_elements(",

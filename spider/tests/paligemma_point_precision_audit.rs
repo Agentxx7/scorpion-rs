@@ -1,26 +1,19 @@
 #![cfg(feature = "local_paligemma")]
 
 //! Formal point-selection precision qualification for `paligemma-local`
-//! (`SCORPION_LOCAL_CROSS_MODEL_VISION_CAPTCHA_PROVIDER_QUALIFICATION_001`),
-//! using EXACTLY the established methodology from the closed Qwen3-VL
-//! 2B/4B frontiers (`spider/tests/qwen3_vl_point_precision_audit.rs`): the
-//! same required 8-fixture position matrix, the same WCAG 2.5.5 44px
-//! actionable-region tolerance (fixed before this frontier's trial ran, not
-//! tuned to this model's result), the same anti-degeneracy assertions, and
-//! the same determinism proof. Only the canvas size differs — PaliGemma's
+//! (`SCORPION_LOCAL_CROSS_MODEL_VISION_CAPTCHA_PROVIDER_QUALIFICATION_001`):
+//! a required 8-fixture position matrix, a WCAG 2.5.5 44px actionable-region
+//! tolerance (fixed before this frontier's trial ran, not tuned to the
+//! result), anti-degeneracy assertions, and a determinism proof. PaliGemma's
 //! processor has a single fixed 224x224 input envelope (no dynamic
-//! resolution choice), unlike Qwen3-VL's 320x224 qualified envelope —
-//! fixture proportions are otherwise directly analogous (corners near the
-//! edges with matching margin, dead-center, an off-diagonal asymmetric
-//! position, a small isolated target, and a horizontally-separated
-//! distractor pair).
+//! resolution choice); fixtures cover corners near the edges with matching
+//! margin, dead-center, an off-diagonal asymmetric position, a small
+//! isolated target, and a horizontally-separated distractor pair.
 //!
 //! ## Result (see the frontier SDD for full detail)
 //!
-//! 7/7 standard-size fixtures land inside their actionable target region —
-//! a material, reproducible improvement over both the 2B and 4B Qwen3-VL
-//! baselines (3/7 each), clearing the predefined 6/7 reliable-single-shot
-//! threshold.
+//! 7/7 standard-size fixtures land inside their actionable target region,
+//! clearing the predefined 6/7 reliable-single-shot threshold.
 //!
 //! Ignored in ordinary CI: requires the pinned ~11.7 GB PaliGemma
 //! installation.
@@ -39,20 +32,16 @@ use spider::features::paligemma_runtime::paligemma_cpu_f32_manifest;
 const BACKGROUND: Rgb<u8> = Rgb([40, 40, 40]);
 const TARGET_COLOR: Rgb<u8> = Rgb([220, 40, 40]);
 const DISTRACTOR_COLOR: Rgb<u8> = Rgb([40, 90, 220]);
-/// WCAG 2.5.5 minimum touch/click target size, in pixels — identical to the
-/// Qwen3-VL frontiers' own tolerance.
+/// WCAG 2.5.5 minimum touch/click target size, in pixels.
 const STANDARD_SIDE: u32 = 44;
 /// Deliberately below the actionable minimum, to probe the precision floor.
 const SMALL_SIDE: u32 = 16;
 const CANVAS: (u32, u32) = (224, 224);
 
+/// Predefined reliable-single-shot pass bar, fixed before this frontier's
+/// trial ran — not tuned to the measured result.
 const RELIABLE_CONTAINMENT_THRESHOLD: usize = 6;
 const STANDARD_FIXTURE_COUNT: usize = 7;
-/// The already-closed Qwen3-VL 2B and 4B frontiers' own measured
-/// containment, out of 7 standard fixtures — the baseline this candidate
-/// must materially beat.
-const QWEN3_VL_2B_BASELINE_CONTAINED: usize = 3;
-const QWEN3_VL_4B_BASELINE_CONTAINED: usize = 3;
 
 struct Fixture {
     label: &'static str,
@@ -113,8 +102,7 @@ fn distractor_fixture() -> Fixture {
     }
 }
 
-/// The full required position matrix, directly analogous to the Qwen3-VL
-/// frontiers' own: four corners, center, an asymmetric x != y position, a
+/// The full required position matrix: four corners, center, an asymmetric x != y position, a
 /// small isolated target, and a distractor-containing target.
 fn required_matrix() -> Vec<Fixture> {
     vec![
@@ -183,8 +171,7 @@ fn euclidean_error(trial: &Trial) -> Option<f64> {
 }
 
 /// Actionable-region containment: the same axis-aligned bounding-box check
-/// the production browser-action seam performs for `ExactTargetClick`, and
-/// the same criterion the Qwen3-VL frontiers used.
+/// the production browser-action seam performs for `ExactTargetClick`.
 fn contained(trial: &Trial) -> bool {
     match trial.returned {
         Some((x, y)) => {
@@ -361,13 +348,7 @@ async fn real_point_selection_precision_matrix() {
     let contained_count = standard.iter().filter(|t| contained(t)).count();
     eprintln!(
         "\nstandard-size (44px) actionable containment: {contained_count}/{STANDARD_FIXTURE_COUNT} \
-         (Qwen3-VL 2B baseline: {QWEN3_VL_2B_BASELINE_CONTAINED}/{STANDARD_FIXTURE_COUNT}; \
-         4B baseline: {QWEN3_VL_4B_BASELINE_CONTAINED}/{STANDARD_FIXTURE_COUNT}; \
-         reliable-single-shot threshold: {RELIABLE_CONTAINMENT_THRESHOLD}/{STANDARD_FIXTURE_COUNT})"
-    );
-    assert!(
-        contained_count > QWEN3_VL_2B_BASELINE_CONTAINED.max(QWEN3_VL_4B_BASELINE_CONTAINED),
-        "must materially beat both Qwen3-VL baselines, not merely tie them"
+         (reliable-single-shot threshold: {RELIABLE_CONTAINMENT_THRESHOLD}/{STANDARD_FIXTURE_COUNT})"
     );
     assert!(
         contained_count >= RELIABLE_CONTAINMENT_THRESHOLD,

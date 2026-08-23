@@ -184,5 +184,5 @@ Out of scope, deliberately: CAPTCHA solving, Turnstile-specific behavior,
 CAPTCHA detection, retry orchestration, provider fallback, CLI/MCP exposure.
 The successor frontier
 (`SCORPION_CANONICAL_CAPTCHA_BROWSER_EXECUTION_BINDING_001`) binds canonical
-CAPTCHA materialization and local Qwen inference to this frame-aware
+CAPTCHA materialization and local PaliGemma inference to this frame-aware
 snapshot/action seam for a genuine Turnstile acceptance.

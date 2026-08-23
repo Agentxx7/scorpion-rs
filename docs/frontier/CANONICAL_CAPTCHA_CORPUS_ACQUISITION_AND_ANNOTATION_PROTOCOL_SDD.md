@@ -69,9 +69,9 @@ separate independently reviewed corpus decision explicitly qualifies them.
 
 ## Locked thresholds
 
-The threshold identity refers to the policy already fixed by
-`SCORPION_QWEN3_VL_CAPTCHA_EMPIRICAL_QUALIFICATION_001`. This frontier provides
-no API for changing it and observes no model output.
+The threshold identity refers to a policy fixed by a separate, prior
+empirical-qualification frontier. This frontier provides no API for
+changing it and observes no model output.
 
 ## Readiness
 

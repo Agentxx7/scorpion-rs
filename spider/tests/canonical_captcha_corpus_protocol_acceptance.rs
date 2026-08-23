@@ -99,7 +99,7 @@ fn corpus_governance_has_no_provider_or_transport_execution() {
     for forbidden in [
         "CaptchaProviderId",
         "CaptchaSolveOutcome",
-        "Qwen3",
+        "PaliGemma",
         "OpenAi",
         "Gemini",
         "reqwest::",

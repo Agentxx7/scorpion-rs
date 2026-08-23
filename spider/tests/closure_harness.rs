@@ -1439,6 +1439,29 @@ fn declared_features_for_wired(doc: &toml::Value) -> BTreeSet<String> {
     features
 }
 
+/// The feature set used specifically to resolve IMPLEMENTED evidence's
+/// cfg-gated definitions: `declared_features` above, plus
+/// `[stages.IMPLEMENTED].additional_cfg_features` — the same escape hatch
+/// `declared_features_for_wired` provides for WIRED chains, for the
+/// identical reason. A real case found while hardening this file: a
+/// symbol can be gated behind `#[cfg(all(feature = "chrome", feature =
+/// "chrome_remote_cache"))]` where only `chrome_remote_cache` belongs in
+/// `PRODUCTION_REACHABLE.feature_requirements` (Cargo.toml already makes
+/// `chrome_remote_cache` imply `chrome` — see `chrome_remote_cache =
+/// ["chrome", ...]` — so every real build enabling it also enables
+/// `chrome`); adding `chrome` to `feature_requirements` instead would
+/// widen the reachability verdict's ANY-of-these-enabled check to any
+/// artifact that enables plain `chrome` for unrelated reasons, an
+/// unrelated and incorrect effect this stage-scoped list avoids exactly
+/// as `declared_features_for_wired` already does for WIRED.
+fn declared_features_for_implemented(doc: &toml::Value) -> BTreeSet<String> {
+    let mut features = declared_features(doc);
+    if let Some(implemented) = stage_table(doc, "IMPLEMENTED") {
+        features.extend(str_array(implemented, "additional_cfg_features"));
+    }
+    features
+}
+
 const STAGE_ORDER: [&str; 8] = [
     "DESIGNED",
     "IMPLEMENTED",
@@ -2388,7 +2411,7 @@ fn implemented_stage_evidence_references_real_definitions_not_comments() {
             "{}: [stages.IMPLEMENTED] evidence must not be empty once the table exists",
             entry.path.display()
         );
-        let features = declared_features(&entry.doc);
+        let features = declared_features_for_implemented(&entry.doc);
         for item in evidence {
             let (file_part, symbol) = item.split_once(':').unwrap_or_else(|| {
                 panic!(

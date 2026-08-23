@@ -115,6 +115,14 @@ fn terminal_exit(session: &ResearchSession) -> (i32, Option<String>) {
             2,
             Some("Research search failed after the durable session was claimed.".to_string()),
         ),
+        ResearchSessionState::CompletedNoObservedAcquisitions => (
+            2,
+            Some(
+                "Research search succeeded, but no candidate acquisition observed a real \
+                 network response — total acquisition failure."
+                    .to_string(),
+            ),
+        ),
         ResearchSessionState::CompletedSynthesisFailed => (
             2,
             Some(
@@ -170,6 +178,12 @@ async fn format_session(
     match session.state {
         ResearchSessionState::CompletedNoSearchResults => {
             output.push_str("\nNo search results.\n");
+        }
+        ResearchSessionState::CompletedNoObservedAcquisitions => {
+            output.push_str(
+                "\nNo observed acquisitions: every candidate acquisition failed before a \
+                 response was received.\n",
+            );
         }
         ResearchSessionState::CompletedNoExtractions => {
             output.push_str("\nNo supported extractions.\n");
@@ -231,10 +245,11 @@ async fn format_session(
             if verbose {
                 output.push_str("\nDiagnostics:\n");
                 output.push_str(&format!(
-                    "Search results: {}\nAcquisition attempts: {}\nDurable sources: {}\nSuccessful extractions: {}\n",
+                    "Search results: {}\nAcquisition attempts: {}\nDurable sources: {}\nObserved acquisitions: {}\nSuccessful extractions: {}\n",
                     session.counts.search_results,
                     session.counts.acquisition_attempts,
                     session.counts.durable_sources,
+                    session.counts.observed_acquisitions,
                     session.counts.successful_extractions
                 ));
                 for extraction in &result.extractions {
@@ -260,6 +275,7 @@ async fn format_session(
             ResearchSessionState::Claimed
                 | ResearchSessionState::SearchFailed
                 | ResearchSessionState::CompletedNoSearchResults
+                | ResearchSessionState::CompletedNoObservedAcquisitions
                 | ResearchSessionState::CompletedNoExtractions
         ) =>
         {
@@ -453,6 +469,7 @@ mod tests {
                 search_results: 1,
                 acquisition_attempts: 1,
                 durable_sources: 1,
+                observed_acquisitions: 1,
                 successful_extractions: 1,
             },
             state: ResearchSessionState::CompletedWithoutSynthesisRequested,
@@ -532,6 +549,7 @@ mod tests {
         for state in [
             ResearchSessionState::Claimed,
             ResearchSessionState::SearchFailed,
+            ResearchSessionState::CompletedNoObservedAcquisitions,
             ResearchSessionState::CompletedSynthesisFailed,
         ] {
             let durable = session(state);

@@ -190,6 +190,7 @@ fn show_reopens_and_formats_canonical_result_without_provider_config_or_secret_p
                 search_results: 1,
                 acquisition_attempts: 1,
                 durable_sources: 1,
+                observed_acquisitions: 1,
                 successful_extractions: 1,
             },
             state: ResearchSessionState::CompletedSuccessfully,
@@ -241,6 +242,150 @@ fn show_reopens_and_formats_canonical_result_without_provider_config_or_secret_p
     assert!(!stdout.contains("https://"));
     assert!(!stdout.contains("token="));
     assert!(!stdout.contains("cookie="));
+
+    remove_database(&path);
+}
+
+/// A guaranteed-refused loopback endpoint: bound, then immediately dropped,
+/// so the port is free but nothing is listening.
+fn refused_addr() -> std::net::SocketAddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
+/// Serves exactly one SearXNG-shaped `/search` JSON response (matching the
+/// same real HTTP contract `search_cli.rs`'s own fake server proves), then
+/// stops. `result_urls` become the candidate URLs the real research
+/// acquisition loop attempts next.
+fn fake_searxng(result_urls: Vec<String>) -> (std::net::SocketAddr, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let results: Vec<serde_json::Value> = result_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                serde_json::json!({ "title": format!("Result {}", index + 1), "url": url })
+            })
+            .collect();
+        let body = serde_json::to_string(&serde_json::json!({ "results": results })).unwrap();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    (address, handle)
+}
+
+/// SCORPION_CLI_RESEARCH_TOTAL_ACQUISITION_FAILURE_EXIT_SEMANTICS_001.
+/// Real end-to-end process-level proof: the actual `scorpion` binary,
+/// driven through its actual `research` command, against a real (local,
+/// deterministic) SearXNG-shaped provider whose candidates are all
+/// genuinely refused loopback endpoints — no mocked state, no synthetic
+/// string matching. The OpenAI-compatible endpoint is never dialed (every
+/// acquisition fails before extraction is ever attempted), so a
+/// syntactically-valid but unreachable placeholder is sufficient.
+#[test]
+fn subprocess_total_acquisition_failure_exits_nonzero_with_truthful_state() {
+    let path = temporary_database();
+    remove_database(&path);
+
+    let refused_one = refused_addr();
+    let refused_two = refused_addr();
+    let (search_addr, search_handle) = fake_searxng(vec![
+        format!("http://{refused_one}/a"),
+        format!("http://{refused_two}/b"),
+    ]);
+
+    let output = scorpion()
+        .args(["research", "total acquisition failure topic"])
+        .env("RESEARCH_EVIDENCE_DB", path.to_str().unwrap())
+        .env("SEARXNG_BASE_URL", format!("http://{search_addr}"))
+        .env("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:1/v1")
+        .env("OPENAI_COMPAT_MODEL", "unused-model")
+        .env("OPENAI_COMPAT_API_KEY", "unused-key")
+        .output()
+        .unwrap();
+
+    search_handle.join().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "total acquisition failure must not exit 0: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("State: CompletedNoObservedAcquisitions"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("No observed acquisitions"), "{stdout}");
+    assert!(stderr.contains("total acquisition failure"), "{stderr}");
+
+    remove_database(&path);
+}
+
+/// Required positive control for the same frontier: a real, genuinely
+/// observed acquisition (a real local HTTP response, not a refusal) whose
+/// content the research pipeline legitimately never turns into an
+/// extraction must still exit 0 — proving the fix does not convert every
+/// no-extraction run into a failure.
+#[test]
+fn subprocess_acquired_but_unextracted_still_exits_zero() {
+    use std::io::{Read, Write};
+    let path = temporary_database();
+    remove_database(&path);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let fixture_addr = listener.local_addr().unwrap();
+    let fixture_handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let body: &[u8] = b"not extractable content";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+
+    let (search_addr, search_handle) =
+        fake_searxng(vec![format!("http://{fixture_addr}/unsupported")]);
+
+    let output = scorpion()
+        .args(["research", "acquired but unextracted topic"])
+        .env("RESEARCH_EVIDENCE_DB", path.to_str().unwrap())
+        .env("SEARXNG_BASE_URL", format!("http://{search_addr}"))
+        .env("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:1/v1")
+        .env("OPENAI_COMPAT_MODEL", "unused-model")
+        .env("OPENAI_COMPAT_API_KEY", "unused-key")
+        .output()
+        .unwrap();
+
+    search_handle.join().unwrap();
+    fixture_handle.join().unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a real observed acquisition with no usable extraction must still exit 0: \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("State: CompletedNoExtractions"), "{stdout}");
+    assert!(stdout.contains("No supported extractions"), "{stdout}");
+    assert!(stderr.is_empty(), "{stderr}");
 
     remove_database(&path);
 }

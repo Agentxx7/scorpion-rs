@@ -70,6 +70,20 @@ pub struct ResearchSessionCounts {
     pub acquisition_attempts: usize,
     /// Acquisition attempts that produced durable canonical evidence.
     pub durable_sources: usize,
+    /// Acquisition attempts whose retained evidence observed a real network
+    /// response (`EvidenceBundle::observed_status_code.is_some()`),
+    /// independent of whether that response's status or content ultimately
+    /// produced a successful extraction. A connection failure, timeout, or
+    /// any other attempt that never received a real response is not
+    /// counted, exactly like every other `observed_status_code`-based
+    /// acquisition-failure signal elsewhere in this crate (crawl, scrape,
+    /// discovery tools). Zero here — with `search_results` non-empty —
+    /// means total acquisition failure, distinct from a real response that
+    /// simply produced no extraction. Missing in legacy records
+    /// deserializes as `0` — the same forward-compatibility contract
+    /// `ResearchSession::result` above already uses.
+    #[serde(default)]
+    pub observed_acquisitions: usize,
     /// Pages that produced a successful `PageExtraction`.
     pub successful_extractions: usize,
 }
@@ -144,7 +158,15 @@ pub enum ResearchSessionState {
     SearchFailed,
     /// Search completed with no results.
     CompletedNoSearchResults,
-    /// Search completed but no page produced a successful extraction.
+    /// Search completed and candidates were selected for acquisition, but
+    /// zero acquisition attempts observed a real network response — a
+    /// total acquisition failure (every attempt refused, timed out, or
+    /// otherwise never received a response), distinct from
+    /// `CompletedNoExtractions` below (which means at least one attempt
+    /// genuinely observed a response but none became a usable extraction).
+    CompletedNoObservedAcquisitions,
+    /// Search completed, at least one acquisition observed a real network
+    /// response, but no page produced a successful extraction.
     CompletedNoExtractions,
     /// Successful extractions completed and synthesis was not requested.
     CompletedWithoutSynthesisRequested,
@@ -320,6 +342,7 @@ pub async fn read_research_session(
 fn terminal_state(
     result: &Result<ResearchResult, AgentError>,
     synthesize: bool,
+    observed_acquisitions: usize,
 ) -> ResearchSessionState {
     let Ok(result) = result else {
         return ResearchSessionState::SearchFailed;
@@ -327,7 +350,11 @@ fn terminal_state(
     if result.search_results.is_empty() {
         ResearchSessionState::CompletedNoSearchResults
     } else if result.extractions.is_empty() {
-        ResearchSessionState::CompletedNoExtractions
+        if observed_acquisitions == 0 {
+            ResearchSessionState::CompletedNoObservedAcquisitions
+        } else {
+            ResearchSessionState::CompletedNoExtractions
+        }
     } else if !synthesize {
         ResearchSessionState::CompletedWithoutSynthesisRequested
     } else {
@@ -367,6 +394,7 @@ fn build_durable_result(
         ResearchSessionState::Claimed
             | ResearchSessionState::SearchFailed
             | ResearchSessionState::CompletedNoSearchResults
+            | ResearchSessionState::CompletedNoObservedAcquisitions
             | ResearchSessionState::CompletedNoExtractions
     ) {
         return Ok(None);
@@ -658,6 +686,10 @@ where
 
     let result = execute().await;
     let retained = acquirer.retained_evidence();
+    let observed_acquisitions = retained
+        .iter()
+        .filter(|entry| entry.evidence.observed_status_code.is_some())
+        .count();
     let (sources, source_bindings) = bind_sources(&store, &retained, &result).await?;
     session.sources = sources;
     session.source_bindings = source_bindings;
@@ -668,7 +700,8 @@ where
         session.counts.successful_extractions = result.extractions.len();
     }
     session.counts.durable_sources = retained.len();
-    session.state = terminal_state(&result, options.synthesize);
+    session.counts.observed_acquisitions = observed_acquisitions;
+    session.state = terminal_state(&result, options.synthesize, observed_acquisitions);
     session.result = build_durable_result(&result, &session.state, &session.source_bindings)?;
     session.completed_at_unix_ms = Some(unix_time_ms());
     persist_terminal(&store, &session, claim_revision).await?;
@@ -1022,12 +1055,19 @@ mod tests {
             ResearchSessionState::CompletedNoSearchResults
         );
         assert!(no_search_results.result.is_none());
-        let no_extractions = run_case(2, false, true, None).await;
+        // `extraction: false` here means `run_case` never calls `acquire()`
+        // at all (see its closure above) — zero acquisition attempts, not
+        // merely zero *successful* ones. That is exactly
+        // `CompletedNoObservedAcquisitions`, not `CompletedNoExtractions`;
+        // `total_acquisition_failure_is_distinguished_from_acquired_but_unextracted`
+        // below covers the case this name used to (imprecisely) suggest —
+        // a real observed acquisition that produced no extraction.
+        let no_acquisitions = run_case(2, false, true, None).await;
         assert_eq!(
-            no_extractions.state,
-            ResearchSessionState::CompletedNoExtractions
+            no_acquisitions.state,
+            ResearchSessionState::CompletedNoObservedAcquisitions
         );
-        assert!(no_extractions.result.is_none());
+        assert!(no_acquisitions.result.is_none());
         assert_eq!(
             run_case(1, true, false, None).await.state,
             ResearchSessionState::CompletedWithoutSynthesisRequested
@@ -1044,6 +1084,132 @@ mod tests {
             run_case(1, true, true, Some(true)).await.state,
             ResearchSessionState::CompletedSuccessfully
         );
+    }
+
+    /// A guaranteed-refused loopback endpoint: bound, then immediately
+    /// dropped, so the port is free but nothing is listening — a genuine
+    /// connection refusal, not a synthetic string or status code.
+    fn refused_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/refused", listener.local_addr().unwrap());
+        drop(listener);
+        url
+    }
+
+    /// SCORPION_CLI_RESEARCH_TOTAL_ACQUISITION_FAILURE_EXIT_SEMANTICS_001.
+    /// Every acquisition attempt below goes through the real, production
+    /// `CanonicalPageAcquirer` (`fetch_single_page_with_options` against
+    /// a real loopback socket) exactly as `run_durable_research` wires it
+    /// — the terminal state is computed from genuine `retained_evidence()`
+    /// truth via `run_with_id`, never set directly.
+    #[tokio::test]
+    async fn total_acquisition_failure_is_distinguished_from_acquired_but_unextracted() {
+        // Case A (required negative test): every candidate acquisition is
+        // genuinely refused. Two real search results exist, but zero
+        // acquisition attempts ever observed a response.
+        let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+        let acquirer = adapter(&store).await;
+        let execution_acquirer = acquirer.clone();
+        let total_failure = run_with_id(
+            Arc::clone(&store),
+            acquirer,
+            ResearchId::new(),
+            "topic".to_string(),
+            ResearchOptions::new().with_synthesize(false),
+            move || async move {
+                assert!(
+                    execution_acquirer.acquire(&refused_url()).await.is_err(),
+                    "a genuinely refused connection must not succeed"
+                );
+                assert!(
+                    execution_acquirer.acquire(&refused_url()).await.is_err(),
+                    "a genuinely refused connection must not succeed"
+                );
+                Ok(result(2, &[], None))
+            },
+        )
+        .await
+        .unwrap()
+        .session;
+        assert_eq!(
+            total_failure.state,
+            ResearchSessionState::CompletedNoObservedAcquisitions
+        );
+        assert_eq!(total_failure.counts.observed_acquisitions, 0);
+        // The failed attempts are still retained as durable diagnostic
+        // evidence — refused acquisitions are not erased, only not counted
+        // as observed.
+        assert_eq!(total_failure.counts.durable_sources, 2);
+        assert!(total_failure.result.is_none());
+
+        // Case B (required positive control): one real, genuinely observed
+        // 200 OK acquisition that the research engine did not turn into an
+        // extraction — a legitimate empty result, not a total acquisition
+        // failure. Must not regress to a failure state.
+        let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+        let acquirer = adapter(&store).await;
+        let execution_acquirer = acquirer.clone();
+        let acquired_no_extraction = run_with_id(
+            Arc::clone(&store),
+            acquirer,
+            ResearchId::new(),
+            "topic".to_string(),
+            ResearchOptions::new().with_synthesize(false),
+            move || async move {
+                let _observed = acquire(&execution_acquirer, b"<html>unusable</html>").await;
+                Ok(result(1, &[], None))
+            },
+        )
+        .await
+        .unwrap()
+        .session;
+        assert_eq!(
+            acquired_no_extraction.state,
+            ResearchSessionState::CompletedNoExtractions
+        );
+        assert_eq!(acquired_no_extraction.counts.observed_acquisitions, 1);
+        assert_eq!(acquired_no_extraction.counts.durable_sources, 1);
+        assert!(acquired_no_extraction.result.is_none());
+
+        // Case C (required mixed case, both orders): one refused attempt
+        // alongside one genuinely observed attempt is NOT total acquisition
+        // failure, regardless of which happened first — the count is not
+        // order- or "any failure means total failure"-dependent.
+        for observed_first in [false, true] {
+            let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+            let acquirer = adapter(&store).await;
+            let execution_acquirer = acquirer.clone();
+            let mixed = run_with_id(
+                Arc::clone(&store),
+                acquirer,
+                ResearchId::new(),
+                "topic".to_string(),
+                ResearchOptions::new().with_synthesize(false),
+                move || async move {
+                    if observed_first {
+                        let _observed =
+                            acquire(&execution_acquirer, b"<html>mixed order</html>").await;
+                        assert!(execution_acquirer.acquire(&refused_url()).await.is_err());
+                    } else {
+                        assert!(execution_acquirer.acquire(&refused_url()).await.is_err());
+                        let _observed =
+                            acquire(&execution_acquirer, b"<html>mixed order</html>").await;
+                    }
+                    Ok(result(2, &[], None))
+                },
+            )
+            .await
+            .unwrap()
+            .session;
+            assert_eq!(
+                mixed.state,
+                ResearchSessionState::CompletedNoExtractions,
+                "one observed acquisition alongside one refused must not be total failure \
+                 (observed_first={observed_first})"
+            );
+            assert_eq!(mixed.counts.observed_acquisitions, 1);
+            assert_eq!(mixed.counts.durable_sources, 2);
+        }
     }
 
     #[test]

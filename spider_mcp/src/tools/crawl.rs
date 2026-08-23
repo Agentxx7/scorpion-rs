@@ -239,10 +239,25 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
             // Set on a fail-closed screenshot rejection so the loop's normal
             // exit (channel closed) doesn't overwrite Failed with Complete.
             let mut failed = false;
-            let mut page_count: usize = 0;
+            // Section (background crawl failure semantics): counts only
+            // pages with a real observed HTTP response
+            // (`page.observed_status_code.is_some()`) — the same signal
+            // the inline path's `observed_response_count` already uses
+            // (see `serialize_inline_pages` above). This is a purely
+            // internal gating variable; it is never the externally
+            // reported `page_count` field (`spider_crawl_status`
+            // independently computes that from `session.pages.len()`,
+            // which still retains every received page regardless of
+            // observed status). A prior version counted every received
+            // page here, so a refused acquisition's one synthetic
+            // diagnostic page (no real response, `observed_status_code:
+            // null`) satisfied this as "non-zero" and bypassed the
+            // zero-page failure path entirely, reaching `Complete` with
+            // zero observed HTTP responses.
+            let mut observed_response_count: usize = 0;
 
             while let Ok(page) = rx.recv().await {
-                page_count += 1;
+                observed_response_count += usize::from(page.observed_status_code.is_some());
                 let input = TransformInput {
                     url: page.get_url_parsed_ref().as_ref(),
                     content: page.get_html_bytes_u8(),
@@ -286,25 +301,36 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
             }
 
             if !failed {
-                // A background crawl that produced zero pages must not
-                // silently report Complete (Section N: the exact "empty
-                // successful crawl" the inline path already guards
-                // against) — only await the crawl task in that specific
-                // case, since it has almost certainly already finished by
-                // the time the channel closed.
-                let transport_error = if page_count == 0 {
-                    crawl_join.await.ok().flatten()
-                } else {
-                    None
-                };
-                if let Some(mut session) = state2.sessions.get_mut(&id2) {
-                    if let Some(transport_error) = transport_error {
-                        session.status = CrawlSessionStatus::Failed;
-                        session.error = Some(transport_error.to_string());
-                        session.error_code =
-                            Some(crate::transport::error_code(&transport_error).to_string());
-                    } else {
+                if observed_response_count > 0 {
+                    if let Some(mut session) = state2.sessions.get_mut(&id2) {
                         session.status = CrawlSessionStatus::Complete;
+                    }
+                } else {
+                    // Zero observed HTTP responses — a genuine total
+                    // acquisition failure (the background sibling of the
+                    // inline path's zero-observed-response guard in
+                    // `serialize_inline_pages`), regardless of how many
+                    // raw/synthetic pages were retained for diagnostics.
+                    // `crawl_join` only ever carries a typed
+                    // `TransportError` for executor/Tor preflight
+                    // resolution failures (audited: `last_transport_error`
+                    // is set exclusively by `resolve_canonical_executor`
+                    // failures, never by an ordinary per-request network
+                    // failure such as a refused connection) — it is
+                    // awaited here only to capture that class when it
+                    // genuinely applies; its absence must not be read as
+                    // success. It is safe to await unconditionally here:
+                    // the spawned crawl task has already finished (or is
+                    // finishing) by the time this channel closes, exactly
+                    // as before this change.
+                    let transport_error = crawl_join.await.ok().flatten();
+                    if let Some(mut session) = state2.sessions.get_mut(&id2) {
+                        session.status = CrawlSessionStatus::Failed;
+                        if let Some(transport_error) = transport_error {
+                            session.error = Some(transport_error.to_string());
+                            session.error_code =
+                                Some(crate::transport::error_code(&transport_error).to_string());
+                        }
                     }
                 }
             }
@@ -637,4 +663,80 @@ mod tests {
         assert!(session.error.is_none());
         assert!(session.error_code.is_none());
     }
+
+    /// SCORPION_MCP_BACKGROUND_CRAWL_FAILURE_SEMANTICS_001, the exact
+    /// operator-observed defect: a refused acquisition (a genuinely
+    /// unreachable target, not a synthetic status code or string match)
+    /// against a background crawl (limit > INLINE_LIMIT) previously
+    /// reached `Complete` because the terminal-state gate counted the one
+    /// synthetic diagnostic `Page` spider still emits for a connection
+    /// failure, rather than counting only pages with a real observed HTTP
+    /// response. Proves: zero observed responses -> `Failed`; the
+    /// synthetic page remains retained as diagnostic evidence with
+    /// `observed_status_code: null`/`response_origin: null`; the
+    /// externally-reported `page_count` (`spider_crawl_status`, exercised
+    /// by the sibling integration test) still truthfully counts it; no
+    /// `error`/`error_code` is fabricated, since this ordinary connection
+    /// refusal never populates a typed `TransportError` (matches the
+    /// already-established null-fields contract for a non-transport
+    /// `Failed` session).
+    #[tokio::test]
+    async fn background_crawl_refused_acquisition_reports_failed_with_zero_observed_responses() {
+        let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused_addr = unused.local_addr().unwrap();
+        drop(unused);
+        let url = format!("http://{refused_addr}/");
+        let state = Arc::new(SharedState::new());
+
+        let output = run(
+            tor_crawl_params(url, Some(INLINE_LIMIT + 1), None),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let crawl_id = value["crawl_id"].as_str().unwrap().to_string();
+        assert_eq!(value["status"], "running");
+
+        let status = await_terminal(&state, &crawl_id).await;
+        assert_eq!(
+            status,
+            CrawlSessionStatus::Failed,
+            "zero observed HTTP responses must never reach Complete"
+        );
+        let session = state.sessions.get(&crawl_id).unwrap();
+        // page_count (spider_crawl_status's session.pages.len()) remains
+        // truthful: the one synthetic diagnostic page is still retained,
+        // it just no longer counts toward success.
+        assert_eq!(session.pages.len(), 1);
+        assert!(session.pages[0].provenance.observed_status_code.is_none());
+        assert!(session.pages[0].provenance.response_origin.is_none());
+        // No typed transport error exists for an ordinary connection
+        // refusal — must not be fabricated.
+        assert!(session.error.is_none());
+        assert!(session.error_code.is_none());
+    }
+
+    // Mixed background crawl semantics (>=1 observed response alongside
+    // >=1 synthetic zero-observed-response page must still reach
+    // `Complete`) are intentionally not exercised by a dedicated live
+    // two-hop test here: constructing a genuine same-crawl mix requires
+    // the crawler to actually follow a cross-origin link to a refused
+    // target within one run, and doing so reliably depends on spider's
+    // own link-discovery/external-domain-following internals — out of
+    // this MCP-layer repair's authorized surface to modify or debug
+    // (`Website` is explicitly unchanged). The terminal-state decision
+    // this frontier changed is a single boolean check,
+    // `observed_response_count > 0`, evaluated once after the receive
+    // loop fully drains; it is structurally independent of how many
+    // additional pages (observed or synthetic) also arrived, since every
+    // received page is unconditionally pushed into `session.pages`
+    // regardless of the branch taken (unchanged by this repair). Both
+    // sides of that boolean are already proven by real, live crawls:
+    // `default_background_crawl_unchanged`/the Tor background success
+    // test (observed_response_count > 0 -> Complete) and
+    // `background_crawl_refused_acquisition_reports_failed_with_zero_observed_responses`
+    // (observed_response_count == 0 -> Failed) above. A mix is the same
+    // code path exercised with a larger page set; no additional branch
+    // exists for it to hit.
 }

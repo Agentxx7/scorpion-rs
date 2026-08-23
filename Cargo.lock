@@ -9863,6 +9863,7 @@ dependencies = [
 name = "spider_mcp"
 version = "2.53.4"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "dashmap",
  "env_logger",

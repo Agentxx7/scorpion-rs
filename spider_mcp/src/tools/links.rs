@@ -1,7 +1,6 @@
 use rmcp::schemars;
 use serde::Deserialize;
 use serde_json::json;
-use spider::tokio;
 use spider::website::Website;
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -58,22 +57,7 @@ pub async fn run(params: LinksParams) -> Result<String, String> {
 
     // Captured so a Tor preflight rejection surfaces as a specific error
     // rather than the generic "No response" message below (Section H/N).
-    let crawl_task = tokio::spawn(async move {
-        #[cfg(feature = "chrome")]
-        {
-            if use_headless {
-                website.crawl().await;
-            } else {
-                website.crawl_raw().await;
-            }
-        }
-        #[cfg(not(feature = "chrome"))]
-        {
-            let _ = use_headless;
-            website.crawl().await;
-        }
-        website.last_transport_error().cloned()
-    });
+    let crawl_task = super::spawn_crawl_task(website, use_headless);
 
     if let Ok(page) = rx.recv().await {
         let response_observed = page.observed_status_code.is_some();

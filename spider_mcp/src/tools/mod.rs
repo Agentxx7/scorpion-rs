@@ -45,6 +45,48 @@ pub(crate) async fn fetch_document(
     .map(spider::utils::evidence::TransportAcquisition::into_page)
 }
 
+/// Spawn the future that drives one `Website`'s crawl/scrape acquisition.
+/// `use_headless` may route into real Chrome/CDP execution, whose call
+/// chain has empirically overflowed the default tokio worker-thread stack
+/// (confirmed live: a real `spider_scrape`/`spider_crawl` call with
+/// `headless: true` hangs indefinitely at that default, and completes
+/// normally once the process's minimum thread stack is raised) — route
+/// that case through `spider::features::chrome::spawn_chrome_capable`,
+/// which runs it on a dedicated, adequately-stacked thread instead, while
+/// returning a real `tokio::task::JoinHandle` so every existing caller's
+/// `.await`/`.abort_handle()`/panic-propagation contract (already relied
+/// on by crawl.rs/scrape.rs/links.rs's transport-error handling) is
+/// unchanged. Ordinary HTTP-only crawls (`use_headless == false`, or any
+/// build without the `chrome` feature) keep using plain `tokio::spawn`,
+/// unaffected — this exists to pay the dedicated-thread cost only when
+/// Chrome is actually involved.
+pub(crate) fn spawn_crawl_task(
+    mut website: Website,
+    use_headless: bool,
+) -> tokio::task::JoinHandle<Option<spider::features::transport::TransportError>> {
+    let body = async move {
+        #[cfg(feature = "chrome")]
+        {
+            if use_headless {
+                website.crawl().await;
+            } else {
+                website.crawl_raw().await;
+            }
+        }
+        #[cfg(not(feature = "chrome"))]
+        {
+            let _ = use_headless;
+            website.crawl().await;
+        }
+        website.last_transport_error().cloned()
+    };
+    #[cfg(feature = "chrome")]
+    if use_headless {
+        return spider::features::chrome::spawn_chrome_capable(body);
+    }
+    tokio::spawn(body)
+}
+
 /// Apply common wait-for options to a Website builder.
 pub fn apply_wait_options(
     website: &mut Website,

@@ -36,6 +36,11 @@ features = ["tokio_io_std", "sync", "serde", "cookies", "evidence"]
 [dependencies.spider_transformations]
 version = "2"
 
+[dev-dependencies]
+# Real base64 decoding for tests that must prove a screenshot response is
+# genuine PNG bytes (magic-byte check), not merely a non-empty string.
+base64 = "0.22"
+
 [lib]
 name = "spider_mcp"
 path = "src/lib.rs"

@@ -224,6 +224,32 @@ async fn crawl_with_mode(website: &mut Website, headless: bool) {
     }
 }
 
+/// Spawn the future that drives one crawl/scrape/download's acquisition
+/// (`crawl_with_mode`, then reports transport status). `headless` may
+/// route into real Chrome/CDP execution, whose call chain has empirically
+/// overflowed the default tokio worker-thread stack — route that case
+/// through `spider::features::chrome::spawn_chrome_capable`, which runs it
+/// on a dedicated, adequately-stacked thread instead, while returning a
+/// real `tokio::task::JoinHandle` so every existing caller's `.await`/
+/// `.abort_handle()`/panic-propagation contract is unchanged. Ordinary
+/// HTTP-only crawls (`headless == false`, or any build without the
+/// `chrome` feature) keep using plain `tokio::spawn`, unaffected.
+fn spawn_crawl_task(
+    mut website: Website,
+    headless: bool,
+) -> tokio::task::JoinHandle<Option<spider::features::transport::TransportError>> {
+    let body = async move {
+        crawl_with_mode(&mut website, headless).await;
+        log_website_status(&website);
+        website.last_transport_error().cloned()
+    };
+    #[cfg(feature = "chrome")]
+    if headless {
+        return spider::features::chrome::spawn_chrome_capable(body);
+    }
+    tokio::spawn(body)
+}
+
 /// Print a discovery/fetch/search command's JSON result to stdout and return, or
 /// print a retrieval/config error to stderr and exit non-zero. A parser
 /// failure is never a process failure here — it is represented inside the
@@ -799,11 +825,7 @@ async fn main() {
                     // with empty output (Section H) — always awaited below,
                     // regardless of --output-links, so the crawl always
                     // actually completes before the process exits.
-                    let crawl_task = tokio::spawn(async move {
-                        crawl_with_mode(&mut website, use_headless).await;
-                        log_website_status(&website);
-                        website.last_transport_error().cloned()
-                    });
+                    let crawl_task = spawn_crawl_task(website, use_headless);
 
                     let mut response_observed = false;
                     while let Ok(res) = rx2.recv().await {
@@ -842,11 +864,7 @@ async fn main() {
 
                     let download_path = PathBuf::from(tmp_path);
 
-                    let crawl_task = tokio::spawn(async move {
-                        crawl_with_mode(&mut website, use_headless).await;
-                        log_website_status(&website);
-                        website.last_transport_error().cloned()
-                    });
+                    let crawl_task = spawn_crawl_task(website, use_headless);
 
                     let mut successful_materializations = 0usize;
                     while let Ok(res) = rx2.recv().await {
@@ -928,11 +946,7 @@ async fn main() {
                         ..Default::default()
                     };
 
-                    let crawl_task = tokio::spawn(async move {
-                        crawl_with_mode(&mut website, use_headless).await;
-                        log_website_status(&website);
-                        website.last_transport_error().cloned()
-                    });
+                    let crawl_task = spawn_crawl_task(website, use_headless);
 
                     while let Ok(res) = rx2.recv().await {
                         response_observed |= res.observed_status_code.is_some();

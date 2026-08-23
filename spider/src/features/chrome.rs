@@ -30,6 +30,71 @@ lazy_static! {
     static ref LOOP_BACK_PROXY: bool = std::env::var("LOOP_BACK_PROXY").unwrap_or_default() == "true";
 }
 
+/// Stack size reserved for a dedicated Chrome-execution worker thread (see
+/// [`spawn_chrome_capable`]). The default ~2MiB tokio worker-thread stack
+/// reproducibly overflows on this crate's real Chrome/CDP call chain
+/// (confirmed live: `scorpion --headless scrape`/`spider_mcp`'s
+/// `headless: true` abort or hang at that default, and succeed once the
+/// process's minimum thread stack is raised). An empirical check against a
+/// single minimal page found 8 MiB already sufficient, but this repo's
+/// existing CI mitigation (`RUST_MIN_STACK=67108864`) has been proven safe
+/// across its full, more demanding Chrome test suite (multi-page crawls,
+/// OOPIF/site-per-process fixtures, concurrent chrome_remote_cache
+/// coverage) — kept here as that same already-proven value rather than
+/// cutting the margin close to the minimum observed for one simple page.
+const CHROME_EXECUTION_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+/// Run a future that may drive real Chrome/CDP execution on a dedicated OS
+/// thread with [`CHROME_EXECUTION_STACK_SIZE`] reserved, instead of an
+/// ordinary Tokio worker thread's default stack. The dedicated thread runs
+/// its own lightweight current-thread Tokio runtime for `future` and
+/// bridges the result back through a real [`JoinHandle`], so every
+/// existing caller's `.await`, `.abort_handle()`, and panic-propagation
+/// semantics stay identical to a plain `tokio::spawn` — a panic inside
+/// `future`, or a failure to spawn the dedicated thread at all, surfaces
+/// to the caller as a normal `JoinError` (`.is_panic()`), exactly as an
+/// ordinary `tokio::spawn`ed panic already does, rather than as a silent
+/// hang or a fabricated success.
+///
+/// Only call this for the Chrome-executing branch of a request. Ordinary
+/// HTTP-only work should keep using `tokio::spawn` directly — it has never
+/// exhibited this stack requirement, and routing it through a dedicated
+/// 64 MiB-stack OS thread per request would be paying this cost for
+/// callers who never need it.
+#[cfg(feature = "sync")]
+pub fn spawn_chrome_capable<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(async move {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("spider-chrome-worker".to_string())
+            .stack_size(CHROME_EXECUTION_STACK_SIZE)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build dedicated chrome-execution runtime");
+                let output = runtime.block_on(future);
+                // Only fails if the awaiting side already dropped `rx`
+                // (e.g. the outer task itself was aborted) — nothing left
+                // to deliver `output` to in that case, not an error here.
+                let _ = tx.send(output);
+            })
+            .unwrap_or_else(|error| {
+                panic!("failed to spawn dedicated chrome-execution thread: {error}")
+            });
+        rx.await.unwrap_or_else(|_| {
+            panic!(
+                "dedicated chrome-execution thread terminated without producing a result \
+                 (its future panicked before completing)"
+            )
+        })
+    })
+}
+
 #[cfg(feature = "cookies")]
 /// Parse a cookie into a jar. This does nothing without the 'cookies' flag.
 pub fn parse_cookies_with_jar(
@@ -2163,6 +2228,72 @@ impl Drop for TabCloseGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SCORPION_HEADLESS_CHROME_PRODUCTION_STACK_SIZE_001.
+    #[tokio::test]
+    async fn spawn_chrome_capable_returns_the_futures_output() {
+        let handle = spawn_chrome_capable(async { 1_u32 + 41 });
+        assert_eq!(handle.await.unwrap(), 42);
+    }
+
+    /// The future genuinely runs on the dedicated worker thread this
+    /// function spawns, not on the calling task's own (default-sized)
+    /// Tokio worker thread — proves the enlarged stack the returned value
+    /// implicitly depends on is the one actually in effect.
+    #[tokio::test]
+    async fn spawn_chrome_capable_runs_on_its_own_named_worker_thread() {
+        let calling_thread = std::thread::current().id();
+        let handle = spawn_chrome_capable(async move {
+            (
+                std::thread::current().id(),
+                std::thread::current().name().map(str::to_string),
+            )
+        });
+        let (worker_thread, worker_name) = handle.await.unwrap();
+        assert_ne!(worker_thread, calling_thread);
+        assert_eq!(worker_name.as_deref(), Some("spider-chrome-worker"));
+    }
+
+    /// A future that needs materially more than an ordinary Tokio worker
+    /// thread's default stack (empirically a few MiB, matching the real
+    /// Chrome/CDP call chain this function exists for) still completes
+    /// correctly — not merely "some future ran", but one whose own
+    /// recursion depth would be a plausible stack-overflow candidate on
+    /// the default stack this function is meant to route around.
+    #[tokio::test]
+    async fn spawn_chrome_capable_tolerates_a_deep_stack_workload() {
+        fn consume_stack(depth: u32) -> u64 {
+            // ~64 KiB per frame; depth 96 is ~6 MiB of live stack at the
+            // deepest call, comfortably inside CHROME_EXECUTION_STACK_SIZE
+            // (64 MiB) but well past a Tokio worker's ordinary default.
+            let buffer = [1_u8; 65_536];
+            let local: u64 = buffer.iter().map(|&b| b as u64).sum();
+            if depth == 0 {
+                local
+            } else {
+                local + consume_stack(depth - 1)
+            }
+        }
+        let handle = spawn_chrome_capable(async { consume_stack(96) });
+        let total = handle.await.unwrap();
+        assert_eq!(total, 65_536 * 97);
+    }
+
+    /// Required failure-propagation proof: a panic inside the future must
+    /// surface to the caller as a normal `JoinError` (`.is_panic()`),
+    /// exactly like an ordinary `tokio::spawn`ed panic — never a silent
+    /// hang, and never a fabricated success value.
+    #[tokio::test]
+    async fn spawn_chrome_capable_propagates_a_panic_as_a_join_error() {
+        let handle = spawn_chrome_capable(async {
+            panic!(
+                "intentional failure for spawn_chrome_capable_propagates_a_panic_as_a_join_error"
+            );
+        });
+        let result = handle.await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_panic());
+    }
 
     #[test]
     fn test_handler_config_max_redirects_defaults_to_none() {

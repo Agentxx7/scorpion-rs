@@ -332,22 +332,7 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
     // Captured so a Tor preflight rejection surfaces as a specific error
     // instead of the generic "No content returned" message below
     // (Section H/N).
-    let crawl_task = tokio::spawn(async move {
-        #[cfg(feature = "chrome")]
-        {
-            if use_headless {
-                website.crawl().await;
-            } else {
-                website.crawl_raw().await;
-            }
-        }
-        #[cfg(not(feature = "chrome"))]
-        {
-            let _ = use_headless;
-            website.crawl().await;
-        }
-        website.last_transport_error().cloned()
-    });
+    let crawl_task = super::spawn_crawl_task(website, use_headless);
 
     let mut results = Vec::new();
 

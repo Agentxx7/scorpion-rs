@@ -5627,7 +5627,7 @@ impl Page {
             }
         }
 
-        let page_resource = if seeded_resource.is_some() {
+        let mut page_resource = if seeded_resource.is_some() {
             // Seeded path skips the hedge: the chrome page is loaded
             // from caller-provided bytes via `setDocumentContent`, no
             // DNS resolution happens. Adding a DNS hedge here would
@@ -5725,6 +5725,29 @@ impl Page {
                 fetch_fut.await
             }
         };
+        // Passive, provider-neutral challenge detection + routing
+        // (SCORPION_CANONICAL_CAPTCHA_CHALLENGE_DETECTION_BINDING_001,
+        // SCORPION_CANONICAL_CAPTCHA_PROVIDER_ROUTING_BINDING_001) already
+        // ran — inside `fetch_page_html_chrome_base_inner`, before that
+        // function's own unconditional page-close — while `page` (the live
+        // `chromiumoxide::Page` that was just navigated) was still
+        // guaranteed usable. Captured here, before `page_resource` moves
+        // into `build()` below.
+        //
+        // MUST NOT be re-run here: by this point `fetch_page_html`'s own
+        // cleanup has already closed the page (unless `chrome_store_page`
+        // is compiled in) — this is a hard-earned lesson from
+        // `SCORPION_BROWSER_CHALLENGE_REAL_CRAWL_SESSION_LIFETIME_001`'s
+        // real-Chrome audit: calling `detect_browser_challenge`/`.route()`
+        // here, after the close, deterministically failed every real
+        // `Website::crawl()` with a CDP session/channel error — never a
+        // false `NoChallenge`, but never a real detection either, and the
+        // canonical router was never actually reachable from a real crawl.
+        // `None` here means detection was never attempted (e.g. the
+        // reactive-NXDOMAIN shortcircuit above, which returns before any
+        // real navigation happened) — never inferred from any other field.
+        let browser_challenge_observation = page_resource.browser_challenge_observation.take();
+
         let mut p = build(url, page_resource);
 
         // store the chrome page to perform actions like screenshots etc.
@@ -5743,50 +5766,7 @@ impl Page {
         )
         .await;
 
-        // Passive, provider-neutral challenge detection
-        // (SCORPION_CANONICAL_CAPTCHA_CHALLENGE_DETECTION_BINDING_001). This
-        // is the single canonical binding point: `new_base` is the shared
-        // constructor every chrome-backed `Page` (via `Page::new`,
-        // `Page::new_streaming`, and every real navigation call site in
-        // `website.rs`) already funnels through, so wiring it here — once —
-        // covers every real Chrome caller without duplicating the call in
-        // CLI, MCP, or any individual navigation site. `page` (the live
-        // `chromiumoxide::Page`) is still the exact tab that was just
-        // navigated; detection never mutates it and never fails page
-        // construction — a typed detection failure is recorded on `p`, not
-        // propagated. Skipped only on the reactive-NXDOMAIN shortcircuit
-        // above, which returns before any real navigation happened — there
-        // is no live page to inspect there, so leaving that return's
-        // `detected_browser_challenge` as `None` is correct, not an
-        // oversight.
-        // Provider routing (SCORPION_CANONICAL_CAPTCHA_PROVIDER_ROUTING_BINDING_001):
-        // runs only when a challenge was actually detected in the top-level
-        // document — no registry, no provider construction, no credential
-        // lookup for an ordinary page or a framed-only detection. `route`
-        // itself further short-circuits to `NotConfigured` before touching
-        // any provider type when `params.captcha_provider` is `None`,
-        // keeping the zero-provider-cost default true all the way through.
-        // Still stops after the canonical outcome: no click/type/submit is
-        // ever dispatched from this seam.
-        p.detected_browser_challenge = Some(
-            match crate::features::browser_challenge_detection::detect_browser_challenge(page).await
-            {
-                Ok(Some(detected)) => {
-                    let route_outcome = detected
-                        .route(
-                            page,
-                            *params.captcha_provider,
-                            params
-                                .request_timeout
-                                .unwrap_or(std::time::Duration::from_secs(20)),
-                        )
-                        .await;
-                    detected.into_observation(route_outcome)
-                }
-                Ok(None) => crate::features::captcha::BrowserChallengeObservation::NoChallenge,
-                Err(_) => crate::features::captcha::BrowserChallengeObservation::DetectionFailed,
-            },
-        );
+        p.detected_browser_challenge = browser_challenge_observation;
 
         p
     }

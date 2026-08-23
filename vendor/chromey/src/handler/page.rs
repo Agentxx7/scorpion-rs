@@ -116,7 +116,7 @@ impl PageHandle {
         let (commands, rx) = channel(capacity.max(1));
         let page = PageInner {
             target_id,
-            session_id,
+            session_id: std::sync::RwLock::new(session_id),
             opener_id,
             sender: PageSender::new(commands, page_wake),
             smart_mouse: SmartMouse::new(),
@@ -138,8 +138,19 @@ impl PageHandle {
 pub(crate) struct PageInner {
     /// The page target ID.
     target_id: TargetId,
-    /// The session ID.
-    session_id: SessionId,
+    /// The currently attached session ID for `target_id`.
+    ///
+    /// A cross-process navigation (the common shape: a tab created at
+    /// `about:blank` then navigated to a real origin under site isolation)
+    /// can make Chromium detach the session captured at page-handle
+    /// creation and auto-attach a brand new one to the *same* target —
+    /// `Target::set_session_id` observes that live and propagates the
+    /// fresh id here (see its doc comment). Every command path below reads
+    /// through `Self::session_id()` rather than a field access so a stale
+    /// id is never sent after such a re-attach; every other command
+    /// previously failed closed with CDP `-32001 "Session with given id
+    /// not found"` once this drifted.
+    session_id: std::sync::RwLock<SessionId>,
     /// The opener ID.
     opener_id: Option<TargetId>,
     /// The sender for the target (with optional handler notification).
@@ -162,7 +173,7 @@ impl PageInner {
         execute(
             cmd,
             self.sender.clone(),
-            Some(self.session_id.clone()),
+            Some(self.session_id()),
             self.request_timeout,
         )
         .await
@@ -173,7 +184,7 @@ impl PageInner {
         let _ = send_command(
             cmd,
             self.sender.clone(),
-            Some(self.session_id.clone()),
+            Some(self.session_id()),
             self.request_timeout,
         )
         .await;
@@ -185,7 +196,7 @@ impl PageInner {
         CommandFuture::new(
             cmd,
             self.sender.clone(),
-            Some(self.session_id.clone()),
+            Some(self.session_id()),
             self.request_timeout,
         )
     }
@@ -245,9 +256,25 @@ impl PageInner {
         &self.target_id
     }
 
-    /// The identifier of this page's target's session
-    pub fn session_id(&self) -> &SessionId {
-        &self.session_id
+    /// The currently attached session id for this page's target. Always
+    /// the freshest value `Target::set_session_id` observed — see the
+    /// field's own doc comment for why this can change after creation.
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace the currently attached session id — called only by
+    /// `Target::set_session_id` when Chromium re-attaches a new session to
+    /// this page's already-created target (see that method's doc comment).
+    pub(crate) fn set_session_id(&self, id: SessionId) {
+        let mut guard = self
+            .session_id
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = id;
     }
 
     /// The identifier of this page's target's opener target

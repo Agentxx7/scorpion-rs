@@ -278,7 +278,21 @@ impl Target {
     }
 
     /// Set the session id.
+    ///
+    /// A target can be re-attached to a brand new session after this
+    /// target's `PageHandle` already exists — most commonly a cross-process
+    /// navigation (e.g. a tab created at `about:blank` then navigated to a
+    /// real origin under site isolation), which makes Chromium detach the
+    /// old session and auto-attach a new one to the *same* target. Without
+    /// this propagation, `self.page`'s already-created `PageInner` would
+    /// keep sending commands under the old, now-detached session id and
+    /// every one would fail closed with CDP `-32001 "Session with given id
+    /// not found"` — reproduced live via
+    /// `SCORPION_BROWSER_CHALLENGE_REAL_CRAWL_SESSION_LIFETIME_001`.
     pub fn set_session_id(&mut self, id: SessionId) {
+        if let Some(page) = &self.page {
+            page.inner().set_session_id(id.clone());
+        }
         self.session_id = Some(id)
     }
 

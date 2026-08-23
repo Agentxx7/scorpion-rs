@@ -153,7 +153,7 @@ impl AttachedTargetSession {
             AttachedSessionError::CommandRoutingFailed(CdpError::msg(error.to_string()))
         })?;
         match state {
-            AttachedSessionState::Attached(page) if page.session_id() == &self.session_id => Ok(()),
+            AttachedSessionState::Attached(page) if page.session_id() == self.session_id => Ok(()),
             AttachedSessionState::Attached(_) => Err(AttachedSessionError::SessionReplaced),
             AttachedSessionState::NotAttached => Err(AttachedSessionError::SessionDetached),
             AttachedSessionState::TargetDestroyed => Err(AttachedSessionError::TargetDestroyed),
@@ -796,7 +796,7 @@ impl Browser {
         })?;
         match state {
             AttachedSessionState::Attached(page) => Ok(AttachedTargetSession {
-                session_id: page.session_id().clone(),
+                session_id: page.session_id(),
                 target_id,
                 sender: self.sender.clone(),
             }),

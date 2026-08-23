@@ -5743,6 +5743,66 @@ fn cli_and_mcp_captcha_observability_is_read_only() {
 }
 
 // ---------------------------------------------------------------------------
+// SCORPION_BROWSER_CHALLENGE_REAL_CRAWL_SESSION_LIFETIME_001
+// ---------------------------------------------------------------------------
+
+/// Challenge detection (and, downstream, provider routing) must execute
+/// inside `fetch_page_html_chrome_base_inner` — the canonical live-browser
+/// observation phase, guaranteed to run before that same function's own
+/// unconditional page-close — never inside `Page::new_base` after
+/// `fetch_page_html` has already returned. A real-Chrome audit proved the
+/// page is reliably already closed by that later point, so detection
+/// deterministically failed with a CDP session/channel error on every real
+/// `Website::crawl()`, never through the isolated unit/integration tests
+/// that construct their own live page and never route the result through
+/// `fetch_page_html` at all.
+#[test]
+fn browser_challenge_detection_runs_inside_the_live_fetch_not_after_it() {
+    let utils_source = read_src_file("utils/mod.rs");
+    let detect_pos = utils_source
+        .find("crate::features::browser_challenge_detection::detect_browser_challenge(page)")
+        .expect("fetch_page_html_chrome_base_inner must call detect_browser_challenge directly");
+    let close_pos = utils_source
+        .find("chromiumoxide::cdp::browser_protocol::page::CloseParams::default()")
+        .expect("fetch_page_html_chrome_base_inner must still close the page when not storing it");
+    assert!(
+        detect_pos < close_pos,
+        "challenge detection must run BEFORE the page close, while the \
+         live Chrome page is still guaranteed usable — reordering this \
+         reintroduces the real-crawl session/channel failure this \
+         frontier fixed"
+    );
+
+    // `Page::new_base` (page.rs) must never call `detect_browser_challenge`
+    // itself — it only ever reads the value `fetch_page_html` already
+    // computed. Re-running detection there would use the same
+    // already-closed page and silently reintroduce the bug.
+    let page_source = read_src_file("page.rs");
+    assert!(
+        !page_source.contains("detect_browser_challenge("),
+        "page.rs must not call detect_browser_challenge directly — static \
+         Page construction only ever consumes the pre-computed \
+         PageResponse::browser_challenge_observation, never re-derives it \
+         from a possibly-dead browser session"
+    );
+}
+
+/// `PageResponse::browser_challenge_observation` is the sole carrier of the
+/// pre-computed result from the live-browser phase into `Page`
+/// construction — `Page::new_base` must read exactly this field (a plain
+/// move/take, not a fresh CDP call) to populate
+/// `Page::detected_browser_challenge`.
+#[test]
+fn page_construction_consumes_precomputed_observation_only() {
+    let page_source = read_src_file("page.rs");
+    assert!(
+        page_source.contains("page_resource.browser_challenge_observation.take()"),
+        "Page::new_base must take the pre-computed observation out of the \
+         PageResponse fetch_page_html already produced"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // SCORPION_PALIGEMMA_LOCAL_VL_PRODUCTION_RUNTIME_REALITY_001
 // ---------------------------------------------------------------------------
 

@@ -748,6 +748,15 @@ pub struct PageResponse {
     /// instead of serialized HTML. Downstream consumers can skip local
     /// HTML→Markdown conversion when set.
     pub content_is_markdown: bool,
+    /// Result of one passive browser-challenge detection/routing pass,
+    /// computed while the Chrome page was still guaranteed live — see
+    /// `fetch_page_html_chrome_base_inner`'s own doc comment on why this
+    /// cannot be deferred to `Page::new_base`. `None` for every non-chrome
+    /// response and for the seeded/cached-skip-browser paths that never
+    /// held a live page to inspect (never inferred from any other field).
+    #[cfg(feature = "chrome")]
+    pub browser_challenge_observation:
+        Option<crate::features::captcha::BrowserChallengeObservation>,
 }
 
 /// Current Unix epoch time in milliseconds, when the wall clock and the
@@ -5884,6 +5893,40 @@ async fn fetch_page_html_chrome_base_inner<'h>(
         }
     }
 
+    // Passive, provider-neutral challenge detection
+    // (SCORPION_BROWSER_CHALLENGE_REAL_CRAWL_SESSION_LIFETIME_001). This
+    // MUST run here, before this function's own unconditional page-close
+    // below (`chrome_store_page` off — the shipping default) — `page` is
+    // still guaranteed live at this exact point, having just been used for
+    // this same extraction. `Page::new_base`, the caller, receives only
+    // the plain `Result<PageResponse, _>` this function returns; by the
+    // time it got to call CDP itself the close below (or the browser's
+    // own post-navigation target teardown observed live via this
+    // frontier's audit) already made the page unusable, and every
+    // detection attempt failed closed with a CDP session/channel error —
+    // never a false `NoChallenge`, but never a real detection either. See
+    // `crate::features::browser_challenge_detection`'s own module docs for
+    // the detection contract this preserves unchanged; only the timing of
+    // *when* it runs changed. Never mutates the browser: detection itself
+    // performs no click/type/submit, and this crate's own router
+    // (`route_detected_browser_challenge`, invoked from `.route()` below)
+    // never dispatches browser action either.
+    let browser_challenge_observation =
+        match crate::features::browser_challenge_detection::detect_browser_challenge(page).await {
+            Ok(Some(detected)) => {
+                let route_outcome = detected
+                    .route(
+                        page,
+                        *params.captcha_provider,
+                        request_timeout.unwrap_or(Duration::from_secs(20)),
+                    )
+                    .await;
+                Some(detected.into_observation(route_outcome))
+            }
+            Ok(None) => Some(crate::features::captcha::BrowserChallengeObservation::NoChallenge),
+            Err(_) => Some(crate::features::captcha::BrowserChallengeObservation::DetectionFailed),
+        };
+
     if cfg!(not(feature = "chrome_store_page")) {
         let _ = page
             .send_command(chromiumoxide::cdp::browser_protocol::page::CloseParams::default())
@@ -6054,6 +6097,8 @@ async fn fetch_page_html_chrome_base_inner<'h>(
     page_response.anti_bot_tech = anti_bot_tech;
 
     set_page_response_duration(&mut page_response, duration);
+
+    page_response.browser_challenge_observation = browser_challenge_observation;
 
     Ok(page_response)
 }

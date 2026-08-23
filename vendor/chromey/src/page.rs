@@ -1077,8 +1077,12 @@ impl Page {
         self.inner.target_id()
     }
 
-    /// The identifier of the `Session` target of this page is attached to
-    pub fn session_id(&self) -> &SessionId {
+    /// The identifier of the `Session` target of this page is currently
+    /// attached to. Always the freshest known id — Chromium can re-attach a
+    /// new session to the same target after this page was created (e.g. a
+    /// cross-process navigation), and that is reflected here rather than
+    /// the id captured at construction time.
+    pub fn session_id(&self) -> SessionId {
         self.inner.session_id()
     }
 

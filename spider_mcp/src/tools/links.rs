@@ -76,6 +76,7 @@ pub async fn run(params: LinksParams) -> Result<String, String> {
     });
 
     if let Ok(page) = rx.recv().await {
+        let response_observed = page.observed_status_code.is_some();
         let links: Vec<String> = page
             .page_links
             .as_ref()
@@ -83,12 +84,17 @@ pub async fn run(params: LinksParams) -> Result<String, String> {
             .unwrap_or_default();
         let count = links.len();
 
-        serde_json::to_string_pretty(&json!({
+        let diagnostic = serde_json::to_string_pretty(&json!({
             "url": page.get_url(),
             "links": links,
             "count": count,
         }))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        if response_observed {
+            Ok(diagnostic)
+        } else {
+            Err(diagnostic)
+        }
     } else if let Ok(Some(transport_error)) = crawl_task.await {
         Err(transport_error.to_string())
     } else {
@@ -180,5 +186,45 @@ mod tests {
         assert_eq!(http.hit_count(), 1);
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(value["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn observed_page_with_zero_links_remains_successful() {
+        let http = crate::test_support::HttpFixture::start("<html><body>No links</body></html>");
+        let url = format!("http://{}/", http.addr);
+
+        let output = run(LinksParams {
+            url,
+            headless: Some(false),
+            subdomains: None,
+            transport: None,
+        })
+        .await
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["count"], 0);
+        assert_eq!(value["links"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn external_domain_filtering_remains_unchanged() {
+        let http = crate::test_support::HttpFixture::start(
+            r#"<html><body><a href="/same">same</a><a href="https://example.invalid/external">external</a></body></html>"#,
+        );
+        let url = format!("http://{}/", http.addr);
+
+        let output = run(LinksParams {
+            url: url.clone(),
+            headless: Some(false),
+            subdomains: None,
+            transport: None,
+        })
+        .await
+        .unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["links"], json!([format!("{url}same")]));
     }
 }

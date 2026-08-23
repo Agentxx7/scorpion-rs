@@ -17,25 +17,23 @@
 // GPT-4o                 top-tier      15.04       2681        294       2975   0.009643     100%        ✓
 // Claude 3.5 Sonnet      top-tier      12.86       2439        284       2723   0.011577     100%        ✓
 // Gemini 2.0 Flash       top-tier       6.21       3606        427       4033   0.000531     100%        ✓
-// Qwen2-VL 72B           top-tier      11.16       2578        312       2890   0.001156     100%        ✓
 // Gemini 2.0 Flash Lite  budget         5.95       3606        419       4025   0.000396     100%        ✓
 // Gemini 1.5 Flash       budget         2.53          0          0          0   0.000000       0%        ✗
 //     └─ Error: Page fetched (9308B) but no AI data
-// Qwen2-VL 7B            budget        22.28       2907        315       3222   0.000322     100%        ✓
 // Pixtral 12B            budget         7.08       3838        511       4349   0.000435     100%        ✓
 // ----------------------------------------------------------------------------------------------------------------------------------
 
 // SUMMARY (successful runs only):
 //   🏆 Fastest: Gemini 2.0 Flash Lite (5.95s)
-//   💰 Cheapest: Qwen2-VL 7B ($0.000322)
+//   💰 Cheapest: Gemini 2.0 Flash Lite ($0.000396)
 //   ⚡ Highest throughput: Pixtral 12B (72.2 tokens/s)
-//   🎯 Best value: Qwen2-VL 7B (100% quality, $0.000322)
+//   🎯 Best value: Gemini 2.0 Flash Lite (100% quality, $0.000396)
 //   🌟 Highest quality: Pixtral 12B (100%)
 
 // TIER COMPARISON:
-//   Top-tier avg: 11.31s, $0.005727, 100% quality
-//   Budget avg:   11.77s, $0.000384, 100% quality
-//   Budget is 14.9x cheaper on average
+//   Top-tier avg: 11.37s, $0.007250, 100% quality
+//   Budget avg:   6.52s, $0.000416, 100% quality
+//   Budget is 17.4x cheaper on average
 
 // ========================================================================================================================
 
@@ -138,13 +136,6 @@ fn get_models() -> Vec<ModelConfig> {
             input_cost_per_m: 0.10,
             output_cost_per_m: 0.40,
         },
-        ModelConfig {
-            name: "Qwen2-VL 72B",
-            model_id: "qwen/qwen-2-vl-72b-instruct",
-            tier: "top-tier",
-            input_cost_per_m: 0.40,
-            output_cost_per_m: 0.40,
-        },
         // Budget models (fast and cheap)
         ModelConfig {
             name: "Gemini 2.0 Flash Lite",
@@ -152,13 +143,6 @@ fn get_models() -> Vec<ModelConfig> {
             tier: "budget",
             input_cost_per_m: 0.075,
             output_cost_per_m: 0.30,
-        },
-        ModelConfig {
-            name: "Qwen2-VL 7B",
-            model_id: "qwen/qwen-2-vl-7b-instruct",
-            tier: "budget",
-            input_cost_per_m: 0.10,
-            output_cost_per_m: 0.10,
         },
         ModelConfig {
             name: "Pixtral 12B",

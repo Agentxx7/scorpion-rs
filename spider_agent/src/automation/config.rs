@@ -42,7 +42,7 @@ fn default_chrome_ai_max_user_chars() -> usize {
 ///
 /// let mm = RemoteMultimodalConfigs::new(
 ///     "https://openrouter.ai/api/v1/chat/completions",
-///     "qwen/qwen-2-vl-72b-instruct",
+///     "mistralai/pixtral-12b",
 /// )
 /// .with_api_key("sk-or-...")
 /// .with_concurrency_limit(5);
@@ -218,7 +218,7 @@ impl RemoteMultimodalConfigs {
     ///
     /// let mm = RemoteMultimodalConfigs::new(
     ///     "http://localhost:11434/v1/chat/completions",
-    ///     "qwen2.5-vl",
+    ///     "llava",
     /// );
     /// ```
     pub fn new(api_url: impl Into<String>, model_name: impl Into<String>) -> Self {
@@ -312,7 +312,7 @@ impl RemoteMultimodalConfigs {
     ///
     /// let mm = RemoteMultimodalConfigs::new(
     ///     "http://localhost:11434/v1/chat/completions",
-    ///     "qwen2.5-vl",
+    ///     "llava",
     /// )
     /// .with_proxies(Some(vec!["http://localhost:8080".to_string()]));
     /// ```
@@ -732,16 +732,14 @@ mod tests {
 
     #[test]
     fn test_remote_multimodal_configs_new() {
-        let configs = RemoteMultimodalConfigs::new(
-            "http://localhost:11434/v1/chat/completions",
-            "qwen2.5-vl",
-        );
+        let configs =
+            RemoteMultimodalConfigs::new("http://localhost:11434/v1/chat/completions", "llava");
 
         assert_eq!(
             configs.api_url,
             "http://localhost:11434/v1/chat/completions"
         );
-        assert_eq!(configs.model_name, "qwen2.5-vl");
+        assert_eq!(configs.model_name, "llava");
         assert!(configs.api_key.is_none());
         assert!(configs.system_prompt.is_none());
     }

@@ -52,12 +52,12 @@ async fn main() {
 
     let mm_config = RemoteMultimodalConfigs::new(
         "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen-2.5-vl-72b-instruct",
+        "mistralai/pixtral-12b",
     )
     .with_api_key(&api_key)
     .with_dual_models(
-        ModelEndpoint::new("qwen/qwen-2.5-vl-72b-instruct"), // vision rounds
-        ModelEndpoint::new("qwen/qwen-2.5-72b-instruct"),    // text rounds
+        ModelEndpoint::new("mistralai/pixtral-12b"), // vision rounds
+        ModelEndpoint::new("meta-llama/llama-3.1-8b-instruct"), // text rounds
     )
     .with_vision_route_mode(VisionRouteMode::VisionFirst);
 

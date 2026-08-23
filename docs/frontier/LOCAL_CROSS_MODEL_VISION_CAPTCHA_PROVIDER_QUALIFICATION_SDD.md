@@ -193,20 +193,14 @@ bit-for-bit reference match, determinism, content-dependence),
 `real_provider_registry_runtime_and_strict_outcome` (all three challenge
 kinds through the real registry+solve seam),
 `real_point_selection_precision_matrix` (7/7, threshold cleared) all pass.
-Vendored `candle-transformers-qwen3vl-fix` tests pass (8/8 + doctest).
-Static acceptance suites (`canonical_captcha_solver_capability`,
-`canonical_captcha_provider_routing`, `canonical_captcha_image_grid_input`,
-architecture guardrails 113/113) all pass unchanged. Spider default (0
-failures; the same two pre-existing, diff-independent environmental flakes
-documented in the prior two frontiers reproduced identically) and
-`spider_transport` (36/36) pass. Changed-surface clippy and full-workspace
-rustfmt clean; both diff checks clean.
-
-(This frontier also re-ran the then-still-present local Qwen3-VL runtime's
-own regression suites and confirmed they were unaffected by these edits —
-`gemma.rs`/`paligemma.rs` do not touch `qwen3_vl/`. That runtime and its
-regression suites no longer exist: `SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001`
-removed them entirely, unrelated to anything this frontier qualified.)
+Vendored fork tests pass (8/8 + doctest). Static acceptance suites
+(`canonical_captcha_solver_capability`, `canonical_captcha_provider_routing`,
+`canonical_captcha_image_grid_input`, architecture guardrails 113/113) all
+pass unchanged. Spider default (0 failures; the same two pre-existing,
+diff-independent environmental flakes documented in the prior two
+frontiers reproduced identically) and `spider_transport` (36/36) pass.
+Changed-surface clippy and full-workspace rustfmt clean; both diff checks
+clean.
 
 ## What did not change
 
@@ -214,9 +208,7 @@ Browser/frame architecture, the blocked CAPTCHA browser binding frontier's
 own preserved implementation (`stash@{1}`, untouched), Turnstile (never
 rerun during this frontier's development, per its own explicit
 instruction), provider-selection/fallback policy, and retry/voting/ensemble
-inference are all untouched. (The then-still-present local Qwen3-VL
-runtime/provider code was also untouched by this frontier — see the
-regression-gates note above for its subsequent, unrelated removal.)
+inference are all untouched.
 
 ## Successor
 

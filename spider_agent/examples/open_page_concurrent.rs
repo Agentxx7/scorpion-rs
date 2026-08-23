@@ -278,7 +278,7 @@ fn get_api_config() -> Result<(String, String, String), Box<dyn std::error::Erro
         return Ok((
             url,
             String::new(),
-            std::env::var("MODEL_NAME").unwrap_or_else(|_| "qwen2.5-vl".to_string()),
+            std::env::var("MODEL_NAME").unwrap_or_else(|_| "llava".to_string()),
         ));
     }
 

@@ -46,18 +46,18 @@ async fn main() {
     //
     // let mm_config = RemoteMultimodalConfigs::new(
     //     "https://openrouter.ai/api/v1/chat/completions",
-    //     "qwen/qwen-2.5-vl-72b-instruct",
+    //     "mistralai/pixtral-12b",
     // )
     // .with_api_key(&api_key)
     // .with_dual_models(
-    //     ModelEndpoint::new("qwen/qwen-2.5-vl-72b-instruct"), // vision
-    //     ModelEndpoint::new("qwen/qwen-2.5-72b-instruct"),     // text (cheaper)
+    //     ModelEndpoint::new("mistralai/pixtral-12b"), // vision
+    //     ModelEndpoint::new("meta-llama/llama-3.1-8b-instruct"), // text (cheaper)
     // )
     // .with_vision_route_mode(VisionRouteMode::TextFirst);
 
     // ── Setup 2: Cross-provider, each model has its own URL + key ─────
     //
-    // Vision model → OpenRouter (Qwen VL, vision-capable)
+    // Vision model → OpenRouter (Pixtral, vision-capable)
     // Text model   → OpenRouter (different model, cheaper)
     //
     // Each ModelEndpoint can override api_url and api_key independently.
@@ -65,12 +65,12 @@ async fn main() {
 
     let mm_config = RemoteMultimodalConfigs::new(
         "https://openrouter.ai/api/v1/chat/completions", // default/fallback URL
-        "qwen/qwen-2.5-vl-72b-instruct",                 // default/fallback model
+        "mistralai/pixtral-12b",                         // default/fallback model
     )
     .with_api_key(&api_key)
     .with_vision_model(
         // Vision model: explicit URL + key (or omit to inherit from parent)
-        ModelEndpoint::new("qwen/qwen-2.5-vl-72b-instruct")
+        ModelEndpoint::new("mistralai/pixtral-12b")
             .with_api_url("https://openrouter.ai/api/v1/chat/completions")
             .with_api_key(&api_key),
     )
@@ -79,7 +79,7 @@ async fn main() {
         // Here we use OpenRouter too, but you could use Groq, Together, etc:
         //   .with_api_url("https://api.groq.com/openai/v1/chat/completions")
         //   .with_api_key("gsk-your-groq-key")
-        ModelEndpoint::new("qwen/qwen-2.5-72b-instruct")
+        ModelEndpoint::new("meta-llama/llama-3.1-8b-instruct")
             .with_api_url("https://openrouter.ai/api/v1/chat/completions")
             .with_api_key(&api_key),
     )

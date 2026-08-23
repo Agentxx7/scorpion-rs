@@ -13,7 +13,7 @@ members = [
     # internal
     "examples",
     "benches"]
-exclude = ["vendor/chromey", "vendor/candle-transformers-qwen3vl-fix"]
+exclude = ["vendor/chromey", "vendor/candle-transformers-paligemma-fix"]
 resolver = "2"
 
 [patch.crates-io]
@@ -26,14 +26,10 @@ chromey = { path = "vendor/chromey" }
 # spurious image-embedding L2 normalization and an incorrect text-embedding
 # scale on PaliGemma's multimodal prefill. Root-caused against a pinned
 # transformers/PyTorch reference oracle; see
-# vendor/candle-transformers-qwen3vl-fix/README.md. (This fork previously
-# also carried a Qwen3-VL correctness patch; that patch and the local
-# Qwen3-VL CAPTCHA provider it supported were both removed —
-# SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001 — leaving the fork's
-# directory name the only remaining trace, kept unchanged because renaming
-# it would touch ~200 unrelated unmodified upstream files for no functional
-# benefit.)
-candle-transformers = { path = "vendor/candle-transformers-qwen3vl-fix" }
+# vendor/candle-transformers-paligemma-fix/README.md. Diff is confined to
+# src/models/gemma.rs and src/models/paligemma.rs; no other model or shared
+# utility code is touched.
+candle-transformers = { path = "vendor/candle-transformers-paligemma-fix" }
 
 # Unify the external `spider_transformations` crate onto this workspace's
 # `spider` instead of pulling a second copy from crates.io. This removes a

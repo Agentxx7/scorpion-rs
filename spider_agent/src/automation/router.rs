@@ -1045,7 +1045,7 @@ mod tests {
             "gpt-4o-mini",
             "claude-sonnet-4-5-20250514",
             "gemini-2.0-flash",
-            "qwen2-vl-72b-instruct",
+            "pixtral-12b",
             "llama-3.2-11b-vision-instruct",
         ] {
             assert!(

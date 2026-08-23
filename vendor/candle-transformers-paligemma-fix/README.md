@@ -77,14 +77,6 @@ source). Diff is confined to `src/models/gemma.rs` and
 `src/models/paligemma.rs`; no other model or shared utility code is
 touched. Not published; consumed only via this workspace's root
 `Cargo.toml` `[patch.crates-io]` entry, exactly like `vendor/chromey`
-patches `chromiumoxide`.
-
-This fork previously also carried a `src/models/qwen3_vl/` MRoPE/
-causal-mask correctness patch, used by `spider`'s own (now removed)
-Qwen3-VL CAPTCHA provider. That patch, and the module it patched, were
-deleted when Qwen3-VL was rejected as an architectural direction
-(`SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001`); this fork is kept
-solely for the PaliGemma/Gemma-1 patches above. The directory name and
-crate identity (`candle-transformers`, required for the
-`[patch.crates-io]` mechanism to apply) are otherwise unchanged from
-upstream and are not renamed by that removal.
+patches `chromiumoxide`. The crate identity (`candle-transformers`) is
+unchanged from upstream — required for the `[patch.crates-io]` mechanism
+to apply; only this directory's own name is workspace-local.

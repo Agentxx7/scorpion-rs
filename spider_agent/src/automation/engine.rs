@@ -34,7 +34,7 @@ static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(Client::ne
 ///
 /// let engine = RemoteMultimodalEngine::new(
 ///     "https://openrouter.ai/api/v1/chat/completions",
-///     "qwen/qwen-2-vl-72b-instruct",
+///     "mistralai/pixtral-12b",
 ///     None,
 /// ).with_api_key(Some("your-api-key"));
 ///
@@ -122,7 +122,7 @@ impl RemoteMultimodalEngine {
     ///
     /// # Arguments
     /// * `api_url` - OpenAI-compatible chat completions endpoint URL
-    /// * `model_name` - Model identifier (e.g., "gpt-4o", "qwen/qwen-2-vl-72b-instruct")
+    /// * `model_name` - Model identifier (e.g., "gpt-4o", "mistralai/pixtral-12b")
     /// * `system_prompt` - Optional custom system prompt (defaults to built-in)
     pub fn new<S: Into<String>>(api_url: S, model_name: S, system_prompt: Option<String>) -> Self {
         Self {

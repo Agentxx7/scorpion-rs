@@ -11,7 +11,7 @@
 //! ordinary grammar-constrained greedy-decode pattern applies directly.
 //!
 //! Two genuine `candle-transformers` 0.11.0 defects were found and fixed in
-//! the vendored fork (`vendor/candle-transformers-qwen3vl-fix`) while
+//! the vendored fork (`vendor/candle-transformers-paligemma-fix`) while
 //! qualifying this model — see its README and
 //! `docs/frontier/LOCAL_CROSS_MODEL_VISION_CAPTCHA_PROVIDER_QUALIFICATION_SDD.md`:
 //! a spurious L2-normalization of image embeddings absent from the real
@@ -141,7 +141,7 @@ struct PaligemmaCheckpointProfile {
 impl PaligemmaCheckpointProfile {
     /// The real `candle-transformers` config for this variant's fixed image
     /// envelope. Both already exist in the vendored fork
-    /// (`vendor/candle-transformers-qwen3vl-fix/src/models/paligemma.rs`);
+    /// (`vendor/candle-transformers-paligemma-fix/src/models/paligemma.rs`);
     /// this is Scorpion-side parameter selection only, no new model code.
     fn config(&self) -> Config {
         if self.image_size == PALIGEMMA_448_PROFILE.image_size {

@@ -33,7 +33,7 @@ async fn main() {
 
     let mut mm_config = RemoteMultimodalConfigs::new(
         "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen-2-vl-72b-instruct",
+        "mistralai/pixtral-12b",
     );
     mm_config.api_key = Some(api_key);
     mm_config.cfg.extra_ai_data = true;

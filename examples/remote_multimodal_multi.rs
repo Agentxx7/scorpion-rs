@@ -42,7 +42,7 @@ async fn main() {
     // Configure remote multimodal with OpenRouter
     let mut mm_config = RemoteMultimodalConfigs::new(
         "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen-2-vl-72b-instruct", // OpenRouter model identifier
+        "mistralai/pixtral-12b", // OpenRouter model identifier
     );
 
     // Set the API key

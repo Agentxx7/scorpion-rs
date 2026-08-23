@@ -1564,15 +1564,15 @@ mod tests {
     }
 
     #[test]
-    fn test_supports_vision_qwen() {
-        assert!(supports_vision("qwen2-vl-72b"));
-        assert!(supports_vision("qwen2.5-vl-7b"));
-        assert!(supports_vision("qwen-vl-max"));
-        assert!(supports_vision("qwq-32b"));
+    fn test_supports_vision_deepseek_and_yi() {
+        assert!(supports_vision("deepseek-vl"));
+        assert!(supports_vision("yi-vl-34b"));
+        assert!(supports_vision("phi-3.5-vision"));
 
-        // Non-VL Qwen
-        assert!(!supports_vision("qwen2-72b"));
-        assert!(!supports_vision("qwen2.5-7b"));
+        // Non-VL siblings from the same families
+        assert!(!supports_vision("deepseek-v3"));
+        assert!(!supports_vision("deepseek-chat"));
+        assert!(!supports_vision("yi-34b"));
     }
 
     #[test]
@@ -1601,7 +1601,7 @@ mod tests {
     fn test_supports_vision_case_insensitive() {
         assert!(supports_vision("GPT-4O"));
         assert!(supports_vision("Claude-3-Sonnet"));
-        assert!(supports_vision("QWEN2-VL"));
+        assert!(supports_vision("DEEPSEEK-VL"));
     }
 
     #[test]

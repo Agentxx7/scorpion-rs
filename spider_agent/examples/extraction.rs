@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the engine with OpenRouter
     let mut engine = RemoteMultimodalEngine::new(
         "https://openrouter.ai/api/v1/chat/completions",
-        "qwen/qwen-2-vl-72b-instruct",
+        "mistralai/pixtral-12b",
         None, // Use default system prompt
     )
     .with_api_key(Some(&api_key));

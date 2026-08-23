@@ -2273,6 +2273,46 @@ mod tests {
         assert_eq!(handle.await.unwrap(), 42);
     }
 
+    /// Concurrency-closure audit (section 4, "cancellation/dropped
+    /// caller"): abort the returned `JoinHandle` while the dedicated
+    /// worker thread is still mid-flight, and prove precisely what
+    /// happens. `.abort()` only stops the *outer* wrapper task from
+    /// awaiting the oneshot channel — it has no hook into the dedicated
+    /// `std::thread`'s own `block_on`, so the inner future keeps running
+    /// to its own natural completion regardless. This is the honest,
+    /// verified semantic: a caller giving up on a Chrome-capable future
+    /// does not itself stop the underlying browser work, and any resource
+    /// (e.g. a held semaphore permit, as `spawn_crawl_task` uses this for)
+    /// is held until the worker genuinely finishes, not merely until the
+    /// caller stops waiting.
+    #[tokio::test]
+    async fn spawn_chrome_capable_abort_does_not_stop_the_dedicated_thread_early() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished_in_worker = finished.clone();
+        let handle = spawn_chrome_capable(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            finished_in_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Abort almost immediately - long before the 300ms sleep elapses.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        handle.abort();
+        assert!(
+            !finished.load(std::sync::atomic::Ordering::SeqCst),
+            "worker must not have finished yet at abort time"
+        );
+
+        // The dedicated thread has no cancellation wiring - it keeps
+        // running the real work to completion on its own schedule,
+        // independent of the aborted caller.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            finished.load(std::sync::atomic::Ordering::SeqCst),
+            "the dedicated worker thread must still have run to completion after the \
+             caller's JoinHandle was aborted - proves abort does not kill in-flight work"
+        );
+    }
+
     /// The future genuinely runs on the dedicated worker thread this
     /// function spawns, not on the calling task's own (default-sized)
     /// Tokio worker thread — proves the enlarged stack the returned value

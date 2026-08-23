@@ -400,3 +400,91 @@ fn concurrent_headless_requests_are_bounded_and_none_falls_back_to_http() {
         "{tools:?}"
     );
 }
+
+/// A plain, instant-responding fixture — no artificial delay — for the
+/// HTTP-bypass proof below.
+fn fast_fixture() -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = b"<html><body>fast plain http page</body></html>";
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+    });
+    (url, handle)
+}
+
+/// SCORPION_HEADLESS_CHROME_PRODUCTION_STACK_SIZE_001 (concurrency
+/// closure, HTTP-bypass proof). With all four `CHROME_EXECUTION_PERMITS`
+/// slots saturated by slow headless requests, an ordinary HTTP-only
+/// `spider_scrape` (no `headless`) fired at the same time must still
+/// complete quickly and independently — proving the semaphore genuinely
+/// gates only Chrome-capable dispatch, not general acquisition traffic.
+#[test]
+fn http_only_request_bypasses_chrome_saturation() {
+    let delay = std::time::Duration::from_secs(3);
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    // Saturate all 4 Chrome slots with slow headless requests.
+    let slow_fixtures: Vec<_> = (0..4).map(|_| slow_marker_fixture(delay)).collect();
+    let (fast_url, fast_handle) = fast_fixture();
+
+    let start = std::time::Instant::now();
+    for (i, (url, _)) in slow_fixtures.iter().enumerate() {
+        client.send(&json!({
+            "jsonrpc": "2.0",
+            "id": 300 + i,
+            "method": "tools/call",
+            "params": {
+                "name": "spider_scrape",
+                "arguments": { "url": url, "headless": true, "return_format": "raw" }
+            }
+        }));
+    }
+    // Fired last, after all 4 Chrome slots are already claimed.
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": 999,
+        "method": "tools/call",
+        "params": {
+            "name": "spider_scrape",
+            "arguments": { "url": fast_url }
+        }
+    }));
+
+    let mut http_elapsed = None;
+    for _ in 0..5 {
+        let response = client.response();
+        let id = response["id"].as_u64().unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            response["result"]["isError"], false,
+            "id={id}: {response:?}"
+        );
+        if id == 999 {
+            http_elapsed = Some(elapsed);
+        }
+    }
+
+    for (_, handle) in slow_fixtures {
+        handle.join().unwrap();
+    }
+    fast_handle.join().unwrap();
+
+    let http_elapsed = http_elapsed.expect("the HTTP-only response (id=999) must arrive");
+    assert!(
+        http_elapsed < delay,
+        "an HTTP-only request must complete well before the Chrome-saturating fixtures' \
+         own artificial delay elapses, proving it never queued behind the semaphore: \
+         http_elapsed={http_elapsed:?}, chrome_fixture_delay={delay:?}"
+    );
+}

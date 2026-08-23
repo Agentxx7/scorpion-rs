@@ -293,6 +293,41 @@ fn patch_chrome_ai_args(args: &mut Vec<String>) {
     }
 }
 
+/// A fresh, unique Chrome user-data directory for one browser launch.
+///
+/// Every launch through this crate's canonical `get_browser_config` path
+/// previously left `user_data_dir` unset, so chromiumoxide/Chrome fell
+/// back to one fixed, shared `$TMPDIR/chromiumoxide-runner` path for every
+/// launch in the process. Confirmed live (SCORPION_HEADLESS_CHROME_PRODUCTION_STACK_SIZE_001):
+/// two genuinely concurrent launches against that shared path collide on
+/// Chrome's own `SingletonLock` (`process_singleton_posix.cc`) — this
+/// Chrome build aborts the losing launch outright rather than handing off
+/// to the running instance — and `Website::crawl()`/`crawl_raw()` then
+/// silently (by its own separate, already-existing fallback contract)
+/// downgrades that request to a plain HTTP fetch, with no way for a
+/// `headless: true` caller to know Chrome never actually ran for it. A
+/// unique directory per launch removes the collision entirely; this
+/// function has no opinion on how many launches run concurrently — that
+/// bound belongs to the caller (e.g. `spider_mcp`'s own
+/// `CHROME_EXECUTION_PERMITS`).
+///
+/// Not cleaned up automatically after the browser closes — a disclosed,
+/// separate hygiene gap (each is a small Chrome profile directory; the OS
+/// temp directory is reclaimed on reboot on most platforms), not a
+/// correctness concern this function exists to fix.
+fn unique_chrome_profile_dir() -> std::path::PathBuf {
+    static LAUNCH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let n = LAUNCH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "chromiumoxide-runner-{}-{nanos:x}-{n:x}",
+        std::process::id()
+    ))
+}
+
 /// get chrome configuration
 #[cfg(not(feature = "chrome_headed"))]
 pub fn get_browser_config(
@@ -306,6 +341,7 @@ pub fn get_browser_config(
     let builder = BrowserConfig::builder()
         .disable_default_args()
         .no_sandbox()
+        .user_data_dir(unique_chrome_profile_dir())
         .request_timeout(match request_timeout.as_ref() {
             Some(timeout) => *timeout,
             _ => Duration::from_millis(REQUEST_TIMEOUT),
@@ -385,6 +421,7 @@ pub fn get_browser_config(
     let builder = BrowserConfig::builder()
         .disable_default_args()
         .no_sandbox()
+        .user_data_dir(unique_chrome_profile_dir())
         .request_timeout(match request_timeout.as_ref() {
             Some(timeout) => *timeout,
             _ => Duration::from_millis(REQUEST_TIMEOUT),

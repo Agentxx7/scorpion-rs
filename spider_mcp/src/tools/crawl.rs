@@ -144,7 +144,7 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
     // background (Section N) — and `.abort_handle()` still lets an inline
     // request dropped by the client (or a session evicted) cancel the
     // crawl exactly as before.
-    let crawl_join = super::spawn_crawl_task(website, use_headless);
+    let crawl_join = super::spawn_crawl_task(website, use_headless).await;
     let crawl_abort = crawl_join.abort_handle();
 
     if limit <= INLINE_LIMIT {

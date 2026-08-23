@@ -57,7 +57,7 @@ pub async fn run(params: LinksParams) -> Result<String, String> {
 
     // Captured so a Tor preflight rejection surfaces as a specific error
     // rather than the generic "No response" message below (Section H/N).
-    let crawl_task = super::spawn_crawl_task(website, use_headless);
+    let crawl_task = super::spawn_crawl_task(website, use_headless).await;
 
     if let Ok(page) = rx.recv().await {
         let response_observed = page.observed_status_code.is_some();

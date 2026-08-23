@@ -332,7 +332,7 @@ pub async fn run(params: ScrapeParams) -> Result<String, String> {
     // Captured so a Tor preflight rejection surfaces as a specific error
     // instead of the generic "No content returned" message below
     // (Section H/N).
-    let crawl_task = super::spawn_crawl_task(website, use_headless);
+    let crawl_task = super::spawn_crawl_task(website, use_headless).await;
 
     let mut results = Vec::new();
 

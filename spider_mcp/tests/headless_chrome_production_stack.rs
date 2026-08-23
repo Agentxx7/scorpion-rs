@@ -282,3 +282,121 @@ fn spider_scrape_screenshot_completes_without_rust_min_stack_and_returns_a_real_
         "expected real PNG magic bytes, proving genuine Chrome-rendered image data"
     );
 }
+
+/// Like [`marker_fixture`], but delays its response by `delay` after
+/// accepting the connection — long enough to give several concurrent
+/// requests a real window to genuinely overlap in flight, and to let a
+/// test distinguish "this request ran immediately" from "this request
+/// waited for a Chrome execution permit."
+fn slow_marker_fixture(delay: std::time::Duration) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        std::thread::sleep(delay);
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request);
+        let body = format!(
+            "<html><head><title>chrome marker test</title></head><body>\
+             <div id=\"target\">{PRE_JS_PLACEHOLDER}</div>\
+             <script>document.getElementById('target').textContent = '{RENDERED_MARKER}';</script>\
+             </body></html>"
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    (url, handle)
+}
+
+/// SCORPION_HEADLESS_CHROME_PRODUCTION_STACK_SIZE_001 (concurrency
+/// closure). Real end-to-end proof, through the actual `spider-mcp`
+/// binary and genuine MCP JSON-RPC, that concurrent headless requests are
+/// bounded rather than unbounded: `REQUESTS` (6) simultaneous
+/// `spider_scrape headless:true` calls — more than
+/// `CHROME_EXECUTION_PERMITS`'s bound of 4 — against fixtures that each
+/// delay their response by a fixed window. If concurrency were genuinely
+/// unbounded, all 6 would complete in roughly one fixture delay; bounded
+/// to 4, completion happens in two waves, so the total wall-clock time is
+/// bounded below by two delays.
+///
+/// Every single response — including the ones that had to wait for a
+/// permit — must still show genuine Chrome-rendered content (the
+/// placeholder absent, matching every other test in this file). This is
+/// the critical proof that the fix holds under real contention: a
+/// genuinely queued request waits for a free permit rather than racing
+/// another live Chrome instance for the same profile-directory lock and
+/// silently falling back to HTTP (the exact failure this frontier found
+/// live before `unique_chrome_profile_dir` — two concurrent launches
+/// sharing one profile directory collided on Chrome's own
+/// `SingletonLock`, and the losing launch silently downgraded to a plain,
+/// unrendered HTTP fetch with `isError: false`).
+#[test]
+fn concurrent_headless_requests_are_bounded_and_none_falls_back_to_http() {
+    const REQUESTS: usize = 6;
+    let delay = std::time::Duration::from_millis(800);
+
+    let mut client = McpClient::spawn();
+    client.initialize();
+
+    let fixtures: Vec<_> = (0..REQUESTS).map(|_| slow_marker_fixture(delay)).collect();
+
+    let start = std::time::Instant::now();
+    for (i, (url, _)) in fixtures.iter().enumerate() {
+        client.send(&json!({
+            "jsonrpc": "2.0",
+            "id": 100 + i,
+            "method": "tools/call",
+            "params": {
+                "name": "spider_scrape",
+                "arguments": { "url": url, "headless": true, "return_format": "raw" }
+            }
+        }));
+    }
+
+    for _ in 0..REQUESTS {
+        let response = client.response();
+        let id = response["id"].as_u64().unwrap();
+        assert_eq!(
+            response["result"]["isError"], false,
+            "id={id}: {response:?}"
+        );
+        let payload = content_payload(&response);
+        let content = payload["content"].as_str().unwrap();
+        assert!(
+            !content.contains(PRE_JS_PLACEHOLDER),
+            "id={id}: every response, including queued ones, must show real Chrome \
+             rendering, never a silent HTTP fallback: {content}"
+        );
+        assert!(content.contains(RENDERED_MARKER), "id={id}: {content}");
+    }
+
+    let total = start.elapsed();
+    for (_, handle) in fixtures {
+        handle.join().unwrap();
+    }
+
+    assert!(
+        total >= delay * 2,
+        "6 concurrent requests against a permit bound of 4 must take at least two \
+         fixture delays to all complete - proves real backpressure occurred rather than \
+         unbounded concurrency: total={total:?}, one delay={delay:?}"
+    );
+    assert!(
+        total < delay * 2 + std::time::Duration::from_secs(8),
+        "generous upper bound (real Chrome launch/navigate overhead on top of the \
+         fixture's own delay, times two waves) - catches a genuinely broken \
+         serialize-to-one-at-a-time regression without being tight enough to flake: \
+         total={total:?}"
+    );
+
+    // Server must remain fully responsive after the concurrent burst.
+    let tools = client.list_tools();
+    assert!(
+        !tools["result"]["tools"].as_array().unwrap().is_empty(),
+        "{tools:?}"
+    );
+}

@@ -45,6 +45,37 @@ pub(crate) async fn fetch_document(
     .map(spider::utils::evidence::TransportAcquisition::into_page)
 }
 
+/// Process-wide cap on *concurrently executing* `spawn_chrome_capable`
+/// workers (real Chrome/browser process launches — `spider_scrape`/
+/// `spider_crawl`/`spider_links` with `headless: true` or
+/// `return_format: "screenshot"`), shared by every tool call this server
+/// process handles. `rmcp`'s own request dispatch (`serve_inner` in
+/// `rmcp::service`) spawns a fresh Tokio task per incoming `tools/call`
+/// and never blocks reading the next request on a prior one completing —
+/// confirmed by reading its source — so nothing upstream of this module
+/// already limits how many of these heavy, real browser-process launches
+/// can be in flight at once; without this, N simultaneous headless
+/// requests would launch N simultaneous Chrome processes with no bound.
+///
+/// No existing configuration already owns this resource:
+/// `Configuration::concurrency_limit` bounds *page-fetch* parallelism
+/// *within* one already-launched crawl (defaulting to system CPU cores),
+/// not how many separate browser *processes* this one server process may
+/// have running at once — a different, far heavier resource axis (RAM and
+/// OS-process count, not page-fetch throughput), so it is deliberately not
+/// reused here.
+///
+/// `4` is a conservative, hand-chosen internal default, not scaled to CPU
+/// core count (a real headless Chrome launch is RAM/process-count bound,
+/// not CPU-parallelism bound — confirmed live: one launch spawns ~10 OS
+/// processes: the browser itself, 2 crashpad handlers, 2 zygotes, a GPU
+/// process, network/storage utility processes, and multiple renderers).
+/// Not user-configurable — no existing architecture in this crate exposes
+/// a public concurrency-tuning surface, so none is added here either.
+#[cfg(feature = "chrome")]
+static CHROME_EXECUTION_PERMITS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(4));
+
 /// Spawn the future that drives one `Website`'s crawl/scrape acquisition.
 /// `use_headless` may route into real Chrome/CDP execution, whose call
 /// chain has empirically overflowed the default tokio worker-thread stack
@@ -56,15 +87,46 @@ pub(crate) async fn fetch_document(
 /// returning a real `tokio::task::JoinHandle` so every existing caller's
 /// `.await`/`.abort_handle()`/panic-propagation contract (already relied
 /// on by crawl.rs/scrape.rs/links.rs's transport-error handling) is
-/// unchanged. Ordinary HTTP-only crawls (`use_headless == false`, or any
-/// build without the `chrome` feature) keep using plain `tokio::spawn`,
-/// unaffected — this exists to pay the dedicated-thread cost only when
-/// Chrome is actually involved.
-pub(crate) fn spawn_crawl_task(
+/// unchanged.
+///
+/// When `use_headless` is true, a [`CHROME_EXECUTION_PERMITS`] permit is
+/// acquired *before* the dedicated worker is spawned (backpressure — an
+/// (N+1)th concurrent headless request waits here rather than launching an
+/// (N+1)th Chrome process) and held for the permit's own lifetime inside
+/// the spawned future itself, so it is released exactly when that future
+/// finishes for any reason — normal completion, an internal Chrome
+/// failure (`website.crawl()` never itself returns `Err`, so this is not
+/// a distinct case), a panic (caught by `spawn_chrome_capable`'s own
+/// `JoinError` propagation, which still drops the future — and therefore
+/// the held permit — during unwind), or the returned `JoinHandle` being
+/// aborted/dropped by a caller (`AbortOnDrop`, an evicted session, or an
+/// inline request future itself being dropped) — never released early,
+/// never leaked permanently.
+///
+/// Ordinary HTTP-only crawls (`use_headless == false`, or any build
+/// without the `chrome` feature) never touch the semaphore at all and
+/// keep using plain `tokio::spawn`, unaffected — this exists to pay the
+/// backpressure/dedicated-thread cost only when Chrome is actually
+/// involved.
+pub(crate) async fn spawn_crawl_task(
     mut website: Website,
     use_headless: bool,
 ) -> tokio::task::JoinHandle<Option<spider::features::transport::TransportError>> {
+    #[cfg(feature = "chrome")]
+    let permit = if use_headless {
+        Some(
+            CHROME_EXECUTION_PERMITS
+                .acquire()
+                .await
+                .expect("CHROME_EXECUTION_PERMITS is never closed"),
+        )
+    } else {
+        None
+    };
+
     let body = async move {
+        #[cfg(feature = "chrome")]
+        let _permit = permit; // held for this future's entire lifetime
         #[cfg(feature = "chrome")]
         {
             if use_headless {
@@ -183,6 +245,39 @@ mod tests {
     use spider_transformations::transformation::content::{
         transform_content_input, ReturnFormat, TransformConfig, TransformInput,
     };
+
+    /// SCORPION_HEADLESS_CHROME_PRODUCTION_STACK_SIZE_001 (concurrency
+    /// closure). A panic inside a `spawn_chrome_capable` future — exactly
+    /// the shape `spawn_crawl_task` uses, holding a
+    /// `CHROME_EXECUTION_PERMITS` permit for the future's own lifetime —
+    /// must not leak that permit. Proves the RAII release survives the
+    /// panic-driven unwind through `spawn_chrome_capable`'s dedicated
+    /// worker thread, using the real production semaphore, not a
+    /// throwaway one.
+    #[cfg(feature = "chrome")]
+    #[tokio::test]
+    async fn chrome_execution_permit_releases_on_panic() {
+        let before = super::CHROME_EXECUTION_PERMITS.available_permits();
+        let permit = super::CHROME_EXECUTION_PERMITS.acquire().await.unwrap();
+        assert_eq!(
+            super::CHROME_EXECUTION_PERMITS.available_permits(),
+            before - 1
+        );
+
+        let handle = spider::features::chrome::spawn_chrome_capable(async move {
+            let _permit = permit; // held for this future's lifetime, exactly like spawn_crawl_task's body
+            panic!("intentional failure for chrome_execution_permit_releases_on_panic");
+        });
+        let result = handle.await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_panic());
+
+        assert_eq!(
+            super::CHROME_EXECUTION_PERMITS.available_permits(),
+            before,
+            "the permit must be released, not leaked, after the panic propagates"
+        );
+    }
 
     /// RED: proves the MCP surface's screenshot pipeline is broken today.
     /// `spider_mcp` calls into `spider_transformations::transform_content_input`

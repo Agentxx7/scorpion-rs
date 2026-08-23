@@ -80,3 +80,14 @@ search_brave = ["search", "spider/search_brave"]
 # metasearch provider requiring no API key and no spider.cloud dependency.
 search_searxng = ["search", "spider/search_searxng"]
 full = ["chrome_screenshot", "smart", "spider_cloud", "search_serper", "search_searxng"]
+# Canonical local PaliGemma CAPTCHA provider (SigLIP + Gemma). Not part of
+# `default`/`full`: an 11+ GB pinned model checkpoint is not something an
+# ordinary `spider-mcp` build should pull in silently. Forwards only the
+# library feature — selecting `Configuration::captcha_provider =
+# PALIGEMMA_LOCAL` still requires a verified local installation at
+# `SCORPION_PALIGEMMA_PINNED_ARTIFACTS`; it is never downloaded implicitly.
+local_paligemma = ["spider/local_paligemma"]
+# Accelerated (CUDA/F16) execution for the same pinned local_paligemma
+# runtime. Requires a real CUDA toolchain to build; there is no CPU
+# fallback baked into this feature.
+local_paligemma_cuda = ["local_paligemma", "spider/local_paligemma_cuda"]

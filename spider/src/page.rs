@@ -6591,6 +6591,23 @@ impl Page {
         &self.url
     }
 
+    /// The outcome of one passive browser-challenge detection/routing pass
+    /// for this page (`Page::new_base`'s canonical binding point). `None`
+    /// means detection was never attempted (HTTP-only transport, or Chrome
+    /// rendering was not used) — never inferred from any other field.
+    /// Read-only: this crate's canonical seam (`Page::new_base`) is the
+    /// only writer; a caller cannot construct a provider registry, invoke a
+    /// provider, or apply a browser action from this value — see
+    /// [`crate::features::captcha::BrowserChallengeObservation`] and
+    /// [`crate::features::captcha::CaptchaRouteOutcomeSummary`] for the
+    /// exact vocabulary this exposes.
+    #[cfg(feature = "chrome")]
+    pub fn detected_browser_challenge(
+        &self,
+    ) -> Option<&crate::features::captcha::BrowserChallengeObservation> {
+        self.detected_browser_challenge.as_ref()
+    }
+
     #[cfg(not(feature = "headers"))]
     /// Get the timeout required for rate limiting. The max duration is 30 seconds for delay respecting. Requires the feature flag `headers`.
     pub fn get_timeout(&self) -> Option<Duration> {

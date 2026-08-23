@@ -10,17 +10,21 @@ use chromiumoxide::{
 #[cfg(feature = "chrome")]
 use std::time::Duration;
 
-// Shared with the stub arm of `route_detected_browser_challenge` below,
-// which must compile under plain `chrome` even without `real_browser`.
 #[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
 use crate::features::captcha::{
     solve_captcha, CaptchaChallengeKind, CaptchaProvider, CaptchaProviderAvailability,
-    CaptchaProviderCapabilities, CaptchaProviderLocality, CaptchaProviderRegistry,
-    CaptchaRouteAttempts, CaptchaSolution, CaptchaSolveFailure, CaptchaSolveOutcome,
-    CaptchaSolveProvenance, CaptchaSolveRequest, CaptchaVisualInput,
+    CaptchaProviderCapabilities, CaptchaProviderLocality, CaptchaSolution, CaptchaSolveProvenance,
+    CaptchaVisualInput,
 };
+// The minimal routing vocabulary `route_detected_browser_challenge` itself
+// needs, unconditionally under plain `chrome` — it always builds a
+// (possibly empty) registry and always makes exactly one explicit attempt,
+// regardless of which specific providers this build can construct.
 #[cfg(feature = "chrome")]
-use crate::features::captcha::{CaptchaChallenge, CaptchaProviderId, CaptchaRouteOutcomeSummary};
+use crate::features::captcha::{
+    CaptchaChallenge, CaptchaProviderId, CaptchaProviderRegistry, CaptchaRouteAttempts,
+    CaptchaRouteOutcomeSummary, CaptchaSolveFailure, CaptchaSolveOutcome, CaptchaSolveRequest,
+};
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use crate::utils::{page_wait, perform_smart_mouse_movement, CF_WAIT_FOR};
 #[cfg(any(feature = "openai", all(feature = "chrome", feature = "real_browser")))]
@@ -940,6 +944,85 @@ impl CaptchaProvider for LocalLanguageModelProvider<'_> {
     }
 }
 
+/// Process-lifetime PaliGemma provider singleton. Resolved at most once per
+/// process: the first caller to route a challenge with `PALIGEMMA_LOCAL`
+/// selected pays the real model-load cost (an 11+ GB checkpoint; not
+/// something any per-request deadline could tolerate), every later caller —
+/// concurrently or sequentially — observes the same already-resolved
+/// `Some`/`None` instantly. A failed resolution (no canonical artifact
+/// source configured, or verification/load failure) is remembered as
+/// `None` for the rest of the process's life; it is never silently
+/// retried, never falls back to downloading anything, and never
+/// substitutes a different model.
+#[cfg(all(feature = "chrome", feature = "local_paligemma"))]
+static PALIGEMMA_PROVIDER: tokio::sync::OnceCell<
+    Option<crate::features::paligemma_captcha::PaligemmaLocalCaptchaProvider>,
+> = tokio::sync::OnceCell::const_new();
+
+/// Resolve (once) and return the process-lifetime PaliGemma provider, or
+/// `None` if no canonical local installation could be verified. Reuses the
+/// exact same canonical artifact contract every PaliGemma test in this
+/// crate already relies on (`SCORPION_PALIGEMMA_PINNED_ARTIFACTS`: an
+/// offline directory holding the pinned, hash-identified 224/CPU/F32
+/// checkpoint) — this router introduces no new artifact-source convention.
+/// Real disk I/O and model loading always run on a blocking thread, never
+/// inline on an async worker.
+#[cfg(all(feature = "chrome", feature = "local_paligemma"))]
+async fn paligemma_provider(
+) -> Option<&'static crate::features::paligemma_captcha::PaligemmaLocalCaptchaProvider> {
+    PALIGEMMA_PROVIDER
+        .get_or_init(|| async {
+            tokio::task::spawn_blocking(resolve_paligemma_provider)
+                .await
+                .ok()
+                .flatten()
+        })
+        .await
+        .as_ref()
+}
+
+/// Real, synchronous artifact resolution + model load — deliberately run on
+/// a blocking thread by its only caller, [`paligemma_provider`]. Returns
+/// `None` (never panics, never fabricates a provider) for every failure
+/// case: no `SCORPION_PALIGEMMA_PINNED_ARTIFACTS` configured, missing/
+/// corrupt pinned artifacts, or a genuine model-load failure.
+#[cfg(all(feature = "chrome", feature = "local_paligemma"))]
+fn resolve_paligemma_provider(
+) -> Option<crate::features::paligemma_captcha::PaligemmaLocalCaptchaProvider> {
+    use crate::features::paligemma_captcha::PaligemmaLocalCaptchaProvider;
+    use crate::features::paligemma_runtime::paligemma_cpu_f32_manifest;
+
+    let source = std::env::var_os("SCORPION_PALIGEMMA_PINNED_ARTIFACTS")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)?;
+    let manifest = paligemma_cpu_f32_manifest();
+
+    // A stable (not per-process-random) location so a process restart on
+    // the same host reuses an already-verified activation instead of
+    // re-staging every pinned artifact from the canonical source again.
+    let base = std::env::temp_dir().join("scorpion-paligemma-runtime");
+    let active = base.join("active");
+
+    let installation = manifest.open_installation(&active).ok().or_else(|| {
+        let staging = base.join("staging");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).ok()?;
+        for artifact in &manifest.artifacts {
+            let from = source.join(&artifact.relative_path);
+            let to = staging.join(&artifact.relative_path);
+            // Prefer a hard link (instant, no extra disk use for an
+            // 11+ GB checkpoint); fall back to a real copy only if the
+            // source and the OS temp dir are on different filesystems.
+            if std::fs::hard_link(&from, &to).is_err() && std::fs::copy(&from, &to).is_err() {
+                return None;
+            }
+        }
+        manifest.activate(&staging, &active).ok()
+    })?;
+
+    PaligemmaLocalCaptchaProvider::initialize_from_host(&installation).ok()
+}
+
 /// The one canonical production entry point from a detected browser
 /// challenge to a provider-routed outcome —
 /// `CANONICAL CHALLENGE -> PROVIDER ROUTER -> PROVIDER RESOLUTION -> CANONICAL PROVIDER OUTCOME`.
@@ -954,15 +1037,20 @@ impl CaptchaProvider for LocalLanguageModelProvider<'_> {
 /// caller-configured `selected_provider`, or none at all when
 /// `selected_provider` is `None`.
 ///
-/// Registers, at most, the one provider this build can construct with no
-/// external credential and no browser probe beyond the live page already in
-/// hand: [`CaptchaProviderId::LOCAL_LANGUAGE_MODEL`], and only when this
-/// build actually compiles it (`real_browser`). `EXTERNAL_GEMINI` /
-/// `OPENAI_VISION` need caller-supplied API keys this router has no
-/// canonical source for; `PALIGEMMA_LOCAL` is gated behind a non-default,
-/// non-shipping feature entirely. Selecting either today resolves to
-/// `ProviderUnavailable` — a truthful "not registered", never a silent
-/// no-op or a fabricated credential.
+/// Registers every provider this build can construct with no
+/// caller-supplied external credential: [`CaptchaProviderId::LOCAL_LANGUAGE_MODEL`]
+/// (needs only the live page already in hand, only when this build compiles
+/// it — `real_browser`) and [`CaptchaProviderId::PALIGEMMA_LOCAL`] (needs
+/// the process-lifetime singleton in [`paligemma_provider`] to have
+/// resolved a verified local installation, only when this build compiles it
+/// — `local_paligemma`). `EXTERNAL_GEMINI` / `OPENAI_VISION` need
+/// caller-supplied API keys this router has no canonical source for.
+/// Selecting any provider this build cannot construct, or whose local
+/// installation could not be verified, resolves to `ProviderUnavailable` —
+/// a truthful "not registered", never a silent no-op or a fabricated
+/// credential. Registering more than one provider is not a fallback chain:
+/// [`CaptchaRouteAttempts::execute_explicit_attempt`] still resolves and
+/// invokes exactly the one `selected_provider`.
 ///
 /// Never applies the resulting solution to the browser — that is a
 /// separate, later frontier's arrow.
@@ -978,40 +1066,51 @@ pub(crate) async fn route_detected_browser_challenge(
     };
 
     #[cfg(feature = "real_browser")]
-    {
-        let local_provider = LocalLanguageModelProvider { page };
-        let mut registry = CaptchaProviderRegistry::new();
-        // A registration failure here can only be `DuplicateProvider`,
-        // structurally unreachable with a single `register` call — ignored
-        // rather than unwrapped so a future second registration fails
-        // closed (resolve() simply won't find the duplicate) instead of
-        // panicking the whole page construction.
-        let _ = registry.register(&local_provider);
-
-        let request = CaptchaSolveRequest {
-            correlation_id: "browser-challenge-point-selection".into(),
-            selected_provider,
-            challenge,
-            deadline,
-        };
-        let mut attempts = CaptchaRouteAttempts::new();
-        let outcome = attempts.execute_explicit_attempt(&registry, &request).await;
-        summarize_route_outcome(outcome)
-    }
-
+    let local_language_model_provider = LocalLanguageModelProvider { page };
     #[cfg(not(feature = "real_browser"))]
+    let _ = page;
+
+    #[cfg(feature = "local_paligemma")]
+    let paligemma_local_provider = paligemma_provider().await;
+
+    // Genuinely unused when neither `real_browser` nor `local_paligemma` is
+    // compiled — no provider can be registered at all, and
+    // `execute_explicit_attempt` below already reports `ProviderUnavailable`
+    // for an empty registry.
+    #[cfg_attr(
+        not(any(feature = "real_browser", feature = "local_paligemma")),
+        allow(unused_mut)
+    )]
+    let mut registry = CaptchaProviderRegistry::new();
+    // Every registration failure here can only be `DuplicateProvider`,
+    // structurally unreachable (each provider identity is registered at
+    // most once) — ignored rather than unwrapped so a future duplicate
+    // fails closed (resolve() simply won't find it) instead of panicking
+    // the whole page construction.
+    #[cfg(feature = "real_browser")]
     {
-        // No provider this router can construct is compiled into this
-        // build at all — truthfully unavailable, not a silent no-op.
-        let _ = (page, challenge, selected_provider, deadline);
-        CaptchaRouteOutcomeSummary::ProviderUnavailable
+        let _ = registry.register(&local_language_model_provider);
     }
+    #[cfg(feature = "local_paligemma")]
+    if let Some(provider) = paligemma_local_provider {
+        let _ = registry.register(provider);
+    }
+
+    let request = CaptchaSolveRequest {
+        correlation_id: "browser-challenge-point-selection".into(),
+        selected_provider,
+        challenge,
+        deadline,
+    };
+    let mut attempts = CaptchaRouteAttempts::new();
+    let outcome = attempts.execute_explicit_attempt(&registry, &request).await;
+    summarize_route_outcome(outcome)
 }
 
 /// Reduce a live [`CaptchaSolveOutcome`] to the `Clone + Debug + PartialEq`
 /// summary retained on [`crate::page::Page`] — see
 /// [`CaptchaRouteOutcomeSummary`]'s doc comment for why.
-#[cfg(all(feature = "chrome", feature = "real_browser"))]
+#[cfg(feature = "chrome")]
 fn summarize_route_outcome(outcome: &CaptchaSolveOutcome) -> CaptchaRouteOutcomeSummary {
     match outcome {
         CaptchaSolveOutcome::Solved { .. } => CaptchaRouteOutcomeSummary::SolutionProduced,

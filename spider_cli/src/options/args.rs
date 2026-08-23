@@ -124,6 +124,42 @@ pub struct Cli {
     /// Requires the `transformations` feature (enabled by default).
     #[clap(long, default_value = "markdown")]
     pub return_format: String,
+    /// Explicit CAPTCHA provider to route a detected browser challenge
+    /// through (e.g. `paligemma-local`). Absent by default —
+    /// `Configuration::captcha_provider` stays `None`, preserving existing
+    /// behavior for every caller who never passes this flag: no detector
+    /// routing, no provider construction, no model load. Selecting a
+    /// provider this build was not compiled with (for example
+    /// `paligemma-local` without the `local_paligemma` feature) is not
+    /// rejected here — the canonical router still truthfully reports
+    /// provider-unavailable at resolution time; there is no fallback to a
+    /// different provider. Requires the `chrome` feature (browser
+    /// challenges are Chrome-only); not exposed at all in a
+    /// `--no-default-features` build that omits it.
+    #[cfg(feature = "chrome")]
+    #[clap(long, value_parser = parse_captcha_provider)]
+    pub captcha_provider: Option<spider::features::captcha::CaptchaProviderId>,
+}
+
+/// Parse a `--captcha-provider` value into the canonical
+/// `spider::features::captcha::CaptchaProviderId`, reusing its own closed
+/// provider vocabulary (`from_str_exact`/`KNOWN`) rather than duplicating
+/// provider strings in this crate. Unknown values are a CLI parse error —
+/// clap surfaces this before any target networking or provider
+/// construction is even reachable.
+#[cfg(feature = "chrome")]
+fn parse_captcha_provider(
+    value: &str,
+) -> Result<spider::features::captcha::CaptchaProviderId, String> {
+    spider::features::captcha::CaptchaProviderId::from_str_exact(value).ok_or_else(|| {
+        format!(
+            "unknown captcha provider {value:?}; expected one of {:?}",
+            spider::features::captcha::CaptchaProviderId::KNOWN
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<_>>()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -337,6 +373,53 @@ mod tests {
             }) if research_id == id
         ));
         assert!(Cli::try_parse_from(["scorpion", "research", "show"]).is_err());
+    }
+
+    /// No flag: `Configuration::captcha_provider` stays unset — proven at
+    /// the parse layer alone, since `cli.captcha_provider` never even
+    /// reaches `main.rs`'s assignment when absent.
+    #[cfg(feature = "chrome")]
+    #[test]
+    fn captcha_provider_absent_by_default() {
+        let cli =
+            Cli::try_parse_from(["scorpion", "--url", "https://example.test", "crawl"]).unwrap();
+        assert_eq!(cli.captcha_provider, None);
+    }
+
+    /// An explicit, known provider id parses to the exact canonical
+    /// `CaptchaProviderId` — reused, not duplicated.
+    #[cfg(feature = "chrome")]
+    #[test]
+    fn captcha_provider_explicit_known_value_parses() {
+        let cli = Cli::try_parse_from([
+            "scorpion",
+            "--url",
+            "https://example.test",
+            "--captcha-provider",
+            "paligemma-local",
+            "crawl",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.captcha_provider,
+            Some(spider::features::captcha::CaptchaProviderId::PALIGEMMA_LOCAL)
+        );
+    }
+
+    /// An unknown provider string is a CLI parse error — never silently
+    /// accepted, never falls back to a default provider.
+    #[cfg(feature = "chrome")]
+    #[test]
+    fn captcha_provider_unknown_value_is_a_parse_error() {
+        let result = Cli::try_parse_from([
+            "scorpion",
+            "--url",
+            "https://example.test",
+            "--captcha-provider",
+            "not-a-real-provider",
+            "crawl",
+        ]);
+        assert!(result.is_err());
     }
 
     /// Existing commands remain parseable, unregressed by the new variants.

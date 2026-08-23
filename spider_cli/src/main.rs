@@ -666,6 +666,20 @@ async fn main() {
         website.with_stealth(true);
     }
 
+    // Explicit CAPTCHA-provider selection
+    // (SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001):
+    // the ONLY thing this does is set the canonical
+    // `Configuration::captcha_provider` field clap already parsed and
+    // validated against `CaptchaProviderId`'s closed set. No registry, no
+    // provider construction, no browser action — that all remains owned by
+    // `spider`'s own canonical router, reached (through `Page::new_base`)
+    // only when a real browser challenge is later detected during this
+    // same crawl.
+    #[cfg(feature = "chrome")]
+    {
+        website.configuration.captcha_provider = cli.captcha_provider;
+    }
+
     #[cfg(feature = "warc")]
     if let Some(ref warc_path) = cli.warc {
         website
@@ -729,6 +743,14 @@ async fn main() {
     let return_headers = cli.return_headers;
     let use_headless = cli.headless && !cli.http;
     let return_format = cli.return_format.clone();
+    // Whether the operator explicitly asked to route a detected browser
+    // challenge through a CAPTCHA provider
+    // (SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001).
+    // Only gates the diagnostic report below — `website.configuration.
+    // captcha_provider` (set earlier) is the sole thing that actually
+    // reaches the canonical router.
+    #[cfg(feature = "chrome")]
+    let report_captcha_observations = cli.captcha_provider.is_some();
 
     // `--transport`/`--tor-proxy` are scoped per-command (Section C of the
     // blocker-fix frontier) — CRAWL/SCRAPE/DOWNLOAD carry their own
@@ -830,6 +852,23 @@ async fn main() {
                     let mut response_observed = false;
                     while let Ok(res) = rx2.recv().await {
                         response_observed |= res.observed_status_code.is_some();
+
+                        // Public CAPTCHA-outcome observability
+                        // (SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001):
+                        // reads the same canonical, read-only summary the
+                        // router itself produced — never reconstructs
+                        // detection, never builds a registry, never calls a
+                        // provider. Silent unless the operator explicitly
+                        // selected a provider.
+                        #[cfg(feature = "chrome")]
+                        if report_captcha_observations {
+                            if let Some(observation) = res.detected_browser_challenge() {
+                                eprintln!(
+                                    "{} - captcha-observation: {observation:?}",
+                                    res.get_url()
+                                );
+                            }
+                        }
 
                         if output_links {
                             if return_headers {

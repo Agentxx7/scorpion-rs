@@ -104,6 +104,17 @@ headers = ["spider/headers"]
 time = ["spider/time"]
 status_code = []
 remote_addr = ["spider/remote_addr"]
+# Canonical local PaliGemma CAPTCHA provider (SigLIP + Gemma). Not part of
+# `default`: an 11+ GB pinned model checkpoint is not something an ordinary
+# `scorpion` build should pull in silently. Forwards only the library
+# feature — selecting `Configuration::captcha_provider = PALIGEMMA_LOCAL`
+# still requires a verified local installation at
+# `SCORPION_PALIGEMMA_PINNED_ARTIFACTS`; it is never downloaded implicitly.
+local_paligemma = ["spider/local_paligemma"]
+# Accelerated (CUDA/F16) execution for the same pinned local_paligemma
+# runtime. Requires a real CUDA toolchain to build; there is no CPU
+# fallback baked into this feature.
+local_paligemma_cuda = ["local_paligemma", "spider/local_paligemma_cuda"]
 
 [target.'cfg(all(not(windows), not(target_os = "android"), not(target_env = "musl")))'.dependencies]
 tikv-jemallocator = { version = "0.6", optional = true }

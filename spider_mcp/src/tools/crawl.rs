@@ -43,6 +43,16 @@ pub struct CrawlParams {
     pub user_agent: Option<String>,
     /// Transport for this crawl. Omit for Default (normal networking).
     pub transport: Option<crate::transport::TransportParam>,
+    /// Explicit CAPTCHA provider to route a detected browser challenge
+    /// through (requires headless=true): "local-language-model",
+    /// "external-gemini", "openai-vision", or "paligemma-local". Omit for
+    /// no provider routing (default) — a detected challenge then resolves
+    /// to a typed not-configured outcome without constructing any provider
+    /// or registry. Selecting a provider this server was not compiled with
+    /// is not rejected here; the canonical router still truthfully reports
+    /// provider-unavailable at resolution time. No fallback to a different
+    /// provider.
+    pub captcha_provider: Option<String>,
 }
 
 /// Threshold: crawls at or below this limit run inline; above run in background.
@@ -109,6 +119,38 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
     }
     if let Some(domains) = params.external_domains.clone() {
         website.with_external_domains(Some(domains.into_iter()));
+    }
+
+    // Explicit CAPTCHA-provider selection
+    // (SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001):
+    // parsed through the same canonical, closed vocabulary the CLI reuses
+    // (`CaptchaProviderId::from_str_exact`) — no MCP-owned provider string
+    // list. Sets only `Configuration::captcha_provider`; no registry, no
+    // provider construction, no browser action happens here. That all
+    // remains owned by `spider`'s canonical router, reached only if a real
+    // browser challenge is later detected during this same crawl.
+    #[cfg(feature = "chrome")]
+    if let Some(provider) = &params.captcha_provider {
+        website.configuration.captcha_provider = Some(
+            spider::features::captcha::CaptchaProviderId::from_str_exact(provider).ok_or_else(
+                || {
+                    format!(
+                        "unknown captcha_provider {provider:?}; expected one of {:?}",
+                        spider::features::captcha::CaptchaProviderId::KNOWN
+                            .iter()
+                            .map(|id| id.as_str())
+                            .collect::<Vec<_>>()
+                    )
+                },
+            )?,
+        );
+    }
+    #[cfg(not(feature = "chrome"))]
+    if params.captcha_provider.is_some() {
+        return Err(
+            "captcha_provider requires this server to be built with the `chrome` feature"
+                .to_string(),
+        );
     }
 
     website.configuration.return_page_links = true;
@@ -179,13 +221,27 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
                 .map(|s| s.iter().map(|l| l.inner().to_string()).collect())
                 .unwrap_or_default();
 
-            pages.push(json!({
+            #[cfg_attr(not(feature = "chrome"), allow(unused_mut))]
+            let mut page_json = json!({
                 "url": page.get_url(),
                 "status_code": page.status_code.as_u16(),
                 "content": content,
                 "links": links,
                 "provenance": spider::utils::evidence::page_provenance(&page),
-            }));
+            });
+            // Public CAPTCHA-outcome observability
+            // (SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001):
+            // reports the same canonical, read-only summary the router
+            // itself produced — never reconstructs detection, never builds
+            // a registry, never calls a provider. Present only when the
+            // caller explicitly selected a provider.
+            #[cfg(feature = "chrome")]
+            if params.captcha_provider.is_some() {
+                if let Some(observation) = page.detected_browser_challenge() {
+                    page_json["captcha_observation"] = json!(format!("{observation:?}"));
+                }
+            }
+            pages.push(page_json);
         }
 
         if pages.is_empty() {
@@ -380,6 +436,7 @@ mod tests {
             proxy: None,
             user_agent: None,
             transport,
+            captcha_provider: None,
         }
     }
 

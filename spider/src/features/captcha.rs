@@ -19,20 +19,27 @@ pub enum CaptchaChallengeKind {
     PointSelection,
 }
 
-/// Crate-private summary of one passive browser-challenge detection pass,
-/// retained on the crawled-result record (`crate::page`'s result type) so a
-/// later provider-routing frontier can observe what
-/// [`crate::features::browser_challenge_detection`] found. Deliberately not
-/// the live `BrowserChallengeSnapshot` — that snapshot's CDP object handles
-/// stop being valid the moment the shared chrome-backed constructor returns
-/// and the navigating tab's caller proceeds, which happens before any
-/// caller outside that construction could observe this field, so retaining
-/// only plain evidence (frame identity, element ids, captured bytes) is
-/// what a later frontier can actually act on, not a papered-over
-/// `Clone`/`Debug` workaround.
+/// Summary of one passive browser-challenge detection pass, retained on the
+/// crawled-result record (`crate::page::Page::detected_browser_challenge`)
+/// so callers — including outside this crate, through
+/// `Page::detected_browser_challenge()` — can observe what
+/// [`crate::features::browser_challenge_detection`] found and, when a
+/// provider was configured, what the canonical router did about it.
+/// Deliberately not the live `BrowserChallengeSnapshot` — that snapshot's
+/// CDP object handles stop being valid the moment the shared chrome-backed
+/// constructor returns and the navigating tab's caller proceeds, which
+/// happens before any caller outside that construction could observe this
+/// field, so retaining only plain evidence (frame identity, element ids,
+/// captured bytes) is what a caller can actually act on, not a
+/// papered-over `Clone`/`Debug` workaround. Public (not a registry, not a
+/// provider handle, not a browser-action dispatcher) precisely so a
+/// shipping binary that can now *select* a provider
+/// (`SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001`) can
+/// also observe, at minimum, whether a challenge was found and whether a
+/// solution was produced — never by reconstructing routing itself.
 #[cfg(feature = "chrome")]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum BrowserChallengeObservation {
+pub enum BrowserChallengeObservation {
     /// The page was inspected under Chrome and no supported challenge
     /// evidence was found. Distinct from the field being `None`, which
     /// means detection was never attempted (e.g. HTTP-only transport).
@@ -76,13 +83,20 @@ pub(crate) enum BrowserChallengeObservation {
     DetectionFailed,
 }
 
-/// Crate-private, `Clone + Debug + PartialEq`-safe summary of one canonical
+/// Public, `Clone + Debug + PartialEq`-safe summary of one canonical
 /// provider-routing attempt for a detected browser challenge, retained
 /// alongside [`BrowserChallengeObservation::TopLevel`]. Reduced from
 /// [`CaptchaSolveOutcome`] the same way `BrowserChallengeObservation` itself
 /// is reduced from the live `BrowserChallengeSnapshot` — `CaptchaSolveFailure`
 /// is intentionally not `Clone`/`PartialEq`, so its debug text is retained
-/// rather than the value itself.
+/// rather than the value itself. This is the coarse, five-way distinction a
+/// caller outside this crate can make (`NotConfigured` /
+/// `ProviderUnavailable` / `UnsupportedChallenge` / `ProviderFailed` /
+/// `SolutionProduced`) — the specific internal failure reason behind
+/// `ProviderFailed`'s debug text (for example PaliGemma's own richer typed
+/// failure vocabulary) is intentionally not redesigned or widened by
+/// exposing this type; that remains a separate observability frontier's
+/// concern.
 ///
 /// `SolutionProduced` is deliberately not named `Solved`: a provider
 /// returning a normalized answer is not a claim that the browser challenge
@@ -90,7 +104,7 @@ pub(crate) enum BrowserChallengeObservation {
 /// separate frontier's arrow (`SOLUTION -> BROWSER ACTION`), not this one's.
 #[cfg(feature = "chrome")]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum CaptchaRouteOutcomeSummary {
+pub enum CaptchaRouteOutcomeSummary {
     /// No provider was configured (`Configuration::captcha_provider` is
     /// `None`); the router returns this without constructing any registry
     /// or provider — no model init, no credential lookup, no external call.
@@ -452,8 +466,11 @@ impl CaptchaProviderId {
     /// The complete, closed set of known provider identities. Used to
     /// validate configuration/deserialization input against exactly the
     /// providers this crate's vocabulary actually knows about — never an
-    /// open string.
-    const KNOWN: &'static [Self] = &[
+    /// open string. Public so a shipping binary's own CLI/config parser
+    /// (e.g. `--captcha-provider`) can list the exact same canonical set
+    /// in its own error messages instead of hand-duplicating provider
+    /// strings.
+    pub const KNOWN: &'static [Self] = &[
         Self::LOCAL_LANGUAGE_MODEL,
         Self::EXTERNAL_GEMINI,
         Self::OPENAI_VISION,

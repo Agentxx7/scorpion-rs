@@ -5628,6 +5628,7 @@ fn cli_and_mcp_do_not_perform_captcha_provider_switching() {
                     "LocalLanguageModelProvider",
                     "OpenAiVisionCaptchaProvider",
                     "ExternalGeminiProvider",
+                    "PaligemmaLocalCaptchaProvider",
                     "route_detected_browser_challenge",
                 ] {
                     assert!(
@@ -5674,6 +5675,128 @@ fn provider_router_binding_never_dispatches_browser_actions() {
             "route_detected_browser_challenge must never reach browser \
              action dispatch ({forbidden:?} found) — this frontier stops \
              at the canonical provider outcome"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_CAPTCHA_PROVIDER_PUBLIC_SELECTION_BINDING_001
+// ---------------------------------------------------------------------------
+
+/// Both shipping binaries' public CAPTCHA-provider selection surface must
+/// parse through the canonical, closed `CaptchaProviderId::from_str_exact`
+/// vocabulary — never a hand-duplicated provider string list — and must set
+/// only `Configuration::captcha_provider`. Combined with
+/// `cli_and_mcp_do_not_perform_captcha_provider_switching` (which forbids
+/// referencing any registry/provider-implementation type), this proves the
+/// selection surface is a thin, canonical-only binding: no parallel
+/// provider-configuration system, no provider constructed here.
+#[test]
+fn cli_and_mcp_captcha_provider_selection_reuses_canonical_vocabulary_only() {
+    let cli = fs::read_to_string(workspace_root().join("spider_cli/src/options/args.rs")).unwrap();
+    assert!(
+        cli.contains("CaptchaProviderId::from_str_exact"),
+        "spider_cli's --captcha-provider must parse through the canonical \
+         CaptchaProviderId::from_str_exact, not a duplicated provider list"
+    );
+    let main = fs::read_to_string(workspace_root().join("spider_cli/src/main.rs")).unwrap();
+    assert!(
+        main.contains("website.configuration.captcha_provider = cli.captcha_provider"),
+        "spider_cli must set exactly Configuration::captcha_provider from \
+         the parsed flag — no intermediate provider-selection system"
+    );
+
+    let mcp_crawl =
+        fs::read_to_string(workspace_root().join("spider_mcp/src/tools/crawl.rs")).unwrap();
+    assert!(
+        mcp_crawl.contains("CaptchaProviderId::from_str_exact"),
+        "spider_mcp's captcha_provider field must parse through the \
+         canonical CaptchaProviderId::from_str_exact, not a duplicated \
+         provider list"
+    );
+    assert!(
+        mcp_crawl.contains("website.configuration.captcha_provider ="),
+        "spider_mcp must set exactly Configuration::captcha_provider from \
+         the parsed field — no intermediate provider-selection system"
+    );
+}
+
+/// The public selection surface is read-only with respect to routing
+/// outcomes: it may read `Page::detected_browser_challenge()` (the
+/// canonical, already-computed summary) for observability, but must never
+/// itself decide which provider is *attempted* beyond forwarding the
+/// caller's explicit choice, and never references the router's internal
+/// attempt-bookkeeping type.
+#[test]
+fn cli_and_mcp_captcha_observability_is_read_only() {
+    for path in ["spider_cli/src/main.rs", "spider_mcp/src/tools/crawl.rs"] {
+        let source = fs::read_to_string(workspace_root().join(path)).unwrap();
+        for forbidden in ["CaptchaRouteAttempts", "CaptchaProviderRegistry", ".solve("] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must not reference {forbidden:?} — it may only \
+                 read the canonical, already-computed observation, never \
+                 perform its own attempt bookkeeping"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCORPION_PALIGEMMA_LOCAL_VL_PRODUCTION_RUNTIME_REALITY_001
+// ---------------------------------------------------------------------------
+
+/// The PaliGemma runtime/provider modules must stay browser-neutral: neither
+/// `paligemma_runtime.rs` (weights/tensors/generation) nor
+/// `paligemma_captcha.rs` (the `CaptchaProvider` adapter) may reference
+/// `chromiumoxide`, a live `Page`, or any browser-action dispatcher. Solving
+/// a CAPTCHA and applying the solution to a live browser are distinct
+/// arrows; PaliGemma owns only the former.
+#[test]
+fn paligemma_runtime_and_provider_never_reference_browser_action() {
+    for relative in [
+        "features/paligemma_runtime.rs",
+        "features/paligemma_captcha.rs",
+    ] {
+        let source = read_src_file(relative);
+        for forbidden in [
+            "chromiumoxide",
+            "execute_browser_captcha_attempt",
+            "BrowserChallengeAction",
+            ".click(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{relative} must not reference {forbidden:?} — PaliGemma \
+                 solves a challenge, it never dispatches browser action"
+            );
+        }
+    }
+}
+
+/// The only place in `spider/src` allowed to construct a
+/// `PaligemmaLocalCaptchaProvider` (outside `paligemma_captcha.rs`'s own
+/// constructors) is the canonical router's process-lifetime singleton
+/// resolver in `solvers.rs`. No other module — page construction, CLI/MCP
+/// glue, or another provider — may build one directly; that would be a
+/// second, uncoordinated resolution path and could reintroduce provider
+/// ordering or a silent fallback.
+#[test]
+fn paligemma_provider_is_constructed_only_by_the_canonical_router() {
+    for file in scan_spider_src() {
+        if file.relative_path == "features/paligemma_captcha.rs"
+            || file.relative_path == "features/solvers.rs"
+        {
+            continue;
+        }
+        assert!(
+            !file
+                .contents
+                .contains("PaligemmaLocalCaptchaProvider::initialize")
+                && !file.contents.contains("PaligemmaLocalCaptchaProvider::new"),
+            "{:?} must not construct PaligemmaLocalCaptchaProvider directly \
+             — only solvers.rs's process-lifetime singleton resolver may",
+            file.relative_path
         );
     }
 }

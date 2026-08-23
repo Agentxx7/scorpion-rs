@@ -9,7 +9,7 @@
 //!  - Audio models: [`whisper`], [`encodec`], [`metavoice`], [`parler_tts`], ...
 //!  - Computer vision models: [`dinov2`], [`convmixer`], [`efficientnet`], ...
 //!
-//! Some of the models also have quantized variants, e.g.  [`quantized_blip`], [`quantized_llama`] and  [`quantized_qwen2`].
+//! Some of the models also have quantized variants, e.g.  [`quantized_blip`], [`quantized_llama`] and  [`quantized_phi3`].
 //!
 //! The implementations aim to be readable while maintaining good performance. For more information
 //! on each model see the model's module docs in the links below.
@@ -99,18 +99,11 @@ pub mod quantized_moondream;
 pub mod quantized_mpt;
 pub mod quantized_phi;
 pub mod quantized_phi3;
-pub mod quantized_qwen2;
-pub mod quantized_qwen3;
-pub mod quantized_qwen3_moe;
 pub mod quantized_recurrent_gemma;
 pub mod quantized_rwkv_v5;
 pub mod quantized_rwkv_v6;
 pub mod quantized_stable_lm;
 pub mod quantized_t5;
-pub mod qwen2;
-pub mod qwen2_moe;
-pub mod qwen3;
-pub mod qwen3_moe;
 pub mod recurrent_gemma;
 pub mod repvgg;
 pub mod resnet;

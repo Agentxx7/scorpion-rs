@@ -5677,3 +5677,68 @@ fn provider_router_binding_never_dispatches_browser_actions() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_QWEN3_VL_TOTAL_REJECTION_AND_REMOVAL_001 /
+// SCORPION_VENDOR_REJECTED_MODEL_DEAD_CODE_REMOVAL_001
+// ---------------------------------------------------------------------------
+//
+// Qwen/Qwen3-VL is a rejected architecture, not merely absent by accident.
+// This guardrail encodes the architectural decision itself — it must fail
+// if a local Qwen provider identity, Cargo feature, or Scorpion-owned
+// runtime module is ever reintroduced. It deliberately scopes to
+// Scorpion's own source (`spider/src/`, `spider/Cargo.toml`) only, never
+// `vendor/` — the retained vendored Candle fork legitimately ships
+// unrelated, unmodified upstream third-party model code (its own Qwen2/
+// Qwen3 text-LLM ports, GGUF family-name detection, a Z-Image text
+// encoder, etc.) that has nothing to do with Scorpion's CAPTCHA provider
+// architecture and must never be grepped against.
+
+#[test]
+fn no_local_qwen_provider_identity_or_runtime_module_exists() {
+    let root = workspace_root();
+
+    // 1. CaptchaProviderId's closed provider set must never gain a Qwen
+    //    entry — this is the actual architectural surface a reintroduction
+    //    would have to touch.
+    let captcha_source = read_src_file("features/captcha.rs");
+    assert!(
+        !captcha_source.to_lowercase().contains("qwen"),
+        "captcha.rs's CaptchaProviderId set must never contain a Qwen \
+         provider identity — Qwen3-VL is a rejected architecture, not an \
+         omitted one"
+    );
+
+    // 2. No local Qwen Cargo feature (spider/Cargo.toml, not the vendored
+    //    third-party crate's own Cargo.toml).
+    let manifest = fs::read_to_string(root.join("spider/Cargo.toml")).unwrap();
+    assert!(
+        !manifest.to_lowercase().contains("qwen"),
+        "spider/Cargo.toml must never declare a Qwen-named feature"
+    );
+
+    // 3. No Scorpion-owned Qwen runtime/captcha/generation module
+    //    registered in spider/src/features/mod.rs.
+    let features_mod = read_src_file("features/mod.rs");
+    assert!(
+        !features_mod.to_lowercase().contains("qwen"),
+        "spider/src/features/mod.rs must never register a qwen3_vl_* \
+         module"
+    );
+
+    // 4. No source file anywhere under spider/src/ actually implements a
+    //    Qwen-branded runtime/captcha/generation module (as opposed to an
+    //    incidental string in an unrelated file, which this guardrail does
+    //    not forbid — only a genuine reintroduced implementation module).
+    for relative in [
+        "features/qwen3_vl_captcha.rs",
+        "features/qwen3_vl_generation.rs",
+        "features/qwen3_vl_runtime.rs",
+    ] {
+        assert!(
+            !root.join("spider/src").join(relative).is_file(),
+            "{relative} must not exist — this is exactly the rejected, \
+             previously-deleted Qwen3-VL implementation surface"
+        );
+    }
+}

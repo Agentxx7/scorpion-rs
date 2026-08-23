@@ -48,6 +48,19 @@ pub struct CrawlParams {
 /// Threshold: crawls at or below this limit run inline; above run in background.
 const INLINE_LIMIT: u32 = 10;
 
+fn serialize_inline_pages(
+    pages: Vec<serde_json::Value>,
+    observed_response_count: usize,
+) -> Result<String, String> {
+    let diagnostic =
+        serde_json::to_string_pretty(&json!({ "pages": pages })).map_err(|e| e.to_string())?;
+    if observed_response_count == 0 {
+        Err(diagnostic)
+    } else {
+        Ok(diagnostic)
+    }
+}
+
 pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String, String> {
     let url = if params.url.starts_with("http") {
         params.url.clone()
@@ -161,8 +174,10 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
         };
 
         let mut pages = Vec::new();
+        let mut observed_response_count = 0usize;
 
         while let Ok(page) = rx.recv().await {
+            observed_response_count += usize::from(page.observed_status_code.is_some());
             let input = TransformInput {
                 url: page.get_url_parsed_ref().as_ref(),
                 content: page.get_html_bytes_u8(),
@@ -194,7 +209,7 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
             }
         }
 
-        serde_json::to_string_pretty(&json!({ "pages": pages })).map_err(|e| e.to_string())
+        serialize_inline_pages(pages, observed_response_count)
     } else {
         let crawl_id = uuid::Uuid::new_v4().to_string();
         // Reclaim finished sessions before adding a new one so the server's
@@ -307,6 +322,32 @@ pub async fn run(params: CrawlParams, state: Arc<SharedState>) -> Result<String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_total_failure_preserves_pages_in_error_payload() {
+        let failed_page = json!({
+            "status_code": 521,
+            "content": "",
+            "provenance": {
+                "observed_status_code": null,
+                "response_origin": null
+            }
+        });
+
+        let output = serialize_inline_pages(vec![failed_page.clone()], 0).unwrap_err();
+        let diagnostic: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(diagnostic["pages"], json!([failed_page]));
+    }
+
+    #[test]
+    fn inline_partial_success_remains_successful() {
+        let observed = json!({ "provenance": { "observed_status_code": 200 } });
+        let failed = json!({ "provenance": { "observed_status_code": null } });
+
+        let output = serialize_inline_pages(vec![observed, failed], 1).unwrap();
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["pages"].as_array().unwrap().len(), 2);
+    }
 
     fn tor_crawl_params(
         url: String,

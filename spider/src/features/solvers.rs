@@ -986,20 +986,42 @@ async fn paligemma_provider(
 /// `None` (never panics, never fabricates a provider) for every failure
 /// case: no `SCORPION_PALIGEMMA_PINNED_ARTIFACTS` configured, missing/
 /// corrupt pinned artifacts, or a genuine model-load failure.
+///
+/// Backend selection is a build-time decision, matching every other
+/// CUDA/CPU choice `PaligemmaCpuRuntime` already makes: when
+/// `local_paligemma_cuda` is compiled, this router uses the accelerated
+/// CUDA/F16 constructor exclusively — never CPU/F32, and never a runtime
+/// "try CUDA, fall back to CPU" branch. This is not a new fallback: it is
+/// the same fail-closed contract `initialize_cuda_f16_from_host` itself
+/// already enforces (no CUDA device / insufficient VRAM -> `Err`, never a
+/// silent CPU downgrade) — this router simply stops shadowing it with an
+/// unconditional CPU/F32 call. Real measurement
+/// (`SCORPION_PALIGEMMA_LOCAL_VL_REAL_INFERENCE_QUALIFICATION_001`): a
+/// real CPU/F32 `detect` call took ~400-420s; the real CUDA/F16 path
+/// completed the exact same query in ~1-11s (build-profile dependent) —
+/// CPU/F32 alone is not an operationally practical router default when a
+/// qualified CUDA build exists.
 #[cfg(all(feature = "chrome", feature = "local_paligemma"))]
 fn resolve_paligemma_provider(
 ) -> Option<crate::features::paligemma_captcha::PaligemmaLocalCaptchaProvider> {
     use crate::features::paligemma_captcha::PaligemmaLocalCaptchaProvider;
-    use crate::features::paligemma_runtime::paligemma_cpu_f32_manifest;
+    #[cfg(not(feature = "local_paligemma_cuda"))]
+    use crate::features::paligemma_runtime::paligemma_cpu_f32_manifest as paligemma_manifest;
+    #[cfg(feature = "local_paligemma_cuda")]
+    use crate::features::paligemma_runtime::paligemma_cuda_f16_manifest as paligemma_manifest;
 
     let source = std::env::var_os("SCORPION_PALIGEMMA_PINNED_ARTIFACTS")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)?;
-    let manifest = paligemma_cpu_f32_manifest();
+    let manifest = paligemma_manifest();
 
     // A stable (not per-process-random) location so a process restart on
     // the same host reuses an already-verified activation instead of
     // re-staging every pinned artifact from the canonical source again.
+    // Shared across the CPU/F32 and CUDA/F16 builds: both manifests pin
+    // the exact same artifact set/hashes for the 224 checkpoint (only
+    // `runtime_requirements` differs), so an installation activated by
+    // one build's binary reopens cleanly under the other.
     let base = std::env::temp_dir().join("scorpion-paligemma-runtime");
     let active = base.join("active");
 
@@ -1020,7 +1042,14 @@ fn resolve_paligemma_provider(
         manifest.activate(&staging, &active).ok()
     })?;
 
-    PaligemmaLocalCaptchaProvider::initialize_from_host(&installation).ok()
+    #[cfg(feature = "local_paligemma_cuda")]
+    {
+        PaligemmaLocalCaptchaProvider::initialize_cuda_f16_from_host(&installation).ok()
+    }
+    #[cfg(not(feature = "local_paligemma_cuda"))]
+    {
+        PaligemmaLocalCaptchaProvider::initialize_from_host(&installation).ok()
+    }
 }
 
 /// The one canonical production entry point from a detected browser

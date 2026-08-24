@@ -8,6 +8,7 @@
 
 use spider::features::browser_challenge_detection::{
     detect_browser_challenge, ChallengeDetectionFailure, DetectedBrowserChallenge,
+    FramedMaterialization,
 };
 
 /// Serve a small fixed route table over plain HTTP on `127.0.0.1`,
@@ -85,7 +86,7 @@ async fn case_a_normal_page_is_not_detected() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let result = detect_browser_challenge(&page).await.unwrap();
+    let result = detect_browser_challenge(&page, None).await.unwrap();
     assert!(result.is_none(), "an ordinary page must never be DETECTED");
 }
 
@@ -99,7 +100,7 @@ async fn case_b_supported_challenge_is_detected_and_materialized() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let result = detect_browser_challenge(&page).await.unwrap();
+    let result = detect_browser_challenge(&page, None).await.unwrap();
     match result {
         Some(DetectedBrowserChallenge::TopLevel {
             snapshot,
@@ -137,7 +138,7 @@ async fn case_c_text_only_false_positive_is_not_detected() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let result = detect_browser_challenge(&page).await.unwrap();
+    let result = detect_browser_challenge(&page, None).await.unwrap();
     assert!(
         result.is_none(),
         "plain text mentioning captcha/verify/human without ARIA challenge \
@@ -166,12 +167,14 @@ async fn case_d_framed_challenge_is_detected_with_correct_frame_identity() {
 
     let top_level_frame_id = page.mainframe().await.unwrap().unwrap().inner().to_string();
 
-    let result = detect_browser_challenge(&page).await.unwrap();
+    let result = detect_browser_challenge(&page, None).await.unwrap();
     match result {
         Some(DetectedBrowserChallenge::FramedEvidence {
             frame_id,
             parent_frame_id,
             challenge_element_id,
+            instruction,
+            materialization,
         }) => {
             assert_ne!(
                 frame_id, top_level_frame_id,
@@ -179,6 +182,11 @@ async fn case_d_framed_challenge_is_detected_with_correct_frame_identity() {
             );
             assert_eq!(parent_frame_id, Some(top_level_frame_id));
             assert_eq!(challenge_element_id, "challenge-1");
+            assert_eq!(instruction, "select the matching point");
+            assert!(
+                matches!(materialization, FramedMaterialization::Unavailable),
+                "no browser handle was passed, so materialization must report Unavailable"
+            );
         }
         Some(DetectedBrowserChallenge::TopLevel { .. }) => {
             panic!("expected framed evidence, got a top-level detection instead")
@@ -204,8 +212,8 @@ async fn case_f_detection_performs_no_browser_mutation() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let _ = detect_browser_challenge(&page).await.unwrap();
-    let _ = detect_browser_challenge(&page).await.unwrap();
+    let _ = detect_browser_challenge(&page, None).await.unwrap();
+    let _ = detect_browser_challenge(&page, None).await.unwrap();
     // Give the MutationObserver's microtask a turn to run, if anything did
     // mutate.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -240,7 +248,7 @@ async fn case_e_detector_failure_is_typed_not_no_challenge() {
     let closable = page.clone();
     closable.close().await.unwrap();
 
-    let result = detect_browser_challenge(&page).await;
+    let result = detect_browser_challenge(&page, None).await;
     match result {
         Err(ChallengeDetectionFailure::ObservationFailed) => {}
         Err(other) => {

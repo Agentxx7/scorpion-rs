@@ -53,20 +53,35 @@
 //! frames, but *not* a genuine out-of-process (OOPIF) child, which lives on
 //! a separate CDP target this seam never attaches to. For a same-session
 //! child, this module reports truthful, correct frame identity (the exact
-//! `FrameId`, and its parent `FrameId`) but does not attempt
-//! [`BrowserChallengeSnapshot::capture_in_frame`] — that requires a
-//! [`crate::features::frame_context::FrameContext`], which in turn requires
-//! `Target.attachedToTarget`/`TargetInfo` identity that this seam's caller
-//! (`Page::new_base`, the shared chrome-backed `Page` constructor) does not
-//! currently retain. That remains a disclosed follow-up, not part of this
-//! seam's claim.
+//! `FrameId`, and its parent `FrameId`) and — when `detect_browser_challenge`
+//! is given a live `browser` handle
+//! (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`) — also attempts
+//! full materialization via [`BrowserChallengeSnapshot::capture_in_frame`].
+//! That requires a [`crate::features::frame_context::FrameContext`], which
+//! in turn requires `Target.attachedToTarget`/`TargetInfo` identity this
+//! seam's own top-level `Page` did not previously expose; `detect_browser_challenge`
+//! resolves the top-level `TargetInfo` itself, fresh, via
+//! `Target.getTargetInfo(page.target_id())` (proven to work through the
+//! page's own attached session — no separate event-stream capture needed),
+//! then [`crate::features::frame_context::FrameContext::resolve_same_session_child`]
+//! for the child. A genuine out-of-process (OOPIF) child still cannot be
+//! materialized here: `resolve_same_session_child` proves ownership through
+//! the *parent's* exact session, and an OOPIF target never attaches to it —
+//! see [`FrameMaterializationFailure`] for how that fails closed, typed,
+//! never as a silent top-level fallback. Passing `browser: None` (every
+//! existing caller/test) preserves this module's exact prior behavior:
+//! `FramedEvidence` reports identity only, `materialization:
+//! FramedMaterialization::Unavailable`, never routed.
 
 #![cfg(feature = "chrome")]
 
-use chromiumoxide::cdp::browser_protocol::dom::Node;
-use chromiumoxide::Page;
+use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, Node};
+use chromiumoxide::cdp::browser_protocol::page::FrameId as CdpFrameId;
+use chromiumoxide::cdp::browser_protocol::target::GetTargetInfoParams;
+use chromiumoxide::{Browser, Page};
 
 use crate::features::browser_challenge::{BrowserChallengeFailure, BrowserChallengeSnapshot};
+use crate::features::frame_context::{FrameContext, FrameContextFailure};
 
 /// Typed detection failure. Distinct from "no challenge found" (`Ok(None)`):
 /// this means the observation itself could not be trusted, not that the
@@ -104,18 +119,81 @@ pub enum DetectedBrowserChallenge {
         instruction: String,
     },
     /// Evidence found inside a same-session child frame. Frame identity is
-    /// real and correct; materialization is intentionally not attempted —
-    /// see the module-level "Frame scope" section.
+    /// always real and correct; `materialization` truthfully reports
+    /// whether it could also be turned into a canonical, immutable,
+    /// frame-scoped snapshot — see the module-level "Frame scope" section
+    /// and [`FramedMaterialization`].
     FramedEvidence {
         /// Exact `FrameId` (as reported by Chromium) owning the matched
         /// challenge evidence.
         frame_id: String,
         /// Exact `FrameId` of the parent document, when known.
         parent_frame_id: Option<String>,
-        /// `id` attribute of the matched challenge-candidate element,
-        /// preserved for a later frontier's frame-scoped materialization.
+        /// `id` attribute of the matched challenge-candidate element.
         challenge_element_id: String,
+        /// The matched challenge candidate's own `aria-label` — the page
+        /// author's real accessible name, used as the canonical challenge
+        /// instruction. Never caller-supplied prompt text.
+        instruction: String,
+        /// Whether this evidence was also turned into a canonical,
+        /// frame-aware, action-ready snapshot.
+        materialization: FramedMaterialization,
     },
+}
+
+/// Whether one detected [`DetectedBrowserChallenge::FramedEvidence`] was
+/// also turned into a canonical, frame-aware, action-ready snapshot.
+/// Deliberately not `Debug`/`Clone` in the `Ready` case — it retains a
+/// live [`FrameContext`] pair and a [`BrowserChallengeSnapshot`], the same
+/// live-handle shape [`DetectedBrowserChallenge::TopLevel`] already
+/// retains.
+pub enum FramedMaterialization {
+    /// No live `browser` handle was supplied to `detect_browser_challenge`
+    /// — this evidence's identity is real, but frame-context resolution
+    /// was never attempted. Preserves this module's exact prior behavior
+    /// for every caller that still passes `browser: None`.
+    Unavailable,
+    /// A live `browser` handle was supplied, but frame-context resolution
+    /// or snapshot capture failed — real, typed evidence, never silently
+    /// downgraded to `Unavailable` and never a top-level fallback.
+    Failed(FrameMaterializationFailure),
+    /// Fully materialized: real top-level and child [`FrameContext`]s plus
+    /// a real, immutable, frame-scoped [`BrowserChallengeSnapshot`], ready
+    /// for the canonical frame-aware action seam
+    /// (`crate::features::captcha_browser::execute_browser_captcha_attempt_in_frame`).
+    Ready {
+        /// The real top-level frame's canonical context.
+        top_level: FrameContext,
+        /// The real child frame's canonical context — always
+        /// [`crate::features::frame_context::FrameClassification::SameSessionChild`]
+        /// here; a genuine out-of-process (OOPIF) child cannot be proven
+        /// through this seam (see the module-level "Frame scope" section),
+        /// so it always surfaces as [`FrameMaterializationFailure::FrameContext`]
+        /// instead of a `Ready` result claiming a classification this seam
+        /// never actually observed.
+        frame: FrameContext,
+        /// The canonical, immutable, frame-scoped snapshot.
+        snapshot: BrowserChallengeSnapshot,
+    },
+}
+
+/// Why a supplied `browser` handle could not turn one
+/// [`DetectedBrowserChallenge::FramedEvidence`] into a
+/// [`FramedMaterialization::Ready`] snapshot. Never a guess: each variant
+/// names the exact CDP/canonical-seam step that failed.
+#[derive(Debug)]
+pub enum FrameMaterializationFailure {
+    /// `Target.getTargetInfo` for the top-level page's own target failed.
+    TopLevelTargetInfoUnavailable,
+    /// [`FrameContext`] resolution (top-level or same-session child)
+    /// failed — includes the case where the evidence's frame turns out not
+    /// to be a genuine same-session child at all (e.g. a real out-of-process
+    /// OOPIF, which `resolve_same_session_child` cannot prove ownership of
+    /// through the parent's own session).
+    FrameContext(FrameContextFailure),
+    /// Frame-context resolution succeeded, but
+    /// [`BrowserChallengeSnapshot::capture_in_frame`] itself failed.
+    Snapshot(BrowserChallengeFailure),
 }
 
 /// One matched challenge candidate, gathered from an in-memory walk of a
@@ -124,20 +202,39 @@ struct Evidence {
     frame_id: String,
     parent_frame_id: Option<String>,
     challenge_id: String,
+    /// Real CDP backend-node identity of the matched challenge candidate —
+    /// carried alongside the string `id` so a same-session-child frame's
+    /// evidence can be materialized (`BrowserChallengeSnapshot::capture_in_frame`
+    /// takes backend-node identity, not a re-resolved `Element` handle)
+    /// without a second DOM query.
+    challenge_backend_node_id: BackendNodeId,
     /// The matched challenge candidate's own `aria-label` value — a real
     /// accessible name the page's author wrote, not a caller-supplied
     /// prompt. Carried through so a later provider-routing frontier can use
     /// it as the canonical challenge instruction without re-querying.
     instruction: String,
-    target_ids: Vec<String>,
+    /// Stable `id` paired with the real CDP backend-node identity of every
+    /// nested target candidate — the latter unused by the top-level path
+    /// (which re-resolves a live `Element` by selector instead) but needed
+    /// verbatim by frame-scoped materialization.
+    target_ids: Vec<(String, BackendNodeId)>,
 }
 
 /// Passively inspect a real Chrome page for a supported, evidence-based
 /// challenge. Never mutates the page. `Ok(None)` means the page was
 /// genuinely inspected and no supported challenge evidence was found — it
 /// does not mean the detector failed.
+///
+/// `browser` gates same-session-child frame materialization
+/// (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`): `None`
+/// preserves this function's exact prior contract (every existing
+/// caller/test) — a detected `FramedEvidence`'s `materialization` is always
+/// `FramedMaterialization::Unavailable`. `Some(browser)` additionally
+/// attempts full frame-aware materialization — see the module-level "Frame
+/// scope" section for exactly what that can and cannot prove.
 pub async fn detect_browser_challenge(
     page: &Page,
+    browser: Option<&Browser>,
 ) -> Result<Option<DetectedBrowserChallenge>, ChallengeDetectionFailure> {
     let top_frame_id = page
         .mainframe()
@@ -160,10 +257,18 @@ pub async fn detect_browser_challenge(
     };
 
     if matched.frame_id != top_frame_id {
+        let materialization = match browser {
+            Some(browser) => {
+                materialize_framed_challenge(page, browser, &top_frame_id, &matched).await
+            }
+            None => FramedMaterialization::Unavailable,
+        };
         return Ok(Some(DetectedBrowserChallenge::FramedEvidence {
             frame_id: matched.frame_id,
             parent_frame_id: matched.parent_frame_id,
             challenge_element_id: matched.challenge_id,
+            instruction: matched.instruction,
+            materialization,
         }));
     }
 
@@ -175,7 +280,7 @@ pub async fn detect_browser_challenge(
         .map_err(|_| ChallengeDetectionFailure::ObservationFailed)?;
 
     let mut targets = Vec::with_capacity(matched.target_ids.len());
-    for target_id in matched.target_ids {
+    for (target_id, _backend_node_id) in matched.target_ids {
         let element = page
             .find_element_pierced(id_selector(&target_id))
             .await
@@ -194,61 +299,178 @@ pub async fn detect_browser_challenge(
     }))
 }
 
+/// Attempt to turn one already-detected `FramedEvidence` match into a
+/// [`FramedMaterialization::Ready`] snapshot, using a live `browser` handle.
+/// Never mutates the page — every CDP call here (`Target.getTargetInfo`,
+/// frame-context resolution, `Page.captureScreenshot`) is a read, exactly
+/// like the top-level materialization path above. Failure is always typed
+/// and returned as `FramedMaterialization::Failed`, never silently
+/// downgraded to `Unavailable` (that variant means "no browser handle was
+/// even offered", a categorically different fact).
+async fn materialize_framed_challenge(
+    page: &Page,
+    browser: &Browser,
+    top_frame_id: &str,
+    matched: &Evidence,
+) -> FramedMaterialization {
+    let top_level_target_info = match page
+        .execute(
+            GetTargetInfoParams::builder()
+                .target_id(page.target_id().clone())
+                .build(),
+        )
+        .await
+    {
+        Ok(response) => response.result.target_info,
+        Err(_) => {
+            return FramedMaterialization::Failed(
+                FrameMaterializationFailure::TopLevelTargetInfoUnavailable,
+            )
+        }
+    };
+    let _ = top_frame_id; // Already proven equal to top_level_target_info.target_id by construction.
+    let top_level = match FrameContext::resolve_top_level(browser, &top_level_target_info).await {
+        Ok(context) => context,
+        Err(failure) => {
+            return FramedMaterialization::Failed(FrameMaterializationFailure::FrameContext(
+                failure,
+            ))
+        }
+    };
+    let frame = match FrameContext::resolve_same_session_child(
+        browser,
+        &top_level,
+        CdpFrameId(matched.frame_id.clone()),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(failure) => {
+            return FramedMaterialization::Failed(FrameMaterializationFailure::FrameContext(
+                failure,
+            ))
+        }
+    };
+    let targets = matched
+        .target_ids
+        .iter()
+        .map(|(id, backend_node_id)| (id.clone(), *backend_node_id))
+        .collect();
+    match BrowserChallengeSnapshot::capture_in_frame(
+        page,
+        &top_level,
+        &frame,
+        matched.challenge_backend_node_id,
+        targets,
+    )
+    .await
+    {
+        Ok(snapshot) => FramedMaterialization::Ready {
+            top_level,
+            frame,
+            snapshot,
+        },
+        Err(failure) => {
+            FramedMaterialization::Failed(FrameMaterializationFailure::Snapshot(failure))
+        }
+    }
+}
+
 impl DetectedBrowserChallenge {
-    /// Route this challenge through the canonical provider router
-    /// (`crate::features::solvers::route_detected_browser_challenge`) if,
-    /// and only if, it was fully materialized in the top-level document.
-    /// Framed evidence is never routed in this frontier — see the
-    /// module-level "Frame scope" section.
+    /// Route this challenge through the canonical provider router if, and
+    /// only if, it was fully materialized — top-level via
+    /// `crate::features::solvers::route_detected_browser_challenge`, or a
+    /// same-session framed challenge whose `materialization` is
+    /// [`FramedMaterialization::Ready`] via
+    /// `crate::features::solvers::route_detected_framed_browser_challenge`
+    /// (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`). Evidence
+    /// that never reached `Ready` (`Unavailable`/`Failed`) is never routed
+    /// — no top-level fallback, no guessed action.
     ///
     /// When a solution is produced, also binds it to the real browser
-    /// through the router's own `Some(snapshot)` branch
+    /// through the router's own action-binding branch
     /// (`SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001`) —
     /// the router itself only ever reaches browser input through the
-    /// pre-proven `execute_browser_captcha_attempt` seam, never an ad-hoc
-    /// dispatcher, and never more than the one explicit provider attempt
-    /// that seam already makes. After a real action is applied, this
-    /// method — and only this method, never the router — performs one more
-    /// passive detection pass through the exact same evidence-based
-    /// convention used to find the challenge in the first place, and
-    /// records whether the same challenge element is still observed. This
-    /// is deliberately not a "solved" claim, only the minimal genuine
-    /// real-DOM evidence that the dispatched action did something —
-    /// [`crate::features::captcha::CaptchaBrowserActionOutcome`]'s own doc
-    /// comment explains why no stronger claim is made.
+    /// pre-proven `execute_browser_captcha_attempt`/`_in_frame` seams,
+    /// never an ad-hoc dispatcher, and never more than the one explicit
+    /// provider attempt those seams already make. After a real action is
+    /// applied, this method — and only this method, never the router —
+    /// performs one more passive detection pass through the exact same
+    /// evidence-based convention used to find the challenge in the first
+    /// place, and records whether the same challenge element is still
+    /// observed. This is deliberately not a "solved" claim, only the
+    /// minimal genuine real-DOM evidence that the dispatched action did
+    /// something — [`crate::features::captcha::CaptchaBrowserActionOutcome`]'s
+    /// own doc comment explains why no stronger claim is made. `browser` is
+    /// threaded through only for this post-action re-detection pass on a
+    /// framed challenge (frame-context resolution needs a live handle the
+    /// same way materialization did); the top-level path never needs it.
     pub(crate) async fn route(
         &self,
         page: &Page,
+        browser: Option<&Browser>,
         selected_provider: Option<crate::features::captcha::CaptchaProviderId>,
         deadline: std::time::Duration,
     ) -> Option<crate::features::captcha::CaptchaRouteOutcomeSummary> {
-        let Self::TopLevel {
-            snapshot,
-            instruction,
-            challenge_element_id,
-        } = self
-        else {
-            return None;
-        };
-        let challenge = crate::features::captcha::CaptchaChallenge {
-            kind: crate::features::captcha::CaptchaChallengeKind::PointSelection,
-            instruction: instruction.clone(),
-            visuals: vec![crate::features::captcha::CaptchaVisualInput::materialized(
-                None,
-                "image/png",
-                snapshot.visual_bytes.clone(),
-            )],
-        };
-        let outcome = crate::features::solvers::route_detected_browser_challenge(
-            page,
-            Some(snapshot),
-            challenge,
-            selected_provider,
-            deadline,
-        )
-        .await;
-
         use crate::features::captcha::{CaptchaBrowserActionOutcome, CaptchaRouteOutcomeSummary};
+
+        let outcome = match self {
+            Self::TopLevel {
+                snapshot,
+                instruction,
+                ..
+            } => {
+                let challenge = crate::features::captcha::CaptchaChallenge {
+                    kind: crate::features::captcha::CaptchaChallengeKind::PointSelection,
+                    instruction: instruction.clone(),
+                    visuals: vec![crate::features::captcha::CaptchaVisualInput::materialized(
+                        None,
+                        "image/png",
+                        snapshot.visual_bytes.clone(),
+                    )],
+                };
+                crate::features::solvers::route_detected_browser_challenge(
+                    page,
+                    Some(snapshot),
+                    challenge,
+                    selected_provider,
+                    deadline,
+                )
+                .await
+            }
+            Self::FramedEvidence {
+                instruction,
+                materialization:
+                    FramedMaterialization::Ready {
+                        top_level,
+                        frame,
+                        snapshot,
+                    },
+                ..
+            } => {
+                let challenge = crate::features::captcha::CaptchaChallenge {
+                    kind: crate::features::captcha::CaptchaChallengeKind::PointSelection,
+                    instruction: instruction.clone(),
+                    visuals: vec![crate::features::captcha::CaptchaVisualInput::materialized(
+                        None,
+                        "image/png",
+                        snapshot.visual_bytes.clone(),
+                    )],
+                };
+                crate::features::solvers::route_detected_framed_browser_challenge(
+                    page,
+                    top_level,
+                    frame,
+                    snapshot,
+                    challenge,
+                    selected_provider,
+                    deadline,
+                )
+                .await
+            }
+            Self::FramedEvidence { .. } => return None,
+        };
+
         let CaptchaRouteOutcomeSummary::SolutionProduced {
             action:
                 CaptchaBrowserActionOutcome::Applied {
@@ -264,14 +486,35 @@ impl DetectedBrowserChallenge {
         // exact same passive detector once more and check whether it still
         // matches this same challenge element. Never a fixture-specific
         // "solved" marker, never a Rust-side flag flipped without a real
-        // browser round trip.
-        let challenge_observed_after_action = matches!(
-            detect_browser_challenge(page).await,
-            Ok(Some(DetectedBrowserChallenge::TopLevel {
-                challenge_element_id: ref observed_id,
+        // browser round trip. For a framed challenge this re-detection
+        // needs the same live `browser` handle materialization itself
+        // needed — always available here, since only a `Ready` framed
+        // match (which required exactly that handle) or a `TopLevel` match
+        // can ever reach this point.
+        let challenge_observed_after_action = match self {
+            Self::TopLevel {
+                challenge_element_id,
                 ..
-            })) if observed_id == challenge_element_id
-        );
+            } => matches!(
+                detect_browser_challenge(page, browser).await,
+                Ok(Some(DetectedBrowserChallenge::TopLevel {
+                    challenge_element_id: ref observed_id,
+                    ..
+                })) if observed_id == challenge_element_id
+            ),
+            Self::FramedEvidence {
+                challenge_element_id,
+                frame_id,
+                ..
+            } => matches!(
+                detect_browser_challenge(page, browser).await,
+                Ok(Some(DetectedBrowserChallenge::FramedEvidence {
+                    challenge_element_id: ref observed_id,
+                    frame_id: ref observed_frame_id,
+                    ..
+                })) if observed_id == challenge_element_id && observed_frame_id == frame_id
+            ),
+        };
 
         Some(CaptchaRouteOutcomeSummary::SolutionProduced {
             action: CaptchaBrowserActionOutcome::Applied {
@@ -317,10 +560,14 @@ impl DetectedBrowserChallenge {
                 frame_id,
                 parent_frame_id,
                 challenge_element_id,
+                materialization,
+                ..
             } => BrowserChallengeObservation::Framed {
                 frame_id,
                 parent_frame_id,
                 challenge_element_id,
+                materialized: matches!(materialization, FramedMaterialization::Ready { .. }),
+                route_outcome: route_outcome.unwrap_or(CaptchaRouteOutcomeSummary::NotConfigured),
             },
         }
     }
@@ -357,7 +604,7 @@ fn scan_node(
     frame_id: &str,
     parent_frame_id: Option<&str>,
     out: &mut Vec<Evidence>,
-) -> Vec<String> {
+) -> Vec<(String, BackendNodeId)> {
     let mut collected = Vec::new();
 
     if let Some(content_document) = node.content_document.as_deref() {
@@ -400,7 +647,10 @@ fn scan_node(
         && attr(node, "id").is_some_and(|value| !value.is_empty());
     if is_target {
         // Safe: guarded by `attr(node, "id").is_some_and(...)` above.
-        collected.push(attr(node, "id").expect("checked above").to_string());
+        collected.push((
+            attr(node, "id").expect("checked above").to_string(),
+            node.backend_node_id,
+        ));
     }
 
     let is_challenge_candidate = attr(node, "role") == Some("application")
@@ -411,6 +661,7 @@ fn scan_node(
             frame_id: frame_id.to_string(),
             parent_frame_id: parent_frame_id.map(str::to_string),
             challenge_id: attr(node, "id").expect("checked above").to_string(),
+            challenge_backend_node_id: node.backend_node_id,
             instruction: attr(node, "aria-label")
                 .expect("checked above")
                 .trim()
@@ -508,9 +759,47 @@ mod tests {
         scan_node(&root, "top", None, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].challenge_id, "challenge-1");
-        assert_eq!(out[0].target_ids, vec!["pick-1".to_string()]);
+        assert_eq!(
+            out[0].target_ids,
+            vec![("pick-1".to_string(), BackendNodeId(0))]
+        );
         assert_eq!(out[0].frame_id, "top");
         assert_eq!(out[0].parent_frame_id, None);
+    }
+
+    /// Real CDP `backendNodeId` identity — never defaulted or reconstructed
+    /// — is carried through for both the challenge candidate and every
+    /// target candidate, needed verbatim by frame-scoped materialization
+    /// (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`).
+    #[test]
+    fn backend_node_ids_are_captured_verbatim_not_defaulted() {
+        let target = Node {
+            backend_node_id: BackendNodeId(77),
+            ..leaf(
+                "div",
+                attrs(&[("role", "button"), ("tabindex", "0"), ("id", "pick-1")]),
+            )
+        };
+        let root = Node {
+            backend_node_id: BackendNodeId(99),
+            ..container(
+                "div",
+                attrs(&[
+                    ("role", "application"),
+                    ("aria-label", "select the matching point"),
+                    ("id", "challenge-1"),
+                ]),
+                vec![target],
+            )
+        };
+        let mut out = Vec::new();
+        scan_node(&root, "top", None, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].challenge_backend_node_id, BackendNodeId(99));
+        assert_eq!(
+            out[0].target_ids,
+            vec![("pick-1".to_string(), BackendNodeId(77))]
+        );
     }
 
     /// A challenge candidate with zero qualifying targets is not evidence —

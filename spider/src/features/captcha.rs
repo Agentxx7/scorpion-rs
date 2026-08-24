@@ -66,9 +66,12 @@ pub enum BrowserChallengeObservation {
         route_outcome: CaptchaRouteOutcomeSummary,
     },
     /// A supported challenge was found inside a same-session child frame.
-    /// Not materialized — see
-    /// [`crate::features::browser_challenge_detection`]'s module docs for
-    /// why.
+    /// Frame identity is always real and correct; `materialized` reports
+    /// whether this evidence could also be turned into an action-ready,
+    /// frame-aware snapshot (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`)
+    /// — see [`crate::features::browser_challenge_detection`]'s module
+    /// docs for exactly what that can and cannot prove (a genuine
+    /// out-of-process/OOPIF child never materializes through this seam).
     Framed {
         /// Exact `FrameId` owning the matched challenge evidence.
         frame_id: String,
@@ -76,6 +79,19 @@ pub enum BrowserChallengeObservation {
         parent_frame_id: Option<String>,
         /// `id` attribute of the matched challenge-candidate element.
         challenge_element_id: String,
+        /// Whether this evidence was materialized into an action-ready
+        /// snapshot. `false` covers both "no live browser handle was
+        /// offered to detection" and "a handle was offered but frame-context
+        /// resolution or capture failed" — the specific reason is available
+        /// only in-process at detection time, not retained here (matching
+        /// `ProviderFailed`'s own reduced-detail precedent).
+        materialized: bool,
+        /// Outcome of routing this challenge through
+        /// [`crate::features::solvers::route_detected_framed_browser_challenge`],
+        /// when `materialized` is `true`. `NotConfigured` whenever
+        /// `materialized` is `false` (never routed) or no provider was
+        /// selected.
+        route_outcome: CaptchaRouteOutcomeSummary,
     },
     /// Detection was attempted and failed with a typed observation error.
     /// Distinct from `NoChallenge`: this means the observation itself could

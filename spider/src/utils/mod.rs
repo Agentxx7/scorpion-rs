@@ -4013,6 +4013,18 @@ pub struct ChromeFetchParams<'a> {
     /// records a detected challenge as unrouted without constructing any
     /// provider or registry.
     pub captcha_provider: &'a Option<crate::features::captcha::CaptchaProviderId>,
+    /// Optional live browser handle, borrowed for the duration of one
+    /// fetch. `None` (the `Configuration::chrome_fetch_params` default —
+    /// this crate's own `BrowserController` is not reachable from
+    /// `Configuration`) means canonical `FrameContext` resolution
+    /// (`crate::features::frame_context`) is unavailable at this call site,
+    /// so a detected framed challenge is observed but never routed to a
+    /// frame-aware action — never a top-level fallback, never a guess.
+    /// `Some(browser)` is wired only by call sites that already hold a
+    /// `BrowserController` (currently `chrome_page_fetch!`'s real,
+    /// production streaming-crawl macro in `website.rs`), via
+    /// [`Self::with_browser`].
+    pub browser: Option<&'a chromiumoxide::Browser>,
 }
 
 #[cfg(feature = "chrome")]
@@ -4026,6 +4038,16 @@ impl<'a> ChromeFetchParams<'a> {
         dead: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         self.browser_dead = Some(dead);
+        self
+    }
+
+    /// Attach a borrowed live browser handle so a detected framed challenge
+    /// can be resolved to a canonical `FrameContext` and bound to a
+    /// frame-aware action — see this struct's own `browser` field doc
+    /// comment for what `None` (the default) means. Builder-style.
+    #[inline]
+    pub fn with_browser(mut self, browser: &'a chromiumoxide::Browser) -> Self {
+        self.browser = Some(browser);
         self
     }
 
@@ -5935,11 +5957,17 @@ async fn fetch_page_html_chrome_base_inner<'h>(
     // provider attempt per detected challenge per page load, matching
     // every other outcome this router already returns.
     let browser_challenge_observation =
-        match crate::features::browser_challenge_detection::detect_browser_challenge(page).await {
+        match crate::features::browser_challenge_detection::detect_browser_challenge(
+            page,
+            params.browser,
+        )
+        .await
+        {
             Ok(Some(detected)) => {
                 let route_outcome = detected
                     .route(
                         page,
+                        params.browser,
                         *params.captcha_provider,
                         request_timeout.unwrap_or(Duration::from_secs(20)),
                     )

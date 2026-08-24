@@ -1062,6 +1062,55 @@ fn resolve_paligemma_provider(
     }
 }
 
+/// Registers every provider this build can construct with no caller-
+/// supplied external credential into `$registry` (a fresh
+/// `CaptchaProviderRegistry`, bound by this macro), using `$page` for the
+/// page-scoped `LOCAL_LANGUAGE_MODEL` provider. A macro, not a function:
+/// the registry borrows page-scoped locals (`LocalLanguageModelProvider`)
+/// that cannot outlive a helper function's own stack frame, so this expands
+/// inline into the caller's frame instead. Every canonical browser-challenge
+/// routing entry point — top-level
+/// ([`route_detected_browser_challenge`]) and frame-aware
+/// ([`route_detected_framed_browser_challenge`]) alike — expands this
+/// exact macro, so both compose the identical provider set, never a
+/// second, divergent construction.
+#[cfg(feature = "chrome")]
+macro_rules! register_browser_challenge_providers {
+    ($page:expr, $registry:ident) => {
+        #[cfg(feature = "real_browser")]
+        let local_language_model_provider = LocalLanguageModelProvider { page: $page };
+        #[cfg(not(feature = "real_browser"))]
+        let _ = $page;
+
+        #[cfg(feature = "local_paligemma")]
+        let paligemma_local_provider = paligemma_provider().await;
+
+        // Genuinely unused when neither `real_browser` nor `local_paligemma`
+        // is compiled — no provider can be registered at all, and
+        // `execute_explicit_attempt`/`execute_browser_captcha_attempt*`
+        // below already report `ProviderUnavailable`/`ProviderFailure` for
+        // an empty registry.
+        #[cfg_attr(
+            not(any(feature = "real_browser", feature = "local_paligemma")),
+            allow(unused_mut)
+        )]
+        let mut $registry = CaptchaProviderRegistry::new();
+        // Every registration failure here can only be `DuplicateProvider`,
+        // structurally unreachable (each provider identity is registered at
+        // most once) — ignored rather than unwrapped so a future duplicate
+        // fails closed (resolve() simply won't find it) instead of
+        // panicking the whole page construction.
+        #[cfg(feature = "real_browser")]
+        {
+            let _ = $registry.register(&local_language_model_provider);
+        }
+        #[cfg(feature = "local_paligemma")]
+        if let Some(provider) = paligemma_local_provider {
+            let _ = $registry.register(provider);
+        }
+    };
+}
+
 /// The one canonical production entry point from a detected browser
 /// challenge to a provider-routed outcome, optionally bound to a real
 /// browser action —
@@ -1127,36 +1176,7 @@ pub(crate) async fn route_detected_browser_challenge(
         return CaptchaRouteOutcomeSummary::NotConfigured;
     };
 
-    #[cfg(feature = "real_browser")]
-    let local_language_model_provider = LocalLanguageModelProvider { page };
-    #[cfg(not(feature = "real_browser"))]
-    let _ = page;
-
-    #[cfg(feature = "local_paligemma")]
-    let paligemma_local_provider = paligemma_provider().await;
-
-    // Genuinely unused when neither `real_browser` nor `local_paligemma` is
-    // compiled — no provider can be registered at all, and
-    // `execute_explicit_attempt` below already reports `ProviderUnavailable`
-    // for an empty registry.
-    #[cfg_attr(
-        not(any(feature = "real_browser", feature = "local_paligemma")),
-        allow(unused_mut)
-    )]
-    let mut registry = CaptchaProviderRegistry::new();
-    // Every registration failure here can only be `DuplicateProvider`,
-    // structurally unreachable (each provider identity is registered at
-    // most once) — ignored rather than unwrapped so a future duplicate
-    // fails closed (resolve() simply won't find it) instead of panicking
-    // the whole page construction.
-    #[cfg(feature = "real_browser")]
-    {
-        let _ = registry.register(&local_language_model_provider);
-    }
-    #[cfg(feature = "local_paligemma")]
-    if let Some(provider) = paligemma_local_provider {
-        let _ = registry.register(provider);
-    }
+    register_browser_challenge_providers!(page, registry);
 
     if let Some(snapshot) = snapshot {
         let attempt = CaptchaBrowserAttempt {
@@ -1191,6 +1211,66 @@ pub(crate) async fn route_detected_browser_challenge(
     let mut attempts = CaptchaRouteAttempts::new();
     let outcome = attempts.execute_explicit_attempt(&registry, &request).await;
     summarize_route_outcome(outcome)
+}
+
+/// The frame-aware sibling of [`route_detected_browser_challenge`] —
+/// `FRAMED CANONICAL CHALLENGE -> PROVIDER ROUTER -> PROVIDER RESOLUTION ->
+/// CANONICAL PROVIDER OUTCOME -> FRAME-AWARE BROWSER ACTION`
+/// (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`). Composes the
+/// identical provider set (via [`register_browser_challenge_providers`])
+/// and the identical, pre-proven, provider-neutral binding contract —
+/// [`execute_browser_captcha_attempt_in_frame`] instead of
+/// [`execute_browser_captcha_attempt`], the *only* difference, chosen by
+/// the caller's own already-resolved [`FrameContext`] pair, never by
+/// provider identity and never by a fallback when frame resolution failed
+/// (that failure is `crate::features::browser_challenge_detection::FramedMaterialization::Failed`,
+/// decided before this function is ever called — see
+/// [`crate::features::browser_challenge_detection::DetectedBrowserChallenge::route`]).
+///
+/// Unlike the top-level router, this has no solve-only (`None`-snapshot)
+/// mode: a framed challenge is only ever routed once fully materialized
+/// (`FramedMaterialization::Ready`), so there is no legacy solve-only
+/// contract to preserve here.
+#[cfg(feature = "chrome")]
+pub(crate) async fn route_detected_framed_browser_challenge(
+    page: &chromiumoxide::Page,
+    top_level: &crate::features::frame_context::FrameContext,
+    frame: &crate::features::frame_context::FrameContext,
+    snapshot: &crate::features::browser_challenge::BrowserChallengeSnapshot,
+    challenge: CaptchaChallenge,
+    selected_provider: Option<CaptchaProviderId>,
+    deadline: Duration,
+) -> CaptchaRouteOutcomeSummary {
+    let Some(selected_provider) = selected_provider else {
+        return CaptchaRouteOutcomeSummary::NotConfigured;
+    };
+
+    register_browser_challenge_providers!(page, registry);
+
+    let attempt = CaptchaBrowserAttempt {
+        correlation_id: "browser-challenge-point-selection".into(),
+        selected_provider,
+        deadline,
+        challenge: CaptchaBrowserChallenge::PointSelection {
+            instruction: challenge.instruction,
+        },
+    };
+    match crate::features::captcha_browser::execute_browser_captcha_attempt_in_frame(
+        page, top_level, frame, snapshot, &registry, attempt,
+    )
+    .await
+    {
+        Ok(report) => CaptchaRouteOutcomeSummary::SolutionProduced {
+            action: CaptchaBrowserActionOutcome::Applied {
+                actions_applied: report.actions_applied,
+                // Always immediately overwritten by the sole caller with a
+                // real post-action detection result — see
+                // `route_detected_browser_challenge`'s identical comment.
+                challenge_observed_after_action: false,
+            },
+        },
+        Err(failure) => outcome_for_browser_action_failure(failure),
+    }
 }
 
 /// Reduce one [`CaptchaBrowserExecutionFailure`] to the same
@@ -4272,7 +4352,10 @@ mod route_detected_browser_challenge_tests {
             .await
             .unwrap();
         page.wait_for_navigation().await.unwrap();
-        let detected = detect_browser_challenge(&page).await.unwrap().unwrap();
+        let detected = detect_browser_challenge(&page, None)
+            .await
+            .unwrap()
+            .unwrap();
         let DetectedBrowserChallenge::TopLevel { snapshot, .. } = detected else {
             panic!("expected a top-level detection");
         };

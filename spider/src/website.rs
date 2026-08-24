@@ -139,7 +139,8 @@ macro_rules! chrome_page_fetch {
                         .6
                         .chrome_fetch_params()
                         .with_browser_dead(&$shared.11)
-                        .with_chrome_endpoint($shared.12.as_deref()),
+                        .with_chrome_endpoint($shared.12.as_deref())
+                        .with_browser(&$shared.5),
                     &$shared.1,
                     &$shared.3,
                     &mut links,
@@ -5345,7 +5346,10 @@ impl Website {
                         Some(seeded_html.clone()),
                         Some(&self.cookie_jar),
                         self.configuration.cache_namespace_str(),
-                        &self.configuration.chrome_fetch_params(),
+                        &self
+                            .configuration
+                            .chrome_fetch_params()
+                            .with_browser(browser),
                         &*base,
                         &self.configuration.external_domains_caseless,
                         &mut links,
@@ -5365,7 +5369,10 @@ impl Website {
                         self.configuration.max_page_bytes,
                         self.configuration.get_cache_options(),
                         self.configuration.cache_namespace_str(),
-                        &self.configuration.chrome_fetch_params(),
+                        &self
+                            .configuration
+                            .chrome_fetch_params()
+                            .with_browser(browser),
                         &*base,
                         &self.configuration.external_domains_caseless,
                         &mut links,
@@ -5456,7 +5463,10 @@ impl Website {
                             self.configuration.max_page_bytes,
                             self.configuration.get_cache_options(),
                             self.configuration.cache_namespace_str(),
-                            &self.configuration.chrome_fetch_params(),
+                            &self
+                                .configuration
+                                .chrome_fetch_params()
+                                .with_browser(browser),
                             &*base,
                             &self.configuration.external_domains_caseless,
                             &mut links,

@@ -2746,6 +2746,7 @@ impl Configuration {
             enhancements: self.enhancements,
             prefer_native_markdown: self.prefer_native_markdown && self.native_markdown_safe(),
             captcha_provider: &self.captcha_provider,
+            browser: None,
         }
     }
 

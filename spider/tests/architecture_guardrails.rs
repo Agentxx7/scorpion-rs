@@ -5794,8 +5794,22 @@ fn cli_and_mcp_captcha_observability_is_read_only() {
 #[test]
 fn browser_challenge_detection_runs_inside_the_live_fetch_not_after_it() {
     let utils_source = read_src_file("utils/mod.rs");
+    // Anchored on the call prefix alone (not the exact argument list): since
+    // SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001, this call also
+    // passes `params.browser` for frame-context materialization — the
+    // ordering invariant below is unaffected by that argument, and this
+    // string still uniquely (and only) matches the real call site, not a
+    // doc-comment mention (checked structurally: `assert_eq!(... .count(), 1)`
+    // below).
+    let detect_call_prefix =
+        "crate::features::browser_challenge_detection::detect_browser_challenge(";
+    assert_eq!(
+        utils_source.matches(detect_call_prefix).count(),
+        1,
+        "expected exactly one real call site for detect_browser_challenge in utils/mod.rs"
+    );
     let detect_pos = utils_source
-        .find("crate::features::browser_challenge_detection::detect_browser_challenge(page)")
+        .find(detect_call_prefix)
         .expect("fetch_page_html_chrome_base_inner must call detect_browser_challenge directly");
     let close_pos = utils_source
         .find("chromiumoxide::cdp::browser_protocol::page::CloseParams::default()")

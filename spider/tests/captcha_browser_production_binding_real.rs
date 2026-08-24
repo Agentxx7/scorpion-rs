@@ -220,7 +220,10 @@ async fn real_paligemma_solution_reaches_the_browser_and_clicks_the_target() {
     // to: capture -> execute_browser_captcha_attempt with the real
     // provider registered, then the same post-action re-detection
     // `DetectedBrowserChallenge::route` performs internally.
-    let detected = detect_browser_challenge(&page).await.unwrap().unwrap();
+    let detected = detect_browser_challenge(&page, None)
+        .await
+        .unwrap()
+        .unwrap();
     let DetectedBrowserChallenge::TopLevel {
         snapshot,
         challenge_element_id,
@@ -260,7 +263,7 @@ async fn real_paligemma_solution_reaches_the_browser_and_clicks_the_target() {
     // frontier's production wiring performs after a successful action:
     // the challenge element's role attribute was removed by the real click
     // handler, so the same evidence-based convention no longer matches it.
-    let after = detect_browser_challenge(&page).await.unwrap();
+    let after = detect_browser_challenge(&page, None).await.unwrap();
     assert!(
         after.is_none(),
         "the challenge must no longer be detected after the correct real action"
@@ -284,7 +287,10 @@ async fn deterministic_wrong_point_action_negative_test() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let detected = detect_browser_challenge(&page).await.unwrap().unwrap();
+    let detected = detect_browser_challenge(&page, None)
+        .await
+        .unwrap()
+        .unwrap();
     let DetectedBrowserChallenge::TopLevel {
         snapshot,
         instruction,
@@ -346,7 +352,7 @@ async fn deterministic_wrong_point_action_negative_test() {
         Some(&serde_json::json!(true)),
         "a wrong click must never set the fixture's real solved marker"
     );
-    let after = detect_browser_challenge(&page).await.unwrap();
+    let after = detect_browser_challenge(&page, None).await.unwrap();
     assert!(
         after.is_some(),
         "a wrong click must leave the challenge genuinely still detected"
@@ -362,7 +368,10 @@ async fn out_of_bounds_solution_dispatches_zero_actions() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let detected = detect_browser_challenge(&page).await.unwrap().unwrap();
+    let detected = detect_browser_challenge(&page, None)
+        .await
+        .unwrap()
+        .unwrap();
     let DetectedBrowserChallenge::TopLevel {
         snapshot,
         instruction,
@@ -453,7 +462,10 @@ async fn provider_failure_dispatches_zero_actions() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let detected = detect_browser_challenge(&page).await.unwrap().unwrap();
+    let detected = detect_browser_challenge(&page, None)
+        .await
+        .unwrap()
+        .unwrap();
     let DetectedBrowserChallenge::TopLevel {
         snapshot,
         instruction,
@@ -501,7 +513,7 @@ async fn normal_page_yields_no_detection_and_therefore_no_route_call() {
     let page = browser.new_page(base).await.unwrap();
     page.wait_for_navigation().await.unwrap();
 
-    let result = detect_browser_challenge(&page).await.unwrap();
+    let result = detect_browser_challenge(&page, None).await.unwrap();
     assert!(result.is_none());
 }
 

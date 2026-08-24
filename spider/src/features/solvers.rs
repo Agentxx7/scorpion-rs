@@ -22,8 +22,18 @@ use crate::features::captcha::{
 // regardless of which specific providers this build can construct.
 #[cfg(feature = "chrome")]
 use crate::features::captcha::{
-    CaptchaChallenge, CaptchaProviderId, CaptchaProviderRegistry, CaptchaRouteAttempts,
-    CaptchaRouteOutcomeSummary, CaptchaSolveFailure, CaptchaSolveOutcome, CaptchaSolveRequest,
+    CaptchaBrowserActionOutcome, CaptchaChallenge, CaptchaProviderId, CaptchaProviderRegistry,
+    CaptchaRouteAttempts, CaptchaRouteOutcomeSummary, CaptchaSolveFailure, CaptchaSolveOutcome,
+    CaptchaSolveRequest,
+};
+// The canonical, provider-neutral, pre-proven solution -> browser-action
+// binding seam (`SCORPION_CANONICAL_CAPTCHA_BROWSER_EXECUTION_BINDING_001`)
+// this router now composes, never reimplements, when a live snapshot is
+// available — see `route_detected_browser_challenge`'s own doc comment.
+#[cfg(feature = "chrome")]
+use crate::features::captcha_browser::{
+    execute_browser_captcha_attempt, CaptchaBrowserAttempt, CaptchaBrowserChallenge,
+    CaptchaBrowserExecutionFailure, CaptchaBrowserExecutionFailureKind,
 };
 #[cfg(all(feature = "chrome", feature = "real_browser"))]
 use crate::utils::{page_wait, perform_smart_mouse_movement, CF_WAIT_FOR};
@@ -1053,8 +1063,9 @@ fn resolve_paligemma_provider(
 }
 
 /// The one canonical production entry point from a detected browser
-/// challenge to a provider-routed outcome —
-/// `CANONICAL CHALLENGE -> PROVIDER ROUTER -> PROVIDER RESOLUTION -> CANONICAL PROVIDER OUTCOME`.
+/// challenge to a provider-routed outcome, optionally bound to a real
+/// browser action —
+/// `CANONICAL CHALLENGE -> PROVIDER ROUTER -> PROVIDER RESOLUTION -> CANONICAL PROVIDER OUTCOME [-> BROWSER ACTION]`.
 ///
 /// Composes only canonical primitives already defined in
 /// [`crate::features::captcha`] ([`CaptchaProviderRegistry`],
@@ -1081,11 +1092,33 @@ fn resolve_paligemma_provider(
 /// [`CaptchaRouteAttempts::execute_explicit_attempt`] still resolves and
 /// invokes exactly the one `selected_provider`.
 ///
-/// Never applies the resulting solution to the browser — that is a
-/// separate, later frontier's arrow.
+/// `snapshot` gates whether a produced solution is ever bound to the real
+/// browser (`SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001`):
+/// `None` preserves this function's original solve-only contract exactly
+/// (no snapshot, no action, ever — the shape every existing caller and unit
+/// test in this module still uses). `Some(snapshot)` additionally binds a
+/// produced solution to the browser through the pre-proven, provider-neutral
+/// [`crate::features::captcha_browser::execute_browser_captcha_attempt`]
+/// seam — the *only* browser-input dispatcher this function is ever allowed
+/// to reach (see `provider_router_binding_only_acts_through_the_canonical_browser_seam`
+/// in `architecture_guardrails.rs`): no ad-hoc click/type/submit here, and
+/// no branch on which specific provider produced the solution. This makes
+/// exactly one explicit provider attempt regardless of branch — the
+/// solve-then-bind sequence is `execute_browser_captcha_attempt`'s own
+/// internal composition, never a second, duplicate solve.
+///
+/// Dispatching a browser action is still never a "solved" claim — see
+/// [`crate::features::captcha::CaptchaBrowserActionOutcome`]'s doc comment.
+/// The truthful, minimal, real-DOM post-action observation
+/// (`challenge_observed_after_action`) is filled in by this function's sole
+/// caller, [`crate::features::browser_challenge_detection::DetectedBrowserChallenge::route`],
+/// which alone owns a second passive detection pass — this function never
+/// re-implements or reaches into that detector itself, preserving the
+/// existing one-way `browser_challenge_detection -> solvers` layering.
 #[cfg(feature = "chrome")]
 pub(crate) async fn route_detected_browser_challenge(
     page: &chromiumoxide::Page,
+    snapshot: Option<&crate::features::browser_challenge::BrowserChallengeSnapshot>,
     challenge: CaptchaChallenge,
     selected_provider: Option<CaptchaProviderId>,
     deadline: Duration,
@@ -1125,6 +1158,30 @@ pub(crate) async fn route_detected_browser_challenge(
         let _ = registry.register(provider);
     }
 
+    if let Some(snapshot) = snapshot {
+        let attempt = CaptchaBrowserAttempt {
+            correlation_id: "browser-challenge-point-selection".into(),
+            selected_provider,
+            deadline,
+            challenge: CaptchaBrowserChallenge::PointSelection {
+                instruction: challenge.instruction,
+            },
+        };
+        return match execute_browser_captcha_attempt(page, snapshot, &registry, attempt).await {
+            Ok(report) => CaptchaRouteOutcomeSummary::SolutionProduced {
+                action: CaptchaBrowserActionOutcome::Applied {
+                    actions_applied: report.actions_applied,
+                    // Always immediately overwritten by the sole caller
+                    // with a real post-action detection result before this
+                    // outcome is ever retained or observed externally — see
+                    // this function's own doc comment.
+                    challenge_observed_after_action: false,
+                },
+            },
+            Err(failure) => outcome_for_browser_action_failure(failure),
+        };
+    }
+
     let request = CaptchaSolveRequest {
         correlation_id: "browser-challenge-point-selection".into(),
         selected_provider,
@@ -1136,13 +1193,43 @@ pub(crate) async fn route_detected_browser_challenge(
     summarize_route_outcome(outcome)
 }
 
+/// Reduce one [`CaptchaBrowserExecutionFailure`] to the same
+/// `Clone + Debug + PartialEq` summary vocabulary as the solve-only path.
+/// `ProviderFailure` means the provider attempt itself failed before any
+/// browser binding was attempted — recovered from the retained attempt
+/// ledger and classified through the exact same [`summarize_route_outcome`]
+/// used by the solve-only path, so both paths report a given provider
+/// failure identically. Every other kind means a solution *was* produced
+/// but binding it to the browser failed (materialization, an unbound or
+/// out-of-bounds solution, or the exact action/revalidation dispatch
+/// itself) — reported as `SolutionProduced`'s own `Failed` action outcome,
+/// preserving the true fact that the provider succeeded.
+#[cfg(feature = "chrome")]
+fn outcome_for_browser_action_failure(
+    failure: CaptchaBrowserExecutionFailure,
+) -> CaptchaRouteOutcomeSummary {
+    match &failure.kind {
+        CaptchaBrowserExecutionFailureKind::ProviderFailure => {
+            match failure.attempts.recorded().last() {
+                Some(attempt) => summarize_route_outcome(&attempt.outcome),
+                None => CaptchaRouteOutcomeSummary::ProviderFailed(format!("{:?}", failure.kind)),
+            }
+        }
+        _ => CaptchaRouteOutcomeSummary::SolutionProduced {
+            action: CaptchaBrowserActionOutcome::Failed(format!("{:?}", failure.kind)),
+        },
+    }
+}
+
 /// Reduce a live [`CaptchaSolveOutcome`] to the `Clone + Debug + PartialEq`
 /// summary retained on [`crate::page::Page`] — see
 /// [`CaptchaRouteOutcomeSummary`]'s doc comment for why.
 #[cfg(feature = "chrome")]
 fn summarize_route_outcome(outcome: &CaptchaSolveOutcome) -> CaptchaRouteOutcomeSummary {
     match outcome {
-        CaptchaSolveOutcome::Solved { .. } => CaptchaRouteOutcomeSummary::SolutionProduced,
+        CaptchaSolveOutcome::Solved { .. } => CaptchaRouteOutcomeSummary::SolutionProduced {
+            action: CaptchaBrowserActionOutcome::NotAttempted,
+        },
         CaptchaSolveOutcome::Failed { failure, .. } => match failure {
             CaptchaSolveFailure::ProviderUnavailable
             | CaptchaSolveFailure::CredentialUnavailable => {
@@ -4088,6 +4175,7 @@ mod route_detected_browser_challenge_tests {
         let page = browser.new_page("about:blank").await.unwrap();
         let outcome = route_detected_browser_challenge(
             &page,
+            None,
             dummy_challenge(),
             None,
             std::time::Duration::from_secs(5),
@@ -4105,6 +4193,7 @@ mod route_detected_browser_challenge_tests {
         let page = browser.new_page("about:blank").await.unwrap();
         let outcome = route_detected_browser_challenge(
             &page,
+            None,
             dummy_challenge(),
             Some(CaptchaProviderId::PALIGEMMA_LOCAL),
             std::time::Duration::from_secs(5),
@@ -4127,11 +4216,75 @@ mod route_detected_browser_challenge_tests {
         let page = browser.new_page("about:blank").await.unwrap();
         let outcome = route_detected_browser_challenge(
             &page,
+            None,
             dummy_challenge(),
             Some(CaptchaProviderId::LOCAL_LANGUAGE_MODEL),
             std::time::Duration::from_secs(15),
         )
         .await;
         assert_eq!(outcome, CaptchaRouteOutcomeSummary::ProviderUnavailable);
+    }
+
+    /// REAL CHROME PRODUCTION ROUTING PROOF for the `Some(snapshot)` branch
+    /// added by `SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001`:
+    /// a genuine `BrowserChallengeSnapshot`, obtained the same way
+    /// production does — through the canonical detector's own capture
+    /// step, never by reimplementing that step directly in this module
+    /// (see `canonical_captcha_execution_seam_is_not_reimplemented_in_solvers`
+    /// in `architecture_guardrails.rs`, which forbids exactly that) — routed
+    /// with an unregistered provider still classifies through
+    /// `outcome_for_browser_action_failure`'s `ProviderFailure` recovery to
+    /// the exact same `ProviderUnavailable` the solve-only path reports —
+    /// proving both branches agree on provider-level failure, and that no
+    /// browser action is ever dispatched when the provider itself never
+    /// resolved (no `Applied`/`Failed` action outcome leaks through here).
+    #[tokio::test]
+    async fn snapshot_bound_route_with_unregistered_provider_is_typed_unavailable() {
+        use crate::features::browser_challenge_detection::{
+            detect_browser_challenge, DetectedBrowserChallenge,
+        };
+
+        let browser = launch().await;
+        let html = r#"<!doctype html><style>
+  body{margin:0}
+  #challenge-1{position:absolute;left:0;top:0;width:240px;height:120px}
+  #pick-1{position:absolute;left:0;top:0;width:1px;height:1px}
+</style>
+<div id="challenge-1" role="application" aria-label="pick a point">
+  <div id="pick-1" role="button" tabindex="0"></div>
+</div>"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                html.len(),
+                html
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let page = browser
+            .new_page(format!("http://{address}/"))
+            .await
+            .unwrap();
+        page.wait_for_navigation().await.unwrap();
+        let detected = detect_browser_challenge(&page).await.unwrap().unwrap();
+        let DetectedBrowserChallenge::TopLevel { snapshot, .. } = detected else {
+            panic!("expected a top-level detection");
+        };
+        let outcome = route_detected_browser_challenge(
+            &page,
+            Some(&snapshot),
+            dummy_challenge(),
+            Some(CaptchaProviderId::PALIGEMMA_LOCAL),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(outcome, CaptchaRouteOutcomeSummary::ProviderUnavailable);
+        server.await.unwrap();
     }
 }

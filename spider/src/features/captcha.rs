@@ -99,9 +99,13 @@ pub enum BrowserChallengeObservation {
 /// concern.
 ///
 /// `SolutionProduced` is deliberately not named `Solved`: a provider
-/// returning a normalized answer is not a claim that the browser challenge
-/// was actually solved — applying the answer to the real page is a later,
-/// separate frontier's arrow (`SOLUTION -> BROWSER ACTION`), not this one's.
+/// returning a normalized answer is not itself a claim that the browser
+/// challenge was actually solved. `SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001`
+/// binds a produced solution to a real browser action through the existing,
+/// pre-proven `crate::features::captcha_browser::execute_browser_captcha_attempt`
+/// seam and carries that action's own truthful outcome as `action` —
+/// still never equating a successfully dispatched action with "solved";
+/// see [`CaptchaBrowserActionOutcome`]'s doc comment.
 #[cfg(feature = "chrome")]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CaptchaRouteOutcomeSummary {
@@ -120,8 +124,50 @@ pub enum CaptchaRouteOutcomeSummary {
     /// its `Debug` text (`CaptchaSolveFailure` is not `Clone`/`PartialEq`).
     ProviderFailed(String),
     /// The provider executed and returned a normalized solution. Not a
-    /// claim of "solved" — see the type doc comment.
-    SolutionProduced,
+    /// claim of "solved" — see the type doc comment. `action` is the
+    /// truthful, separately-owned outcome of binding that solution to the
+    /// real browser, if any binding was attempted at this call site.
+    SolutionProduced {
+        /// Outcome of applying the produced solution to the live browser.
+        action: CaptchaBrowserActionOutcome,
+    },
+}
+
+/// Truthful outcome of binding one produced [`CaptchaRouteOutcomeSummary::SolutionProduced`]
+/// solution to the real browser through
+/// `crate::features::captcha_browser::execute_browser_captcha_attempt`.
+/// Deliberately does not contain a "solved" state: dispatching a real
+/// browser action (a real CDP mouse click at a real transformed point) is
+/// observable and reported here as `Applied`, but whether the underlying
+/// challenge actually progressed as a result stays a separate, narrower,
+/// best-effort observation (`challenge_observed_after_action`) — one more
+/// pass of the exact same evidence-based detection convention used to find
+/// the challenge in the first place, never a provider- or fixture-specific
+/// "solved" heuristic, and never a claim beyond what that convention can
+/// truthfully support.
+#[cfg(feature = "chrome")]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CaptchaBrowserActionOutcome {
+    /// A solution was produced but this call site never attempts a browser
+    /// action (no live page/snapshot was available to bind against).
+    NotAttempted,
+    /// One or more real, exact browser actions were dispatched successfully.
+    Applied {
+        /// Number of exact browser actions successfully dispatched.
+        actions_applied: usize,
+        /// Result of re-running the same passive, provider-neutral
+        /// challenge detector once, immediately after the action: `true`
+        /// when the same evidence-based challenge convention still matches
+        /// this exact challenge element afterwards (best-effort "not yet
+        /// gone" signal), `false` when it no longer does (best-effort
+        /// "state changed" signal). Never a general CAPTCHA-solved claim.
+        challenge_observed_after_action: bool,
+    },
+    /// A real solution was produced but binding it to the browser failed —
+    /// materialization, revalidation, bounds or the exact action dispatch
+    /// itself. Preserved as `Debug` text
+    /// (`CaptchaBrowserExecutionFailure` is not `Clone`/`PartialEq`).
+    Failed(String),
 }
 
 /// One explicitly identified cell in a materialized full-grid image.

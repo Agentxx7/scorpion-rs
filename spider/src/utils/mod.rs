@@ -5894,12 +5894,14 @@ async fn fetch_page_html_chrome_base_inner<'h>(
     }
 
     // Passive, provider-neutral challenge detection
-    // (SCORPION_BROWSER_CHALLENGE_REAL_CRAWL_SESSION_LIFETIME_001). This
-    // MUST run here, before this function's own unconditional page-close
-    // below (`chrome_store_page` off — the shipping default) — `page` is
-    // still guaranteed live at this exact point, having just been used for
-    // this same extraction. `Page::new_base`, the caller, receives only
-    // the plain `Result<PageResponse, _>` this function returns; by the
+    // (SCORPION_BROWSER_CHALLENGE_REAL_CRAWL_SESSION_LIFETIME_001), now
+    // optionally followed by a real, bounded browser action when a solution
+    // is produced (SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001).
+    // This MUST run here, before this function's own unconditional
+    // page-close below (`chrome_store_page` off — the shipping default) —
+    // `page` is still guaranteed live at this exact point, having just been
+    // used for this same extraction. `Page::new_base`, the caller, receives
+    // only the plain `Result<PageResponse, _>` this function returns; by the
     // time it got to call CDP itself the close below (or the browser's
     // own post-navigation target teardown observed live via this
     // frontier's audit) already made the page unusable, and every
@@ -5907,10 +5909,31 @@ async fn fetch_page_html_chrome_base_inner<'h>(
     // never a false `NoChallenge`, but never a real detection either. See
     // `crate::features::browser_challenge_detection`'s own module docs for
     // the detection contract this preserves unchanged; only the timing of
-    // *when* it runs changed. Never mutates the browser: detection itself
-    // performs no click/type/submit, and this crate's own router
-    // (`route_detected_browser_challenge`, invoked from `.route()` below)
-    // never dispatches browser action either.
+    // *when* it runs changed.
+    //
+    // Page-content semantics (explicitly decided, not silently chosen):
+    // this page's `content`/`html` was already extracted earlier in this
+    // same function, strictly *before* this detection-and-action block
+    // runs — so `PageResponse`'s own materialized content is always the
+    // pre-action DOM, never mutated by a click this block may perform
+    // afterward. Any real browser-action evidence lives only in
+    // `browser_challenge_observation` below (`CaptchaRouteOutcomeSummary::SolutionProduced`'s
+    // `action` field), never folded back into `content`. A caller wanting
+    // truly post-action markup would need a second, explicit extraction —
+    // out of scope here, and not silently faked by rewriting `content` in
+    // place.
+    //
+    // Detection itself still performs no click/type/submit. When a
+    // solution *is* produced, `.route()` below binds it to the browser only
+    // through the pre-proven, provider-neutral
+    // `crate::features::captcha_browser::execute_browser_captcha_attempt`
+    // seam (composed inside `route_detected_browser_challenge`'s own
+    // `Some(snapshot)` branch) — never an ad-hoc dispatcher here, never a
+    // branch on which provider produced the solution, and never more than
+    // the one explicit provider attempt and the resulting bounded set of
+    // exact actions that seam already makes. No retry: exactly one
+    // provider attempt per detected challenge per page load, matching
+    // every other outcome this router already returns.
     let browser_challenge_observation =
         match crate::features::browser_challenge_detection::detect_browser_challenge(page).await {
             Ok(Some(detected)) => {

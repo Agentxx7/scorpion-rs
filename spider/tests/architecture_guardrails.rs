@@ -5644,39 +5644,74 @@ fn cli_and_mcp_do_not_perform_captcha_provider_switching() {
     }
 }
 
-/// The canonical router never applies its outcome to the browser — no
-/// click/type/submit dispatcher may be reachable from
-/// `route_detected_browser_challenge`'s own source. Applying a solution to
-/// a live page remains a separate, later frontier's arrow.
+/// `SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001`
+/// supersedes this function's original solve-only scope: the router may now
+/// bind a produced solution to the real browser, but only ever through the
+/// one pre-proven, provider-neutral `execute_browser_captcha_attempt` seam —
+/// never an ad-hoc click/type/submit dispatcher invented here, and never a
+/// branch on which specific provider produced the solution (the forbidden
+/// pattern `if provider == PALIGEMMA_LOCAL { click(...) }`).
 #[test]
-fn provider_router_binding_never_dispatches_browser_actions() {
+fn provider_router_binding_only_acts_through_the_canonical_browser_seam() {
     let source = read_src_file("features/solvers.rs");
     let router_start = source
         .find("pub(crate) async fn route_detected_browser_challenge")
         .expect("route_detected_browser_challenge must exist in solvers.rs");
     // Slice from the router's own definition through the end of its
-    // immediately following helper (summarize_route_outcome) — narrow
-    // enough to avoid false positives from unrelated legacy solver code
-    // elsewhere in this large file, wide enough to cover everything the
-    // router itself can reach.
+    // immediately following helpers (outcome_for_browser_action_failure,
+    // summarize_route_outcome) — narrow enough to avoid false positives
+    // from unrelated legacy solver code elsewhere in this large file, wide
+    // enough to cover everything the router itself can reach.
     let router_and_helper_end = source[router_start..]
         .find("\n#[cfg(all(feature = \"chrome\", feature = \"real_browser\"))]\nstruct ExternalGeminiProvider")
         .map(|offset| router_start + offset)
         .unwrap_or(source.len());
     let router_source = &source[router_start..router_and_helper_end];
+    assert!(
+        router_source
+            .contains("execute_browser_captcha_attempt(page, snapshot, &registry, attempt)"),
+        "route_detected_browser_challenge must bind a produced solution to \
+         the browser only through the canonical execute_browser_captcha_attempt seam"
+    );
     for forbidden in [
-        "execute_browser_captcha_attempt",
-        "BrowserChallengeAction",
-        ".click(",
-        ".apply(",
+        "page.click_smooth(",
+        "click_and_drag_smooth(",
+        "send_command(chromiumoxide::cdp::browser_protocol::input",
+        "if provider ==",
+        "if selected_provider == CaptchaProviderId::PALIGEMMA_LOCAL",
+        "if selected_provider == CaptchaProviderId::LOCAL_LANGUAGE_MODEL",
     ] {
         assert!(
             !router_source.contains(forbidden),
-            "route_detected_browser_challenge must never reach browser \
-             action dispatch ({forbidden:?} found) — this frontier stops \
-             at the canonical provider outcome"
+            "route_detected_browser_challenge must never dispatch browser \
+             input directly or branch on a specific provider identity \
+             ({forbidden:?} found) — action dispatch stays owned by the \
+             canonical execute_browser_captcha_attempt seam alone"
         );
     }
+}
+
+/// The router's own post-provider-failure recovery
+/// (`outcome_for_browser_action_failure`) must reuse the exact same
+/// provider-failure classification the solve-only path uses
+/// (`summarize_route_outcome`) rather than re-deriving a second, possibly
+/// divergent mapping from `CaptchaSolveFailure` to `CaptchaRouteOutcomeSummary`.
+#[test]
+fn browser_action_failure_recovery_reuses_solve_only_classification() {
+    let source = read_src_file("features/solvers.rs");
+    let helper_start = source
+        .find("fn outcome_for_browser_action_failure(")
+        .expect("outcome_for_browser_action_failure must exist in solvers.rs");
+    let helper_end = source[helper_start..]
+        .find("\n/// Reduce a live [`CaptchaSolveOutcome`]")
+        .map(|offset| helper_start + offset)
+        .unwrap_or(source.len());
+    let helper_source = &source[helper_start..helper_end];
+    assert!(
+        helper_source.contains("summarize_route_outcome(&attempt.outcome)"),
+        "outcome_for_browser_action_failure must recover a provider-level \
+         failure through summarize_route_outcome, not a duplicated match"
+    );
 }
 
 // ---------------------------------------------------------------------------

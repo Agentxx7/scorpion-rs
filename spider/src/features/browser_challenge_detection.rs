@@ -199,10 +199,23 @@ impl DetectedBrowserChallenge {
     /// (`crate::features::solvers::route_detected_browser_challenge`) if,
     /// and only if, it was fully materialized in the top-level document.
     /// Framed evidence is never routed in this frontier — see the
-    /// module-level "Frame scope" section. Never mutates the browser: the
-    /// router itself performs no click/type/submit, only an explicit
-    /// provider `solve()` attempt (or none, when no provider is
-    /// configured).
+    /// module-level "Frame scope" section.
+    ///
+    /// When a solution is produced, also binds it to the real browser
+    /// through the router's own `Some(snapshot)` branch
+    /// (`SCORPION_CANONICAL_CAPTCHA_SOLUTION_BROWSER_ACTION_BINDING_001`) —
+    /// the router itself only ever reaches browser input through the
+    /// pre-proven `execute_browser_captcha_attempt` seam, never an ad-hoc
+    /// dispatcher, and never more than the one explicit provider attempt
+    /// that seam already makes. After a real action is applied, this
+    /// method — and only this method, never the router — performs one more
+    /// passive detection pass through the exact same evidence-based
+    /// convention used to find the challenge in the first place, and
+    /// records whether the same challenge element is still observed. This
+    /// is deliberately not a "solved" claim, only the minimal genuine
+    /// real-DOM evidence that the dispatched action did something —
+    /// [`crate::features::captcha::CaptchaBrowserActionOutcome`]'s own doc
+    /// comment explains why no stronger claim is made.
     pub(crate) async fn route(
         &self,
         page: &Page,
@@ -212,7 +225,7 @@ impl DetectedBrowserChallenge {
         let Self::TopLevel {
             snapshot,
             instruction,
-            ..
+            challenge_element_id,
         } = self
         else {
             return None;
@@ -226,15 +239,46 @@ impl DetectedBrowserChallenge {
                 snapshot.visual_bytes.clone(),
             )],
         };
-        Some(
-            crate::features::solvers::route_detected_browser_challenge(
-                page,
-                challenge,
-                selected_provider,
-                deadline,
-            )
-            .await,
+        let outcome = crate::features::solvers::route_detected_browser_challenge(
+            page,
+            Some(snapshot),
+            challenge,
+            selected_provider,
+            deadline,
         )
+        .await;
+
+        use crate::features::captcha::{CaptchaBrowserActionOutcome, CaptchaRouteOutcomeSummary};
+        let CaptchaRouteOutcomeSummary::SolutionProduced {
+            action:
+                CaptchaBrowserActionOutcome::Applied {
+                    actions_applied, ..
+                },
+        } = &outcome
+        else {
+            return Some(outcome);
+        };
+        let actions_applied = *actions_applied;
+
+        // Minimal, generic, real-DOM post-action observation: re-run the
+        // exact same passive detector once more and check whether it still
+        // matches this same challenge element. Never a fixture-specific
+        // "solved" marker, never a Rust-side flag flipped without a real
+        // browser round trip.
+        let challenge_observed_after_action = matches!(
+            detect_browser_challenge(page).await,
+            Ok(Some(DetectedBrowserChallenge::TopLevel {
+                challenge_element_id: ref observed_id,
+                ..
+            })) if observed_id == challenge_element_id
+        );
+
+        Some(CaptchaRouteOutcomeSummary::SolutionProduced {
+            action: CaptchaBrowserActionOutcome::Applied {
+                actions_applied,
+                challenge_observed_after_action,
+            },
+        })
     }
 
     /// Reduce this live-handle-bearing result to the plain, `Clone + Debug`

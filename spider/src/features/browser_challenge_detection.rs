@@ -50,38 +50,53 @@
 //! through the top-level page's own CDP session, so both — consistently —
 //! reach the top-level document, shadow roots, and genuinely same-process
 //! ("`SameSessionChild`", see [`crate::features::frame_context`]) child
-//! frames, but *not* a genuine out-of-process (OOPIF) child, which lives on
-//! a separate CDP target this seam never attaches to. For a same-session
-//! child, this module reports truthful, correct frame identity (the exact
-//! `FrameId`, and its parent `FrameId`) and — when `detect_browser_challenge`
-//! is given a live `browser` handle
-//! (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`) — also attempts
-//! full materialization via [`BrowserChallengeSnapshot::capture_in_frame`].
-//! That requires a [`crate::features::frame_context::FrameContext`], which
-//! in turn requires `Target.attachedToTarget`/`TargetInfo` identity this
-//! seam's own top-level `Page` did not previously expose; `detect_browser_challenge`
-//! resolves the top-level `TargetInfo` itself, fresh, via
-//! `Target.getTargetInfo(page.target_id())` (proven to work through the
-//! page's own attached session — no separate event-stream capture needed),
-//! then [`crate::features::frame_context::FrameContext::resolve_same_session_child`]
-//! for the child. A genuine out-of-process (OOPIF) child still cannot be
-//! materialized here: `resolve_same_session_child` proves ownership through
-//! the *parent's* exact session, and an OOPIF target never attaches to it —
-//! see [`FrameMaterializationFailure`] for how that fails closed, typed,
-//! never as a silent top-level fallback. Passing `browser: None` (every
-//! existing caller/test) preserves this module's exact prior behavior:
-//! `FramedEvidence` reports identity only, `materialization:
-//! FramedMaterialization::Unavailable`, never routed.
+//! frames, but *not* a genuine out-of-process (OOPIF) child: `pierce: true`
+//! only recurses through a node's `content_document`, which Chromium simply
+//! never populates for an OOPIF `<iframe>` element (its content lives on a
+//! separate CDP target this walk never attaches to) — so an OOPIF
+//! challenge is not merely "found but unmaterializable", it is invisible to
+//! this walk from the start; `scan_node` never even has a subtree to
+//! recurse into.
+//!
+//! When `detect_browser_challenge` is given a live `browser` handle
+//! (`SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001` /
+//! `SCORPION_CANONICAL_CAPTCHA_OOPIF_SESSION_CONTEXT_BINDING_001`), a
+//! same-session child match is fully materialized via
+//! [`BrowserChallengeSnapshot::capture_in_frame`] — resolving the top-level
+//! `TargetInfo` fresh via `Target.getTargetInfo(page.target_id())` (proven
+//! to work through the page's own attached session), then
+//! [`crate::features::frame_context::FrameContext::resolve_same_session_child`].
+//! If the top-level walk finds *no* evidence at all, this module *also*
+//! probes for a genuine OOPIF challenge: a fresh `Target.getTargets` call
+//! (never a persistent event subscription — see [`probe_oopif_challenges`]'s
+//! own doc comment for why that is enough) lists every currently attached
+//! `"iframe"`-typed target, and for each one,
+//! [`crate::features::frame_context::FrameContext::resolve_child`] — the
+//! exact, already real-Turnstile-proven OOPIF constructor — attaches to its
+//! own session and re-runs this module's own evidence walk *through that
+//! session*. Only a candidate whose own document genuinely contains
+//! matching evidence is ever materialized (never "first child", never a
+//! URL/text guess) — see [`probe_oopif_challenges`]. Passing `browser:
+//! None` (every existing caller/test predating this capability) preserves
+//! this module's exact prior behavior: a same-session `FramedEvidence`
+//! reports identity only (`materialization: FramedMaterialization::Unavailable`),
+//! and a genuine OOPIF challenge is not even attempted, exactly as before.
 
 #![cfg(feature = "chrome")]
 
-use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, Node};
+use chromiumoxide::cdp::browser_protocol::dom::{BackendNodeId, GetDocumentParams, Node};
 use chromiumoxide::cdp::browser_protocol::page::FrameId as CdpFrameId;
-use chromiumoxide::cdp::browser_protocol::target::GetTargetInfoParams;
+use chromiumoxide::cdp::browser_protocol::target::{GetTargetInfoParams, GetTargetsParams};
 use chromiumoxide::{Browser, Page};
 
 use crate::features::browser_challenge::{BrowserChallengeFailure, BrowserChallengeSnapshot};
 use crate::features::frame_context::{FrameContext, FrameContextFailure};
+
+/// Bound on [`probe_oopif_challenges`]'s poll for a genuine OOPIF child to
+/// finish attaching after the top-level page's own navigation completes.
+const OOPIF_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Poll interval for the same wait.
+const OOPIF_ATTACH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Typed detection failure. Distinct from "no challenge found" (`Ok(None)`):
 /// this means the observation itself could not be trusted, not that the
@@ -253,6 +268,23 @@ pub async fn detect_browser_challenge(
     scan_node(&root, &top_frame_id, None, &mut evidence);
 
     let Some(matched) = evidence.into_iter().next() else {
+        // No evidence anywhere the top-level pierced walk can see. When a
+        // live browser handle is available, *and* the already-fetched tree
+        // shows at least one `<iframe>` element whose content is genuinely
+        // absent here (`content_document: None` — the structural OOPIF
+        // signature this same tree already carries, no extra CDP call
+        // needed to check it), also probe genuine OOPIF children. An
+        // ordinary page with no such candidate never pays any of this
+        // cost — see this module's own "Frame scope" docs and
+        // `probe_oopif_challenges`'s doc comment for exactly what probing
+        // does and does not claim.
+        if let Some(browser) = browser {
+            if has_potential_oopif_candidate(&root) {
+                if let Some(detected) = probe_oopif_challenges(page, browser, &top_frame_id).await {
+                    return Ok(Some(detected));
+                }
+            }
+        }
         return Ok(None);
     };
 
@@ -373,6 +405,148 @@ async fn materialize_framed_challenge(
         Err(failure) => {
             FramedMaterialization::Failed(FrameMaterializationFailure::Snapshot(failure))
         }
+    }
+}
+
+/// Probe genuine out-of-process (OOPIF) children for supported challenge
+/// evidence — only ever reached when the top-level pierced DOM walk found
+/// no evidence anywhere, since a genuine OOPIF child's content is
+/// structurally invisible to that walk (see this module's own "Frame
+/// scope" docs).
+///
+/// A fresh `Target.getTargets` call — not a persistent event subscription
+/// — is enough: `SCORPION_CANONICAL_CAPTCHA_FRAME_ACTION_BINDING_001`
+/// already proved a page's own `TargetInfo` can be queried fresh, on
+/// demand, through nothing more than the page's own attached session;
+/// `Target.getTargets` is the same kind of on-demand, `&Browser`-scoped
+/// read, listing every target Chromium's own (already-enabled, needed for
+/// its internal auto-attach bookkeeping) target discovery already knows
+/// about — no new subscription to own, bound, or clean up. For each
+/// `"iframe"`-typed candidate, [`FrameContext::resolve_child`] — the exact
+/// primitive an earlier frontier's real Turnstile acceptance already
+/// proved correct for genuine OOPIF — attaches to its own session (or
+/// fails typed, e.g. for an ordinary same-session iframe that also shows
+/// up in this listing but can never resolve as a child target) and this
+/// module's own `scan_node` evidence walk runs again, this time through
+/// that child's own session. Only a candidate whose own document genuinely
+/// contains matching evidence is ever materialized — never "first child",
+/// never a URL/text guess: an iframe target with no matching evidence, or
+/// that fails to resolve at all, is simply skipped. Never mutates the
+/// page: every CDP call here (`Target.getTargetInfo`, `Target.getTargets`,
+/// frame-context resolution, `DOM.getDocument`, `Page.captureScreenshot`)
+/// is a read.
+async fn probe_oopif_challenges(
+    page: &Page,
+    browser: &Browser,
+    top_frame_id: &str,
+) -> Option<DetectedBrowserChallenge> {
+    let top_level_target_info = page
+        .execute(
+            GetTargetInfoParams::builder()
+                .target_id(page.target_id().clone())
+                .build(),
+        )
+        .await
+        .ok()?
+        .result
+        .target_info;
+    let top_level = FrameContext::resolve_top_level(browser, &top_level_target_info)
+        .await
+        .ok()?;
+
+    // Bounded poll: a genuine OOPIF child needs an entire separate renderer
+    // process to spin up, navigate and auto-attach, which can genuinely
+    // lag behind the top-level page's own "load" — observed live, a fresh
+    // `Target.getTargets` immediately after top-level navigation completes
+    // can still report zero matching iframe targets for a child that
+    // attaches only a few hundred milliseconds later. Re-list and retry
+    // the full candidate scan for up to `OOPIF_ATTACH_TIMEOUT`, exactly the
+    // same bounded-wait shape `FrameContext`'s own
+    // `wait_for_frame_and_owner` already uses for a materially identical
+    // "target/frame just attached, Chromium hasn't fully settled yet"
+    // race — never unbounded, never retried past this deadline. A page
+    // with no genuine OOPIF candidate at all pays this cost too, but only
+    // ever reaches this function when the caller's own
+    // `has_potential_oopif_candidate` check already found a real
+    // `<iframe>` element with no visible content — never an ordinary,
+    // iframe-free page.
+    // Defensive, idempotent re-assertion that target discovery is enabled
+    // — chromiumoxide's own Handler already enables this at browser launch
+    // for its internal auto-attach bookkeeping, but re-asserting it here is
+    // a cheap, safe no-op when already enabled and costs nothing extra.
+    let _ = browser
+        .execute(chromiumoxide::cdp::browser_protocol::target::SetDiscoverTargetsParams::new(true))
+        .await;
+
+    let deadline = tokio::time::Instant::now() + OOPIF_ATTACH_TIMEOUT;
+    loop {
+        let candidates = browser
+            .execute(GetTargetsParams::builder().build())
+            .await
+            .ok()?
+            .result
+            .target_infos;
+
+        for candidate in candidates.iter().filter(|target| target.r#type == "iframe") {
+            let Ok(child) = FrameContext::resolve_child(browser, &top_level, candidate).await
+            else {
+                continue;
+            };
+            let Ok(response) = child
+                .execute(GetDocumentParams {
+                    depth: Some(-1),
+                    pierce: Some(true),
+                })
+                .await
+            else {
+                continue;
+            };
+            let mut evidence = Vec::new();
+            scan_node(
+                &response.result.root,
+                child.frame_id.0.as_str(),
+                Some(top_frame_id),
+                &mut evidence,
+            );
+            let Some(matched) = evidence.into_iter().next() else {
+                continue;
+            };
+            let targets = matched
+                .target_ids
+                .iter()
+                .map(|(id, backend_node_id)| (id.clone(), *backend_node_id))
+                .collect();
+            let materialization = match BrowserChallengeSnapshot::capture_in_frame(
+                page,
+                &top_level,
+                &child,
+                matched.challenge_backend_node_id,
+                targets,
+            )
+            .await
+            {
+                Ok(snapshot) => FramedMaterialization::Ready {
+                    top_level,
+                    frame: child,
+                    snapshot,
+                },
+                Err(failure) => {
+                    FramedMaterialization::Failed(FrameMaterializationFailure::Snapshot(failure))
+                }
+            };
+            return Some(DetectedBrowserChallenge::FramedEvidence {
+                frame_id: matched.frame_id,
+                parent_frame_id: matched.parent_frame_id,
+                challenge_element_id: matched.challenge_id,
+                instruction: matched.instruction,
+                materialization,
+            });
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(OOPIF_ATTACH_POLL_INTERVAL).await;
     }
 }
 
@@ -590,6 +764,40 @@ fn attr<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+/// Whether the already-fetched pierced tree contains at least one
+/// `<iframe>` element at all. Zero extra CDP calls: `root` is the same tree
+/// the top-level evidence walk already fetched. An ordinary page with no
+/// `<iframe>` element anywhere never pays [`probe_oopif_challenges`]'s
+/// cost.
+///
+/// Deliberately not narrowed to "`content_document: None`" — observed
+/// live: right after the top-level page's own navigation completes, an
+/// `<iframe>` that is *about* to become a genuine out-of-process child can
+/// still carry its transient pre-navigation placeholder `content_document`
+/// (the same "briefly still the pre-navigation placeholder" race
+/// `FrameContext::resolve`'s own doc comment already documents for target
+/// attachment) — checking `content_document.is_none()` here would miss
+/// exactly the common case this seam exists to catch. Any `<iframe>`
+/// element is enough to justify [`probe_oopif_challenges`]'s bounded poll;
+/// a same-session child is cheaply ruled out there (`resolve_child` fails
+/// closed for it) without ever reaching a second, duplicate evidence walk.
+fn has_potential_oopif_candidate(node: &Node) -> bool {
+    if node.node_name.eq_ignore_ascii_case("iframe") {
+        return true;
+    }
+    if let Some(shadow_roots) = node.shadow_roots.as_ref() {
+        if shadow_roots.iter().any(has_potential_oopif_candidate) {
+            return true;
+        }
+    }
+    if let Some(children) = node.children.as_ref() {
+        if children.iter().any(has_potential_oopif_candidate) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Recursively walk one pierced CDP document tree, tracking which `FrameId`

@@ -174,6 +174,7 @@ async fn serve(bind_addr: &str, body: String) -> (u16, tokio::task::JoinHandle<(
 /// cross-origin OOPIF's challenge and produces a real solved transition,
 /// with no injected solution anywhere in this call graph.
 #[tokio::test]
+#[ignore = "requires pinned PaliGemma artifacts and a qualified CUDA/F16 or CPU/F32 host — real GitHub-hosted CI runners have neither; see SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_PARTITION_001"]
 async fn website_crawl_shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge() {
     let (child_port, _cs) = serve("127.0.0.1:0", challenge_child_html()).await;
     let (top_port, _ts) = serve("127.0.0.1:0", top_html(&[child_port])).await;

@@ -312,6 +312,32 @@ jobs:
           cargo test -p spider --test architecture_guardrails --test closure_harness
           --test closure_harness_integrity --test closure_harness_behavioral_contract
           --features "chrome cache cache_request"
+      # SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_PARTITION_001:
+      # the CI-portable slice of the CAPTCHA production chain's own
+      # VERIFIED evidence — real headless Chrome (ubuntu-latest ships
+      # Chrome/Chromium; `spider::features::chrome::launch_browser`
+      # discovers it, no explicit install step needed), real challenge
+      # detection/materialization/routing/action across TopLevel,
+      # same-session-frame, and OOPIF execution contexts, and the real
+      # shipping (`Website::crawl`) OOPIF-visibility/multi-target/
+      # cross-request-isolation regression. `local_paligemma` is compiled
+      # in (several of these files import `PaligemmaLocalCaptchaProvider`
+      # even where a given test injects a deterministic
+      # `FixedPointProvider` instead) but never `local_paligemma_cuda` —
+      # no CUDA toolchain, no GPU, no `SCORPION_PALIGEMMA_PINNED_
+      # ARTIFACTS`, no 13.5GB RAM preflight is required to compile or run
+      # any test this command selects. The one test in this file set that
+      # genuinely does need real PaliGemma inference
+      # (`website_crawl_shipping_pipeline_detects_and_solves_a_genuine_
+      # oopif_challenge`) is `#[ignore]`d for exactly that reason — its
+      # own real-hardware pass is `OPERATOR_OBSERVED`/`LIVE_ENVIRONMENT_
+      # DEPENDENT` evidence in the ledger, not CI-executed evidence.
+      - name: Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)
+        run: >-
+          cargo test -p spider --test browser_challenge_detection_real
+          --test captcha_browser_binding_real --test captcha_browser_frame_action_real
+          --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
+          --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma"
       - name: Cargo test canonical credential-cache regression (exact features)
         run: cargo test -p spider --lib cache_request --features "chrome cache cache_request"
       # Targeted, exact-match, single-test regression for the

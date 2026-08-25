@@ -25,6 +25,12 @@ log_file="$1"
 description="$2"
 
 echo "::error::TIMED OUT (600s) OR FAILED: ${description}"
-grep -E "^test .* FAILED$|panicked at|^error|^test result:" "${log_file}" | while IFS= read -r line; do
+# -A3: also capture the 3 lines immediately following each match — a
+# panic's own "left == right" assertion detail (the actual vs expected
+# values, each typically on its own line) prints right after "panicked
+# at FILE:LINE:COL", not on that line itself, so a bare single-line grep
+# misses the one piece of information that actually explains the
+# failure.
+grep -A3 -E "^test .* FAILED$|panicked at|^error|^test result:" "${log_file}" | while IFS= read -r line; do
   echo "::error::  output: ${line}"
 done

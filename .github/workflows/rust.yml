@@ -205,32 +205,78 @@ jobs:
       #     IPv4 external must fail, IPv6 external must fail. Any probe
       #     behaving the wrong way fails the step.
       #
-      # NOTE (unverified, not hidden): this step's actual enforcement
-      # could not be exercised from this sandboxed development
-      # environment, which has neither root nor CAP_NET_ADMIN
-      # (`unshare -n` and `sudo iptables` were both refused here) — it is
-      # designed against documented iptables/ip6tables semantics and
-      # GitHub Actions' documented passwordless-sudo runner
-      # configuration, but has not been observed running for real. The
-      # post-install probes below exist precisely so its *first* real
-      # run — not this review — is what actually proves it, and fails
-      # loudly if it doesn't.
+      # NOTE (was unverified, now real, see
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001):
+      # this step's first real execution (run 32880266079, on this exact
+      # rule set minus the ESTABLISHED,RELATED accept below) hung
+      # indefinitely — the workflow API showed this step permanently
+      # `in_progress`, with every job after it never even starting, for
+      # 30+ minutes on rules whose own commands are all near-instant and
+      # whose own probes are all explicitly bounded (`curl --max-time 3`,
+      # `sleep 1`). Root cause (well-reasoned inference, not directly
+      # observed — this session's own API access could not read live
+      # step logs, 403 "must have admin rights"; GitHub-hosted runner
+      # jobs run directly on the VM, not in a nested container, so the
+      # Actions runner *agent* process shares this exact host network
+      # namespace with the `sudo iptables` commands below): the original
+      # rule set had no exception for already-ESTABLISHED connections,
+      # so `-P OUTPUT DROP` correctly blocked new external connections
+      # but also cut off the runner agent's own already-open outbound
+      # connection back to GitHub's own service — the one it needs to
+      # report this very step's completion. The script's internal probes
+      # likely finished in seconds exactly as designed; GitHub simply
+      # never found out, because the agent could no longer tell it
+      # anything. Fixed by accepting ESTABLISHED/RELATED traffic first,
+      # on both stacks — the standard, well-known idiom for exactly this
+      # class of self-inflicted lockout, preserving the intended
+      # property exactly (still-open connections survive; genuinely new
+      # outbound connections, which is what every later `cargo test`
+      # process making a fresh external request would need, remain
+      # denied) without weakening it. Every `sudo iptables`/`ip6tables`
+      # call below now also has explicit before/after logging and a
+      # bounded `timeout`, as defense in depth against the separate,
+      # still-possible failure mode of genuine `/run/xtables.lock`
+      # contention (this was not what actually happened here, per the
+      # reasoning above, but a 10s bound costs nothing and turns that
+      # class of hang into a fast, loud failure instead of a silent one).
       - name: Deny external network egress for the deterministic test phase (IPv4 + IPv6, fail-closed, self-verifying)
         run: |
           set -euo pipefail
 
+          run_bounded() {
+            echo "BEGIN: $*"
+            if ! timeout 10 "$@"; then
+              echo "::error::TIMED OUT OR FAILED after 10s: $*"
+              exit 1
+            fi
+            echo "END: $*"
+          }
+
           # Flush first: no rule from the runner image's own default
           # OUTPUT chain configuration survives to compete with ours.
-          sudo iptables -F OUTPUT
-          sudo ip6tables -F OUTPUT
+          run_bounded sudo iptables -F OUTPUT
+          run_bounded sudo ip6tables -F OUTPUT
 
-          # Loopback only. No DNS, no external host, on either stack.
-          sudo iptables  -A OUTPUT -o lo -j ACCEPT
-          sudo iptables  -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
-          sudo iptables  -P OUTPUT DROP
-          sudo ip6tables -A OUTPUT -o lo -j ACCEPT
-          sudo ip6tables -A OUTPUT -d ::1/128 -j ACCEPT
-          sudo ip6tables -P OUTPUT DROP
+          # Established/related first, on both stacks — the GitHub
+          # Actions runner agent's own already-open outbound connection
+          # to GitHub's service must survive this lockdown, or the agent
+          # can never report this step's (or any later step's) result.
+          # This does not weaken the property being enforced: the probes
+          # below open genuinely *new* connections, which this rule does
+          # not match, so "external egress denied" is exactly as strict
+          # as before for anything that isn't already an established
+          # connection predating this step.
+          run_bounded sudo iptables  -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+          run_bounded sudo ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+          # Loopback only beyond that. No DNS, no external host, on
+          # either stack, for any genuinely new connection.
+          run_bounded sudo iptables  -A OUTPUT -o lo -j ACCEPT
+          run_bounded sudo iptables  -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
+          run_bounded sudo iptables  -P OUTPUT DROP
+          run_bounded sudo ip6tables -A OUTPUT -o lo -j ACCEPT
+          run_bounded sudo ip6tables -A OUTPUT -d ::1/128 -j ACCEPT
+          run_bounded sudo ip6tables -P OUTPUT DROP
 
           # A proxy env var pointed at an allowed (loopback) address could
           # let `curl` route an "external" probe through it and appear to

@@ -7,9 +7,13 @@ summary = "Machine-readable, harness-checked description of the already-shipped 
 # construction, including PaliGemma) routes through a method call on a
 # local variable this harness's AST adjacency check cannot bind to a
 # type — see [stages.WIRED]'s own comment and this entry's SDD section 3.
-# ADVERSARIALLY_VERIFIED, CI_ENFORCED, and CLOSED are not claimed: no
-# GitHub Actions run of this capability's evidence has been observed.
-stage = "PRODUCTION_REACHABLE"
+# ADVERSARIALLY_VERIFIED became reachable at
+# SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001
+# (see [stages.ADVERSARIALLY_VERIFIED] below). CI_ENFORCED and CLOSED are
+# still not claimed: no required workflow step selects this capability's
+# own VERIFIED evidence yet, and no GitHub Actions run of this
+# capability's evidence has been observed.
+stage = "ADVERSARIALLY_VERIFIED"
 required_proof_classes = ["CODE_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
 
 [proof.CODE_PROVEN]
@@ -42,8 +46,8 @@ observed = false # classification is not observation; see proof.OPERATOR_OBSERVE
 
 [proof.UNPROVEN]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-missing = ["CI_PROVEN", "ADVERSARIALLY_VERIFIED", "CI_ENFORCED"]
-reason = "No GitHub Actions execution of this capability's evidence has been observed; no capability-bound adversarial bypass review has been recorded as a table in this ledger entry; no required workflow step selects this capability's own VERIFIED evidence yet."
+missing = ["CI_PROVEN", "CI_ENFORCED"]
+reason = "No GitHub Actions execution of this capability's evidence has been observed; no required workflow step selects this capability's own VERIFIED evidence yet."
 
 [stages.DESIGNED]
 sdd = "docs/frontier/CANONICAL_CAPTCHA_PRODUCTION_CAPABILITY_SDD.md"
@@ -142,3 +146,22 @@ siblings = [
 siblings_note = "spider_cli and spider_mcp are the only known shipping artifacts whose default feature set both enables chrome and whose own source calls Website::crawl directly. spider_worker does not qualify under either its default (no chrome) or an optional chrome build (different call path, Page::new_page_streaming, not Website::crawl)."
 verdict = "MET"
 verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line 62) and spider_cli/src/main.rs:crawl_with_mode calls website.crawl().await under #[cfg(feature = \"chrome\")] when headless is requested — the shipping binary's own default build. spider_mcp/Cargo.toml default = [\"chrome\", ...] (line 54) and spider_mcp/src/tools/mod.rs:spawn_crawl_task calls website.crawl().await under the same #[cfg(feature = \"chrome\")] guard when use_headless is true, via a real `use spider::website::Website;` import (spider_mcp/src/tools/mod.rs:19) binding to the canonical external-artifact spelling."
+
+[stages.ADVERSARIALLY_VERIFIED]
+capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+# Genuinely reviewed real production code at this exact commit: the harness
+# fix that made this table constructible without a self-reference cycle
+# (SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001)
+# touched no file this capability's own evidence depends on — confirmed by
+# this same table's own verification, which requires reviewed_commit's copy
+# of every relevant file (this ledger entry excepted, per that fix's own
+# attestation-only allowlist) to byte-match HEAD.
+reviewed_commit = "7f90ec83afb3724db14a79d2f7826277df36c6fd"
+bypass_attempts = [
+    "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
+    "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
+    "supply an unowned/bogus CDP TargetInfo as an OOPIF candidate -> typed rejection at FrameContext::resolve_child, never accepted as a fallback (spider/tests/captcha_browser_oopif_action_real.rs:unowned_target_info_fails_typed_never_a_fallback)",
+    "present multiple simultaneous genuine OOPIF targets, only one carrying the real challenge -> action lands only on the correct target's own session, the decoy is never touched (spider/tests/captcha_browser_oopif_action_real.rs:multiple_oopifs_action_targets_only_the_correct_one; spider/tests/captcha_browser_oopif_streaming_shipping_real.rs:website_crawl_shipping_pipeline_isolates_the_correct_oopif_among_several)",
+    "force the configured provider to fail -> zero actions dispatched, no silent alternate-provider fallback (spider/tests/captcha_browser_production_binding_real.rs:provider_failure_dispatches_zero_actions)",
+    "mutate this capability's own machine-readable ledger evidence (missing OOPIF action production symbol, comment-only symbol, nonexistent VERIFIED test reference, spider_worker false-claimed as production-reachable, macro-shielded PaliGemma routing hop claimed as WIRED) -> the real closure_harness verifier subprocess rejects every one, proven via 5 real, isolated `--exact` mutation tests (spider/tests/closure_harness_behavioral_contract.rs:behavioral_verifier_rejects_missing_oopif_action_production_symbol, behavioral_verifier_rejects_comment_only_captcha_symbol, behavioral_verifier_rejects_evidence_pointing_to_nonexistent_paligemma_test, behavioral_verifier_rejects_production_reachable_claim_for_a_non_calling_artifact, behavioral_verifier_rejects_macro_shielded_paligemma_routing_hop_as_wired)",
+]

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 const CLOSURE_HARNESS_SHA256: &str =
-    "46be0569cb904d97afe92ae9106c96db20221a494b2c27c0aca6ff249babb180";
+    "4030987b4d75f13605feea135e57f106d0c6407b5d3dee31845afe085949ba0f";
 
 #[test]
 fn closure_harness_contains_required_independent_checks() {

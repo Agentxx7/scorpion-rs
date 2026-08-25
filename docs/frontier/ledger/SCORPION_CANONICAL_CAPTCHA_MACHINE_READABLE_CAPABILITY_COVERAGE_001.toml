@@ -47,9 +47,9 @@ result = "captcha_observation field: \"Framed { ... materialized: true, route_ou
 [[proof.OPERATOR_OBSERVED]]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
 commit = "d85cf3d02ed28656d76dfa9bcb69e015c25cf83c"
-command = "cargo test -p spider --test captcha_browser_oopif_streaming_shipping_real --test captcha_browser_paligemma_real --features \"chrome local_paligemma local_paligemma_cuda\" -- --exact <test-name> --nocapture, with SCORPION_PALIGEMMA_PINNED_ARTIFACTS set to a real pinned checkpoint and a real CUDA-capable GPU present"
-purpose = "The two genuinely hardware-dependent tests excluded from CI-portable VERIFIED evidence (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_PARTITION_001) — captcha_browser_oopif_streaming_shipping_real.rs::website_crawl_shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge (now #[ignore]d) and captcha_browser_paligemma_real.rs::real_browser_snapshot_paligemma_inference_and_exact_action — encode the same real production capability the two CLI/MCP OPERATOR_OBSERVED records above already establish end to end; named here explicitly so this ledger entry never loses track of them merely because they are absent from VERIFIED."
-result = "real_browser_snapshot_paligemma_inference_and_exact_action: previously observed passing against real CUDA/F16 hardware (carried forward from this capability's own prior frontier). website_crawl_shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge: exercises the identical detect -> route -> PaliGemma -> action chain the CLI/MCP records above already proved genuinely solves a real OOPIF challenge; its own direct pass was not re-confirmed in this exact form under this session's host RAM conditions (see SCORPION_CANONICAL_CHROME_OOPIF_TARGET_VISIBILITY_IN_STREAMING_PIPELINE_001's own regression notes) — the underlying capability is OPERATOR_OBSERVED via the CLI/MCP records; this specific test's own pass is not separately claimed here."
+command = "cargo test -p spider --test captcha_browser_oopif_streaming_shipping_real --test captcha_browser_paligemma_real --test captcha_browser_production_binding_real --features \"chrome local_paligemma local_paligemma_cuda\" -- --exact <test-name> --nocapture, with SCORPION_PALIGEMMA_PINNED_ARTIFACTS set to a real pinned checkpoint and a real CUDA-capable GPU present"
+purpose = "The THREE genuinely hardware-dependent, #[ignore]d tests excluded from CI-portable VERIFIED evidence (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_PARTITION_001; an earlier version of this record named only two and omitted the third, corrected here per SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001's own independent audit) — captcha_browser_oopif_streaming_shipping_real.rs::website_crawl_shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge, captcha_browser_paligemma_real.rs::real_browser_snapshot_paligemma_inference_and_exact_action, and captcha_browser_production_binding_real.rs::real_paligemma_solution_reaches_the_browser_and_clicks_the_target (pre-existing #[ignore], predates this ledger entry, never previously named here at all) — encode the same real production capability the two CLI/MCP OPERATOR_OBSERVED records above already establish end to end; named here explicitly so this ledger entry never loses track of any of them merely because they are absent from VERIFIED."
+result = "real_browser_snapshot_paligemma_inference_and_exact_action: previously observed passing against real CUDA/F16 hardware (carried forward from this capability's own prior frontier) — the only one of the three with its own separately-claimed observed pass. website_crawl_shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge and real_paligemma_solution_reaches_the_browser_and_clicks_the_target: both exercise the identical detect -> route -> PaliGemma -> action chain the CLI/MCP records above already proved genuinely solves a real challenge; neither test's own direct pass has been separately observed/confirmed within this session's own evidence trail (for the OOPIF test, see SCORPION_CANONICAL_CHROME_OOPIF_TARGET_VISIBILITY_IN_STREAMING_PIPELINE_001's own regression notes on host RAM conditions). The underlying capability is OPERATOR_OBSERVED via the CLI/MCP records; these two specific tests' own passes are correctly classified as real-hardware-dependent (existence + classification only), never fabricated as separately observed."
 
 [proof.LIVE_ENVIRONMENT_DEPENDENT]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
@@ -106,16 +106,22 @@ evidence = [
 # `SCORPION_PALIGEMMA_PINNED_ARTIFACTS`, never the 13.5GB RAM preflight —
 # confirmed by actually running this exact evidence set with that env var
 # unset and only `--features "chrome local_paligemma"` (no `_cuda`)
-# enabled. The two genuinely hardware-dependent tests this file family
-# also contains
+# enabled. The THREE genuinely hardware-dependent, `#[ignore]`d tests
+# this file family also contains — corrected count, an earlier version
+# of this comment said "two" and omitted the third entirely —
 # (`captcha_browser_oopif_streaming_shipping_real.rs::website_crawl_
-# shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge`, now
-# `#[ignore]`d for exactly this reason, and
+# shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge`,
+# `captcha_browser_production_binding_real.rs::real_paligemma_solution_
+# reaches_the_browser_and_clicks_the_target` — pre-existing, `#[ignore]`d
+# before this frontier and never cited here either, and
 # `captcha_browser_paligemma_real.rs::real_browser_snapshot_paligemma_
-# inference_and_exact_action`) are deliberately NOT evidence here — they
-# remain real, genuinely observed, real-CUDA/F16-inference proof, carried
+# inference_and_exact_action`) are deliberately NOT evidence here. They
+# are never deleted or forgotten, never CI-executed evidence — carried
 # under `proof.OPERATOR_OBSERVED`/`proof.LIVE_ENVIRONMENT_DEPENDENT`
-# below instead, never deleted or forgotten, never CI-executed evidence.
+# below instead, which distinguishes real classification from an
+# actually-observed pass per test (only one of the three has a carried-
+# forward observed pass; the other two are classified, not separately
+# claimed as observed — see that record's own text).
 test_only = true
 evidence = [
     "spider/tests/browser_challenge_detection_real.rs:case_a_normal_page_is_not_detected",
@@ -186,9 +192,13 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's
 # own drift check works. The underlying bypass evidence below is
 # unchanged from that prior review: none of the actual adversarial-matrix
-# tests moved, were renamed, or were removed — only two genuinely
-# hardware-dependent tests moved out of VERIFIED into OPERATOR_OBSERVED,
-# and a real CI workflow step was added.
+# tests moved, were renamed, or were removed — one genuinely
+# hardware-dependent test (website_crawl_shipping_pipeline_detects_and_
+# solves_a_genuine_oopif_challenge) moved out of VERIFIED into
+# OPERATOR_OBSERVED; the other two hardware-dependent tests in this file
+# family were never in VERIFIED to begin with (see [stages.VERIFIED]'s
+# own comment for the corrected three-test accounting); and a real CI
+# workflow step was added.
 reviewed_commit = "11aaf9c46ac7088681f18478c579fdba4575fdde"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",

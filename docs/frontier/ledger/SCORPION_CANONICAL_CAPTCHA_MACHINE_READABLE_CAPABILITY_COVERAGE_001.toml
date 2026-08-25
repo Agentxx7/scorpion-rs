@@ -1,0 +1,144 @@
+id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+sdd = "docs/frontier/CANONICAL_CAPTCHA_PRODUCTION_CAPABILITY_SDD.md"
+summary = "Machine-readable, harness-checked description of the already-shipped CAPTCHA production chain: public provider selection through Chrome execution, challenge detection (top-level / same-session frame / OOPIF), snapshot materialization, provider routing, real PaliGemma local inference, canonical solution, browser action, and post-action observation."
+# This is the harness-computed TRUE stage, not an aspirational claim.
+# PRODUCTION_REACHABLE.verdict below is MET, but the real production
+# behavior past DetectedBrowserChallenge::route (provider registry
+# construction, including PaliGemma) routes through a method call on a
+# local variable this harness's AST adjacency check cannot bind to a
+# type — see [stages.WIRED]'s own comment and this entry's SDD section 3.
+# ADVERSARIALLY_VERIFIED, CI_ENFORCED, and CLOSED are not claimed: no
+# GitHub Actions run of this capability's evidence has been observed.
+stage = "PRODUCTION_REACHABLE"
+required_proof_classes = ["CODE_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
+
+[proof.CODE_PROVEN]
+capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+commit = "d85cf3d02ed28656d76dfa9bcb69e015c25cf83c"
+evidence = [
+    "every IMPLEMENTED symbol below resolves to a real, non-comment, non-test Rust definition, AST-verified",
+    "the WIRED chain from Website::crawl to detect_browser_challenge is AST-proven, non-macro, hop by hop",
+    "spider_cli and spider_mcp both call Website::crawl with chrome compiled in by default (Cargo.toml-verified feature forwarding)",
+]
+
+[[proof.OPERATOR_OBSERVED]]
+capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+commit = "d85cf3d02ed28656d76dfa9bcb69e015c25cf83c"
+command = "scorpion --headless --captcha-provider paligemma-local --url http://127.0.0.1:<port>/ --limit 1 crawl"
+purpose = "Real shipping CLI proof: genuine OOPIF challenge, real Chrome, real CUDA/F16 PaliGemma inference, no injected solution."
+result = "captcha-observation: Framed { materialized: true, route_outcome: SolutionProduced { action: Applied { actions_applied: 1, challenge_observed_after_action: false } } } — observed twice, exit 0 both times, during SCORPION_CANONICAL_CHROME_OOPIF_TARGET_VISIBILITY_IN_STREAMING_PIPELINE_001."
+
+[[proof.OPERATOR_OBSERVED]]
+capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+commit = "d85cf3d02ed28656d76dfa9bcb69e015c25cf83c"
+command = "spider-mcp (stdio JSON-RPC): initialize -> tools/call spider_crawl {url, limit:1, headless:true, captcha_provider:\"paligemma-local\"} -> tools/list"
+purpose = "Real shipping MCP proof: same genuine OOPIF challenge and real CUDA/F16 PaliGemma inference, through the actual spider-mcp binary, then confirming the server remains responsive."
+result = "captcha_observation field: \"Framed { ... materialized: true, route_outcome: SolutionProduced { action: Applied { actions_applied: 1, challenge_observed_after_action: false } } }\"; tools/list afterward returned 12 tools."
+
+[proof.LIVE_ENVIRONMENT_DEPENDENT]
+capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+requirements = ["real headless Chrome", "real CUDA-capable GPU", "pinned local PaliGemma checkpoint (SCORPION_PALIGEMMA_PINNED_ARTIFACTS)"]
+observed = false # classification is not observation; see proof.OPERATOR_OBSERVED for the actual observations
+
+[proof.UNPROVEN]
+capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
+missing = ["CI_PROVEN", "ADVERSARIALLY_VERIFIED", "CI_ENFORCED"]
+reason = "No GitHub Actions execution of this capability's evidence has been observed; no capability-bound adversarial bypass review has been recorded as a table in this ledger entry; no required workflow step selects this capability's own VERIFIED evidence yet."
+
+[stages.DESIGNED]
+sdd = "docs/frontier/CANONICAL_CAPTCHA_PRODUCTION_CAPABILITY_SDD.md"
+
+[stages.IMPLEMENTED]
+# `resolve_paligemma_provider`/`paligemma_provider`/`PaligemmaLocalCaptchaProvider`/
+# its `solve` method are all `#[cfg(all(feature = "chrome", feature =
+# "local_paligemma"))]`-gated. `local_paligemma` deliberately stays out of
+# [stages.PRODUCTION_REACHABLE].feature_requirements below (that list
+# feeds the reachability verdict's ANY-of-these-enabled check, and
+# `local_paligemma` is opt-in, not part of either shipping artifact's
+# default build) — declared here instead, exactly the escape hatch
+# `declared_features_for_implemented` documents.
+additional_cfg_features = ["local_paligemma"]
+evidence = [
+    "spider/src/configuration.rs:chrome_fetch_params",
+    "spider/src/features/browser_challenge_detection.rs:detect_browser_challenge",
+    "spider/src/features/browser_challenge_detection.rs:probe_oopif_challenges",
+    "spider/src/features/browser_challenge_detection.rs:has_potential_oopif_candidate",
+    "spider/src/features/browser_challenge_detection.rs:materialize_framed_challenge",
+    "spider/src/features/browser_challenge_detection.rs:route",
+    "spider/src/features/browser_challenge.rs:capture",
+    "spider/src/features/browser_challenge.rs:capture_in_frame",
+    "spider/src/features/solvers.rs:route_detected_browser_challenge",
+    "spider/src/features/solvers.rs:route_detected_framed_browser_challenge",
+    "spider/src/features/solvers.rs:resolve_paligemma_provider",
+    "spider/src/features/solvers.rs:paligemma_provider",
+    "spider/src/features/captcha_browser.rs:execute_browser_captcha_attempt",
+    "spider/src/features/captcha_browser.rs:execute_browser_captcha_attempt_in_frame",
+    "spider/src/features/frame_context.rs:resolve_top_level",
+    "spider/src/features/frame_context.rs:resolve_child",
+    "spider/src/features/frame_context.rs:resolve_same_session_child",
+    "spider/src/features/paligemma_captcha.rs:PaligemmaLocalCaptchaProvider",
+    "spider/src/features/paligemma_captcha.rs:solve",
+]
+
+[stages.VERIFIED]
+test_only = true
+evidence = [
+    "spider/tests/browser_challenge_detection_real.rs:case_a_normal_page_is_not_detected",
+    "spider/tests/browser_challenge_detection_real.rs:case_b_supported_challenge_is_detected_and_materialized",
+    "spider/tests/browser_challenge_detection_real.rs:case_c_text_only_false_positive_is_not_detected",
+    "spider/tests/browser_challenge_detection_real.rs:case_d_framed_challenge_is_detected_with_correct_frame_identity",
+    "spider/tests/browser_challenge_detection_real.rs:case_e_detector_failure_is_typed_not_no_challenge",
+    "spider/tests/browser_challenge_detection_real.rs:case_f_detection_performs_no_browser_mutation",
+    "spider/tests/captcha_browser_binding_real.rs:controlled_browser_binding_applies_all_forms_and_fails_closed",
+    "spider/tests/captcha_browser_frame_action_real.rs:frame_action_integration_proof_correct_point_solves_the_iframe",
+    "spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe",
+    "spider/tests/captcha_browser_frame_action_real.rs:detection_materializes_the_same_session_child_with_correct_identity",
+    "spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action",
+    "spider/tests/captcha_browser_frame_action_real.rs:detached_frame_before_action_fails_typed_with_no_action",
+    "spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test",
+    "spider/tests/captcha_browser_production_binding_real.rs:out_of_bounds_solution_dispatches_zero_actions",
+    "spider/tests/captcha_browser_production_binding_real.rs:provider_failure_dispatches_zero_actions",
+    "spider/tests/captcha_browser_production_binding_real.rs:normal_page_yields_no_detection_and_therefore_no_route_call",
+    "spider/tests/captcha_browser_production_binding_real.rs:applied_outcome_carries_a_real_post_action_observation_field",
+    "spider/tests/captcha_browser_oopif_action_real.rs:oopif_action_integration_proof_correct_point_solves_the_child",
+    "spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif",
+    "spider/tests/captcha_browser_oopif_action_real.rs:detection_materializes_the_oopif_with_correct_identity",
+    "spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action",
+    "spider/tests/captcha_browser_oopif_action_real.rs:unowned_target_info_fails_typed_never_a_fallback",
+    "spider/tests/captcha_browser_oopif_action_real.rs:multiple_oopifs_action_targets_only_the_correct_one",
+    "spider/tests/captcha_browser_oopif_streaming_shipping_real.rs:website_crawl_shipping_pipeline_detects_and_solves_a_genuine_oopif_challenge",
+    "spider/tests/captcha_browser_oopif_streaming_shipping_real.rs:website_crawl_shipping_pipeline_isolates_the_correct_oopif_among_several",
+    "spider/tests/captcha_browser_oopif_streaming_shipping_real.rs:concurrent_website_crawl_requests_never_cross_contaminate_oopif_targets",
+    "spider/tests/captcha_browser_paligemma_real.rs:real_browser_snapshot_paligemma_inference_and_exact_action",
+]
+last_verified_command = "cargo test -p spider --test browser_challenge_detection_real --test captcha_browser_binding_real --test captcha_browser_frame_action_real --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real --test captcha_browser_oopif_streaming_shipping_real --test captcha_browser_paligemma_real --features \"chrome local_paligemma local_paligemma_cuda\""
+last_verified_result = "6/6 browser_challenge_detection_real; 1/1 captcha_browser_binding_real; 5/5 captcha_browser_frame_action_real; 5/5 (+1 ignored real-hardware) captcha_browser_production_binding_real; 6/6 captcha_browser_oopif_action_real; 3/3 captcha_browser_oopif_streaming_shipping_real (real-PaliGemma sub-test resource-sensitive on constrained hosts, see this entry's own SDD frontier's predecessor report); 1/1 captcha_browser_paligemma_real (real-hardware, run manually)"
+
+[stages.WIRED]
+# `Page::new_streaming`/`Page::new_base` are called via qualified
+# associated-call syntax (`Page::new_streaming(...)`, `Self::new_base(...)`)
+# at their real call sites, not `.method()` syntax, so this chain never
+# depends on the receiver-variable-name heuristic `ast_function_calls`
+# applies to true method calls. `fetch_page_html`'s real definition is one
+# of two mutually exclusive `#[cfg(all(feature = "fs"|"not(fs)", feature =
+# "chrome"))]` overloads; `fs` is declared in additional_cfg_features so
+# the harness resolves the `fs`-active overload (the one genuinely present
+# in this workspace's own default feature set, which includes `tokio/fs`
+# transitively) rather than failing on cfg ambiguity.
+additional_cfg_features = ["fs"]
+callers = [
+    "spider/src/website.rs:Website::crawl -> spider/src/website.rs:crawl_concurrent -> spider/src/website.rs:crawl_establish -> spider/src/page.rs:Page::new_streaming -> spider/src/page.rs:Page::new_base -> spider/src/utils/mod.rs:fetch_page_html -> spider/src/utils/mod.rs:fetch_page_html_chrome_base -> spider/src/utils/mod.rs:fetch_page_html_chrome_base_inner -> spider/src/features/browser_challenge_detection.rs:detect_browser_challenge",
+]
+
+[stages.PRODUCTION_REACHABLE]
+reachability_kind = "binary_default"
+shipping_artifacts = ["spider_cli", "spider_mcp"]
+feature_requirements = ["chrome"]
+entry_point_symbols = ["Website::crawl"]
+siblings_enumerated = true
+siblings = [
+    "spider_worker (default features = [] — chrome not enabled by default; its request handlers also use Page::new_page_streaming directly rather than Website::crawl, so it is not a sibling reachability path for this capability even when chrome is enabled)",
+]
+siblings_note = "spider_cli and spider_mcp are the only known shipping artifacts whose default feature set both enables chrome and whose own source calls Website::crawl directly. spider_worker does not qualify under either its default (no chrome) or an optional chrome build (different call path, Page::new_page_streaming, not Website::crawl)."
+verdict = "MET"
+verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line 62) and spider_cli/src/main.rs:crawl_with_mode calls website.crawl().await under #[cfg(feature = \"chrome\")] when headless is requested — the shipping binary's own default build. spider_mcp/Cargo.toml default = [\"chrome\", ...] (line 54) and spider_mcp/src/tools/mod.rs:spawn_crawl_task calls website.crawl().await under the same #[cfg(feature = \"chrome\")] guard when use_headless is true, via a real `use spider::website::Website;` import (spider_mcp/src/tools/mod.rs:19) binding to the canonical external-artifact spelling."

@@ -2248,3 +2248,207 @@ jobs:
         );
     });
 }
+
+// =====================================================================
+// SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001 —
+// capability-specific negative proofs. Every generic verifier rule above
+// is already proven correct against synthetic/decoy fixtures unrelated to
+// any specific capability; the five tests below instead mutate fixtures
+// built from this CAPTCHA capability's own *real* production symbols
+// (spider/src/features/captcha_browser.rs, browser_challenge_detection.rs,
+// solvers.rs) to prove the generic rules correctly reject tampering with
+// THIS capability's own real evidence, not just an unrelated decoy's.
+// =====================================================================
+
+/// Removing/renaming the real OOPIF browser-action production symbol must
+/// be rejected: IMPLEMENTED evidence naming a plausible but nonexistent
+/// sibling of the real `execute_browser_captcha_attempt_in_frame` symbol.
+#[test]
+fn behavioral_verifier_rejects_missing_oopif_action_production_symbol() {
+    locked_test(|| {
+        let fixture = r#"
+    id = "SCORPION_BEHAVIORAL_FIXTURE_001"
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+    summary = "Behavioral contract fixture."
+    stage = "IMPLEMENTED"
+
+    [stages.DESIGNED]
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+
+    [stages.IMPLEMENTED]
+    evidence = ["spider/src/features/captcha_browser.rs:execute_browser_captcha_attempt_in_oopif_v2"]
+    "#;
+        let dir = temp_ledger_with_fixture("SCORPION_BEHAVIORAL_FIXTURE_001", fixture);
+        assert!(
+            !run_single_verifier_check_strict(
+                dir.path(),
+                None,
+                "implemented_stage_evidence_references_real_definitions_not_comments"
+            ),
+            "the real verifier accepted a nonexistent OOPIF action symbol as IMPLEMENTED \
+             evidence — behavioral contract violated"
+        );
+    });
+}
+
+/// A production symbol name that exists only inside a comment (never a
+/// real definition) in a real, on-disk CAPTCHA source file must be
+/// rejected as IMPLEMENTED evidence.
+#[test]
+fn behavioral_verifier_rejects_comment_only_captcha_symbol() {
+    locked_test(|| {
+        let _scratch = ScratchFile::write(
+            "spider/src/features/_mp_bc_captcha_comment.rs",
+            r#"// The real dispatcher used to be called
+// execute_browser_captcha_attempt_in_oopif_comment_only — renamed before
+// shipping. This mention is prose, not a definition.
+pub fn unrelated_helper() {}
+"#,
+        );
+        let fixture = r#"
+    id = "SCORPION_BEHAVIORAL_FIXTURE_001"
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+    summary = "Behavioral contract fixture."
+    stage = "IMPLEMENTED"
+
+    [stages.DESIGNED]
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+
+    [stages.IMPLEMENTED]
+    evidence = ["spider/src/features/_mp_bc_captcha_comment.rs:execute_browser_captcha_attempt_in_oopif_comment_only"]
+    "#;
+        let dir = temp_ledger_with_fixture("SCORPION_BEHAVIORAL_FIXTURE_001", fixture);
+        assert!(
+            !run_single_verifier_check_strict(
+                dir.path(),
+                None,
+                "implemented_stage_evidence_references_real_definitions_not_comments"
+            ),
+            "the real verifier accepted a comment-only mention of a CAPTCHA symbol as \
+             IMPLEMENTED evidence — behavioral contract violated"
+        );
+    });
+}
+
+/// VERIFIED evidence naming a plausible but nonexistent PaliGemma test
+/// (a name that could easily be typo'd from the real
+/// `real_browser_snapshot_paligemma_inference_and_exact_action`) must be
+/// rejected.
+#[test]
+fn behavioral_verifier_rejects_evidence_pointing_to_nonexistent_paligemma_test() {
+    locked_test(|| {
+        let fixture = r#"
+    id = "SCORPION_BEHAVIORAL_FIXTURE_001"
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+    summary = "Behavioral contract fixture."
+    stage = "VERIFIED"
+
+    [stages.DESIGNED]
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+
+    [stages.IMPLEMENTED]
+    evidence = ["spider/src/features/captcha_browser.rs:execute_browser_captcha_attempt_in_frame"]
+
+    [stages.VERIFIED]
+    test_only = true
+    evidence = ["spider/tests/captcha_browser_paligemma_real.rs:real_browser_snapshot_paligemma_inference_and_exact_action_v2"]
+    last_verified_command = "cargo test -p spider --test captcha_browser_paligemma_real --features \"chrome local_paligemma local_paligemma_cuda\""
+    last_verified_result = "fixture"
+    "#;
+        let dir = temp_ledger_with_fixture("SCORPION_BEHAVIORAL_FIXTURE_001", fixture);
+        assert!(
+            !run_single_verifier_check_strict(
+                dir.path(),
+                None,
+                "verified_stage_evidence_resolves_to_real_test_definitions"
+            ),
+            "the real verifier accepted a nonexistent PaliGemma test name as VERIFIED evidence \
+             — behavioral contract violated"
+        );
+    });
+}
+
+/// `spider_worker` genuinely does not call `Website::crawl` in its own
+/// source (its request handlers use `Page::new_page_streaming` directly —
+/// confirmed in this same capability's real ledger entry's own
+/// `siblings_note`). Claiming `PRODUCTION_REACHABLE.verdict = "MET"` with
+/// `spider_worker` in `shipping_artifacts` must be rejected — a stage
+/// must not be marked production-reachable without a valid production
+/// caller.
+#[test]
+fn behavioral_verifier_rejects_production_reachable_claim_for_a_non_calling_artifact() {
+    locked_test(|| {
+        let fixture = format!(
+            r#"{VALID_BASE}callers = ["{VALID_WIRED_CHAIN}"]
+
+    [stages.PRODUCTION_REACHABLE]
+    reachability_kind = "binary_optional_flag"
+    shipping_artifacts = ["spider_worker"]
+    feature_requirements = ["chrome"]
+    entry_point_symbols = ["Website::crawl"]
+    siblings_enumerated = true
+    siblings = []
+    siblings_note = "fixture"
+    verdict = "MET"
+    verdict_evidence = "fixture"
+    "#
+        );
+        let dir = temp_ledger_with_fixture("SCORPION_BEHAVIORAL_FIXTURE_001", &fixture);
+        assert!(
+            !run_single_verifier_check_strict(
+                dir.path(),
+                None,
+                "production_reachable_claims_are_grep_verified_against_shipping_manifests"
+            ),
+            "the real verifier accepted spider_worker as production-reachable despite its own \
+             source never calling Website::crawl — behavioral contract violated"
+        );
+    });
+}
+
+/// The real PaliGemma provider-construction call
+/// (`register_browser_challenge_providers!`'s expansion, invoked from
+/// `route_detected_browser_challenge`'s body) genuinely happens only
+/// inside a macro invocation this harness never credits as call
+/// adjacency (`SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_
+/// COVERAGE_001`'s own SDD, section 3). A WIRED chain claiming
+/// `route_detected_browser_challenge` calls `resolve_paligemma_provider`
+/// must be rejected — the real repository has no such direct adjacency.
+#[test]
+fn behavioral_verifier_rejects_macro_shielded_paligemma_routing_hop_as_wired() {
+    locked_test(|| {
+        let fixture = r#"
+    id = "SCORPION_BEHAVIORAL_FIXTURE_001"
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+    summary = "Behavioral contract fixture."
+    stage = "WIRED"
+
+    [stages.DESIGNED]
+    sdd = "docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md"
+
+    [stages.IMPLEMENTED]
+    evidence = ["spider/src/features/solvers.rs:resolve_paligemma_provider"]
+    additional_cfg_features = ["local_paligemma"]
+
+    [stages.VERIFIED]
+    test_only = true
+    evidence = ["spider/tests/architecture_guardrails.rs:no_shadow_credential_aware_cache_policy_in_cli_or_mcp"]
+    last_verified_command = "cargo test -p spider --lib --test architecture_guardrails --features \"chrome cache cache_request\""
+    last_verified_result = "1/1"
+
+    [stages.WIRED]
+    additional_cfg_features = ["local_paligemma", "fs"]
+    callers = ["spider/src/website.rs:Website::crawl -> spider/src/website.rs:crawl_concurrent -> spider/src/website.rs:crawl_establish -> spider/src/page.rs:Page::new_streaming -> spider/src/page.rs:Page::new_base -> spider/src/utils/mod.rs:fetch_page_html -> spider/src/utils/mod.rs:fetch_page_html_chrome_base -> spider/src/utils/mod.rs:fetch_page_html_chrome_base_inner -> spider/src/features/browser_challenge_detection.rs:detect_browser_challenge -> spider/src/features/solvers.rs:resolve_paligemma_provider"]
+    "#;
+        let dir = temp_ledger_with_fixture("SCORPION_BEHAVIORAL_FIXTURE_001", fixture);
+        assert!(
+            !run_single_verifier_check_strict(
+                dir.path(),
+                None,
+                "wired_stage_chains_prove_real_call_adjacency_rooted_in_production_source"
+            ),
+            "the real verifier accepted a WIRED chain through the macro-shielded PaliGemma \
+             provider-construction hop — behavioral contract violated"
+        );
+    });
+}

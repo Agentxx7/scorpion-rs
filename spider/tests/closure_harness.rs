@@ -2894,6 +2894,42 @@ fn website_typed_bindings(
             }
             syn::visit::visit_local(self, node);
         }
+        // A function parameter's own explicit type annotation
+        // (`fn f(website: &mut Website)`, `fn f(website: Website)`) is
+        // exactly as provable as a `let x: Website = ...` binding's — the
+        // doc comment above already names `&mut Website` as a recognized
+        // form, but a bare parameter pattern was never actually reached
+        // by `visit_local` (which only fires for `let` statements): a
+        // real production caller (`spider_mcp/src/tools/mod.rs:
+        // spawn_crawl_task(mut website: Website, ...)`,
+        // `spider_cli/src/main.rs:crawl_with_mode(website: &mut Website,
+        // ...)`) that receives its `Website` as a parameter and calls
+        // `website.crawl()` from inside that same function body was
+        // therefore never recognized as a canonical call at all — found
+        // while building this frontier's own PRODUCTION_REACHABLE
+        // evidence for `SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_
+        // CAPABILITY_COVERAGE_001` against real `spider_mcp` source.
+        // `visit_pat_type` is syn's own override point for *every* typed
+        // pattern — function parameters, closure parameters, and (redundantly
+        // but harmlessly, since `self.names` is a set) the `Pat::Type` a
+        // typed `let` already reaches via `visit_local` above — so this
+        // one addition covers the missing case without duplicating or
+        // replacing the existing `let`-specific handling (which alone
+        // still carries the `expr_constructs_website` check `visit_pat_type`
+        // has no equivalent need for: a bare parameter has no initializer
+        // expression to inspect).
+        fn visit_pat_type(&mut self, node: &'ast syn::PatType) {
+            if let syn::Pat::Ident(pat_ident) = &*node.pat {
+                if type_is_website(
+                    &node.ty,
+                    self.is_spider_own_crate_source,
+                    self.bare_website_trusted,
+                ) {
+                    self.names.insert(pat_ident.ident.to_string());
+                }
+            }
+            syn::visit::visit_pat_type(self, node);
+        }
     }
     let mut bindings = Bindings {
         names: BTreeSet::new(),

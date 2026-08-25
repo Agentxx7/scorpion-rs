@@ -324,20 +324,41 @@ jobs:
           fi
 
           echo "Firewall lockdown confirmed active (IPv4/IPv6 loopback usable, IPv4/IPv6 external egress denied)."
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
+      # this step (and every `cargo test` step below it in this job) is
+      # now the first thing that has ever run behind a genuinely-active
+      # firewall — the lockdown step above never actually succeeded on a
+      # real GitHub Actions run until this same frontier's own fix. A
+      # bounded `timeout` plus explicit BEGIN/END logging on every such
+      # step is deliberate defense in depth: if any test in here still
+      # makes a network/DNS attempt this repository's own
+      # `LIVE_NETWORK_TESTS.toml` registry doesn't recognize (checked and
+      # not what caused the one hang observed so far — `--skip
+      # website::crawl` already substring-matches `website::crawl_invalid`
+      # too, libtest's own default `--skip` semantics, confirmed locally),
+      # a silent `iptables -j DROP` (no RST, no ICMP-unreachable) can make
+      # that attempt hang for a very long, OS-timeout-dependent duration
+      # instead of failing fast — turning an indefinite, invisible wait
+      # into a fast, loud, diagnosable failure.
       - name: Cargo test spider lib, deterministic only (default features)
-        run: >-
-          cargo test -p spider --lib --
-          --skip website::crawl
-          --skip website::scrape
-          --skip website::not_crawl_blacklist
-          --skip website::test_crawl_subdomains
-          --skip website::test_crawl_tld
-          --skip website::test_crawl_subscription
-          --skip website::test_crawl_budget
-          --skip website::test_crawl_glob
-          --skip website::test_crawl_pause_resume
-          --skip website::test_crawl_proxy
-          --skip website::test_crawl_shutdown
+        run: |
+          echo "BEGIN: spider lib, default features"
+          if ! timeout 600 cargo test -p spider --lib -- \
+            --skip website::crawl \
+            --skip website::scrape \
+            --skip website::not_crawl_blacklist \
+            --skip website::test_crawl_subdomains \
+            --skip website::test_crawl_tld \
+            --skip website::test_crawl_subscription \
+            --skip website::test_crawl_budget \
+            --skip website::test_crawl_glob \
+            --skip website::test_crawl_pause_resume \
+            --skip website::test_crawl_proxy \
+            --skip website::test_crawl_shutdown; then
+            echo "::error::TIMED OUT (600s) OR FAILED: spider lib, default features"
+            exit 1
+          fi
+          echo "END: spider lib, default features"
       # RUST_MIN_STACK: pre-existing, environment-specific stack-overflow
       # under this feature combination at the default thread stack size
       # (confirmed identical on baseline `HEAD` via `git stash`, unrelated
@@ -346,20 +367,25 @@ jobs:
       - name: Cargo test spider lib, deterministic only (chrome cache cache_request)
         env:
           RUST_MIN_STACK: "67108864"
-        run: >-
-          cargo test -p spider --lib
-          --features "chrome cache cache_request" --
-          --skip website::crawl
-          --skip website::scrape
-          --skip website::not_crawl_blacklist
-          --skip website::test_crawl_subdomains
-          --skip website::test_crawl_tld
-          --skip website::test_crawl_subscription
-          --skip website::test_crawl_budget
-          --skip website::test_crawl_glob
-          --skip website::test_crawl_pause_resume
-          --skip website::test_crawl_proxy
-          --skip website::test_crawl_shutdown
+        run: |
+          echo "BEGIN: spider lib, chrome cache cache_request"
+          if ! timeout 600 cargo test -p spider --lib \
+            --features "chrome cache cache_request" -- \
+            --skip website::crawl \
+            --skip website::scrape \
+            --skip website::not_crawl_blacklist \
+            --skip website::test_crawl_subdomains \
+            --skip website::test_crawl_tld \
+            --skip website::test_crawl_subscription \
+            --skip website::test_crawl_budget \
+            --skip website::test_crawl_glob \
+            --skip website::test_crawl_pause_resume \
+            --skip website::test_crawl_proxy \
+            --skip website::test_crawl_shutdown; then
+            echo "::error::TIMED OUT (600s) OR FAILED: spider lib, chrome cache cache_request"
+            exit 1
+          fi
+          echo "END: spider lib, chrome cache cache_request"
       # THE closure/architecture assurance suite — deliberately its own,
       # standalone step, never bundled with `--lib`. This is the narrow,
       # truthful CI_ENFORCED claim this frontier actually makes: "the
@@ -375,6 +401,18 @@ jobs:
       # is itself required, non-gated CI, not merely a local development
       # check (Codex adversarial review: "the independent behavioral
       # suite must be in REQUIRED assurance CI").
+      # Deliberately NOT wrapped in `timeout`/`if`/echo like the steps
+      # around it (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
+      # EXECUTION_001's own defense-in-depth): this repository's own
+      # closure_harness.rs requires the `--test closure_harness` etc.
+      # flags to appear as a real, direct, unambiguous `cargo test`
+      # invocation with no shell control-flow wrapper at all
+      # (`closure_harness_itself_is_a_real_required_test_flag_in_ci`,
+      # confirmed locally — wrapping this exact step broke that check:
+      # "a non-executing wrapper (`echo ...`) does not count"). The same
+      # strict-grammar requirement will apply to whichever step this
+      # CAPTCHA capability's own future `[stages.CI_ENFORCED]` entry
+      # cites, so this step (and the CAPTCHA one below) must stay bare.
       - name: Cargo test closure/architecture assurance suite (chrome cache cache_request)
         run: >-
           cargo test -p spider --test architecture_guardrails --test closure_harness
@@ -400,6 +438,13 @@ jobs:
       # oopif_challenge`) is `#[ignore]`d for exactly that reason — its
       # own real-hardware pass is `OPERATOR_OBSERVED`/`LIVE_ENVIRONMENT_
       # DEPENDENT` evidence in the ledger, not CI-executed evidence.
+      # Deliberately bare/unwrapped, same rationale as the assurance-suite
+      # step above: this is the exact step SCORPION_CANONICAL_CAPTCHA_
+      # MACHINE_READABLE_CAPABILITY_COVERAGE_001's own future
+      # `[stages.CI_ENFORCED]` entry is expected to cite, and
+      # closure_harness.rs's CI_ENFORCED grammar requires a direct,
+      # unwrapped `cargo test ...` invocation — no echo/if/timeout shell
+      # wrapper.
       - name: Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)
         run: >-
           cargo test -p spider --test browser_challenge_detection_real
@@ -407,7 +452,13 @@ jobs:
           --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
           --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma"
       - name: Cargo test canonical credential-cache regression (exact features)
-        run: cargo test -p spider --lib cache_request --features "chrome cache cache_request"
+        run: |
+          echo "BEGIN: canonical credential-cache regression"
+          if ! timeout 600 cargo test -p spider --lib cache_request --features "chrome cache cache_request"; then
+            echo "::error::TIMED OUT (600s) OR FAILED: canonical credential-cache regression"
+            exit 1
+          fi
+          echo "END: canonical credential-cache regression"
       # Targeted, exact-match, single-test regression for the
       # legacy/vendor-chromey cache-isolation invariant
       # (SCORPION_CANONICAL_CREDENTIAL_CACHE_ISOLATION_001) — this test
@@ -420,9 +471,14 @@ jobs:
       # compiling and running the regression, not merely checking it
       # exists.
       - name: Cargo test spider credential-cache regression (chrome_remote_cache)
-        run: >-
-          cargo test -p spider --lib --features chrome_remote_cache
-          utils::tests::test_cache_enabled_excludes_authorized -- --exact
+        run: |
+          echo "BEGIN: spider credential-cache regression (chrome_remote_cache)"
+          if ! timeout 600 cargo test -p spider --lib --features chrome_remote_cache \
+            utils::tests::test_cache_enabled_excludes_authorized -- --exact; then
+            echo "::error::TIMED OUT (600s) OR FAILED: spider credential-cache regression (chrome_remote_cache)"
+            exit 1
+          fi
+          echo "END: spider credential-cache regression (chrome_remote_cache)"
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

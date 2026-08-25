@@ -59,7 +59,7 @@ observed = false # classification is not observation; see proof.OPERATOR_OBSERVE
 [proof.UNPROVEN]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
 missing = ["CI_PROVEN", "CI_ENFORCED"]
-reason = "No GitHub Actions execution of this capability's evidence has been observed — confirmed directly against the public GitHub Actions API: every commit pushed in this entire session (including the one this table's own reviewed_commit names) shows zero associated workflow runs, and the repository's real last workflow execution of any kind was 2026-08-13, well before this session began. The CI-portable evidence-selecting workflow step itself is real and locally verified, but CI_ENFORCED/CI_PROVEN/CLOSED are withheld until an actual GitHub Actions execution is observed."
+reason = "GitHub Actions execution has since been re-enabled and observed running for real (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001 confirmed real workflow runs being created for the first time since 2026-08-13), but no run has yet completed the CAPTCHA CI-portable evidence step successfully end to end — the deterministic test phase's network-isolation mechanism has gone through two real, remotely-observed infrastructure failures (self-inflicted runner-connectivity loss under a host-global iptables policy, diagnosed and fixed across SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001) and the fix (a dedicated network namespace so the runner agent no longer shares the isolation boundary with the tests) has not yet been proven by a genuine successful remote run. The CI-portable evidence-selecting workflow step itself is real and locally verified, but CI_ENFORCED/CI_PROVEN/CLOSED remain withheld until an actual successful GitHub Actions execution of exactly that step is observed."
 
 [stages.DESIGNED]
 sdd = "docs/frontier/CANONICAL_CAPTCHA_PRODUCTION_CAPABILITY_SDD.md"
@@ -199,7 +199,7 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # family were never in VERIFIED to begin with (see [stages.VERIFIED]'s
 # own comment for the corrected three-test accounting); and a real CI
 # workflow step was added.
-reviewed_commit = "11aaf9c46ac7088681f18478c579fdba4575fdde"
+reviewed_commit = "62713dc5a13d8808f83b2ae30df1c49a7dbec969"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",

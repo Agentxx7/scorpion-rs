@@ -89,11 +89,19 @@ jobs:
   # `not_crawl_blacklist_regex`, `test_crawl_subdomains`,
   # `test_crawl_glob`, `test_crawl_tld`, `test_crawl_subscription`,
   # `test_crawl_proxy`, `test_crawl_budget`, `test_crawl_pause_resume`)
-  # feature combinations; the canonical registry currently contains 13 total.
-  # `test_crawl_shutdown`
-  # (spider.cloud) requires a feature neither step enables and needs no
-  # skip here. They still run, unfiltered, in the separately-classified
-  # `spider_core_live_network` job below.
+  # feature combinations; the canonical registry currently contains 16
+  # total — 3 more (`website::test_respect_robots_txt`,
+  # `page::test_host_resolves_locally_cached_does_not_cache_timed_out`,
+  # `page::test_host_resolves_locally_cached_second_call_hits_cache`,
+  # the latter two covered by the `page::test_host_resolves_locally_
+  # cached` skip via prefix match) than when this comment last said 13 —
+  # found for real by the first genuinely successful namespace-isolated
+  # execution of this exact step (SCORPION_CANONICAL_CI_DETERMINISTIC_
+  # NETWORK_LOCKDOWN_EXECUTION_001); neither uses `.crawl()`/`.scrape()`/
+  # `.crawl_smart()`, so the static detector itself needed extending
+  # too, not just this registry (see `live_network_hosts_in`'s doc
+  # comment in closure_harness.rs). They still run, unfiltered, in the
+  # separately-classified `spider_core_live_network` job below.
   spider_core:
     runs-on: ubuntu-latest
     # Bypass class closed (Codex adversarial review): "proxy state during
@@ -450,7 +458,9 @@ jobs:
             --skip website::test_crawl_glob \
             --skip website::test_crawl_pause_resume \
             --skip website::test_crawl_proxy \
-            --skip website::test_crawl_shutdown > /tmp/step8.log 2>&1; then
+            --skip website::test_crawl_shutdown \
+            --skip website::test_respect_robots_txt \
+            --skip page::test_host_resolves_locally_cached > /tmp/step8.log 2>&1; then
             bash .github/scripts/report-test-step-failure.sh /tmp/step8.log "spider lib, default features"
             exit 1
           fi
@@ -482,7 +492,9 @@ jobs:
             --skip website::test_crawl_glob \
             --skip website::test_crawl_pause_resume \
             --skip website::test_crawl_proxy \
-            --skip website::test_crawl_shutdown > /tmp/step9.log 2>&1; then
+            --skip website::test_crawl_shutdown \
+            --skip website::test_respect_robots_txt \
+            --skip page::test_host_resolves_locally_cached > /tmp/step9.log 2>&1; then
             bash .github/scripts/report-test-step-failure.sh /tmp/step9.log "spider lib, chrome cache cache_request"
             exit 1
           fi

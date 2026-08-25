@@ -83,3 +83,35 @@ hosts = ["choosealicense.com"]
 path = "spider/src/website.rs"
 test_name = "website::test_crawl_shutdown"
 hosts = ["spider.cloud"]
+
+# SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001: the
+# three entries below were found for real, not by manual audit — the
+# first genuinely successful namespace-isolated remote execution of the
+# deterministic spider_core test phase (this exact CI job had never
+# completed under real network denial before this run) failed exactly
+# these two tests (753 passed, 2 failed); the third
+# (test_host_resolves_locally_cached_second_call_hits_cache) is included
+# alongside its sibling for the same real reason even though it happened
+# to still pass — its own passing result is coincidental to how
+# host_resolves_locally_cached currently classifies an OS-level
+# "network unreachable" error (as NxDomain, the same state a real
+# negative DNS response produces), not a structural guarantee; it is
+# exactly as network-dependent as the test next to it. Neither test uses
+# .crawl()/.scrape()/.crawl_smart() — the static detector's own marker
+# list and #[tokio::test] attribute recognition both had to be extended
+# to see them (see live_network_hosts_in's doc comment in
+# closure_harness.rs).
+[[tests]]
+path = "spider/src/website.rs"
+test_name = "website::test_respect_robots_txt"
+hosts = ["stackoverflow.com", "www.mongodb.com"]
+
+[[tests]]
+path = "spider/src/page.rs"
+test_name = "page::test_host_resolves_locally_cached_does_not_cache_timed_out"
+hosts = ["<dynamic-or-unresolved-host>"]
+
+[[tests]]
+path = "spider/src/page.rs"
+test_name = "page::test_host_resolves_locally_cached_second_call_hits_cache"
+hosts = ["<dynamic-or-unresolved-host>"]

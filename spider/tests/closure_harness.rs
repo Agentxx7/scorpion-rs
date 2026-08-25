@@ -1895,7 +1895,19 @@ fn detect_live_network_tests() -> Vec<DetectedLiveTest> {
                 }
             }
 
-            let is_test_attr = trimmed.contains("#[tokio::test]") || trimmed == "#[test]";
+            // Bypass class closed (SCORPION_CANONICAL_CI_DETERMINISTIC_
+            // NETWORK_LOCKDOWN_EXECUTION_001, real remote finding): the
+            // bare `#[tokio::test]` check missed every parameterized
+            // form — `#[tokio::test(flavor = "current_thread")]` in
+            // particular — making every test using it structurally
+            // invisible to this detector regardless of what its body
+            // does. `page::test_host_resolves_locally_cached_does_not_
+            // cache_timed_out` and `page::test_host_resolves_locally_
+            // cached_second_call_hits_cache` both use exactly this
+            // parameterized form and both perform real DNS lookups.
+            let is_test_attr = trimmed.contains("#[tokio::test]")
+                || trimmed.starts_with("#[tokio::test(")
+                || trimmed == "#[test]";
             if is_test_attr {
                 // Scan forward past any further attributes to the fn line.
                 let mut j = index + 1;
@@ -1984,19 +1996,45 @@ fn extract_fn_name(fn_line: &str) -> Option<String> {
 
 /// If `body` (a single test function's comment-stripped source) performs
 /// a real network call — `.crawl(`/`.scrape(`/`.crawl_smart(`/
-/// `reqwest::Client` — against at least one non-reserved, non-local host,
-/// returns those hosts. A local listener does not suppress a test that also
-/// performs an external crawl. Deliberately does *not* treat bare `.get(`/`.send(`/
-/// `reqwest::` (unqualified) as network markers — all three are common
-/// enough on non-network types/paths (a cache's `.get`, a channel's
-/// `.send`, `reqwest::header::*` construction helpers used without ever
+/// `reqwest::Client`/`.configure_robots_parser(`/
+/// `host_resolves_locally_cached(` — against at least one non-reserved,
+/// non-local host, returns those hosts. A local listener does not
+/// suppress a test that also performs an external crawl. Deliberately
+/// does *not* treat bare `.get(`/`.send(`/`reqwest::` (unqualified) as
+/// network markers — all three are common enough on non-network
+/// types/paths (a cache's `.get`, a channel's `.send`,
+/// `reqwest::header::*` construction helpers used without ever
 /// dispatching a request) to have produced confirmed false positives
 /// when tried; `reqwest::Client` specifically is not used anywhere in
 /// this crate's test suite except as an actual HTTP client.
+///
+/// `.configure_robots_parser(`/`host_resolves_locally_cached(` were
+/// added after a real remote finding
+/// (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001):
+/// `website::test_respect_robots_txt` (a real HTTPS fetch of
+/// stackoverflow.com's and mongodb.com's actual robots.txt, via
+/// `Website::configure_robots_parser`, never `.crawl`/`.scrape`) and
+/// `page::test_host_resolves_locally_cached_does_not_cache_timed_out`
+/// (a real DNS lookup via `host_resolves_locally_cached`, no URL scheme
+/// at all — the host is a bare hostname string, not a `scheme://host`
+/// URL) both genuinely require real network access, and both were
+/// invisible to every marker/host-extraction rule this function had
+/// until this run — a pre-existing registry gap, undetectable until the
+/// very first real, successful execution of this deterministic phase
+/// under genuine network denial (a namespace-isolated CI run) actually
+/// happened, since every earlier run either had full network access or
+/// never completed this step at all.
 fn live_network_hosts_in(body: &str) -> Option<BTreeSet<String>> {
-    let performs_network_call = [".crawl(", ".scrape(", ".crawl_smart(", "reqwest::Client"]
-        .iter()
-        .any(|marker| body.contains(marker));
+    let performs_network_call = [
+        ".crawl(",
+        ".scrape(",
+        ".crawl_smart(",
+        "reqwest::Client",
+        ".configure_robots_parser(",
+        "host_resolves_locally_cached(",
+    ]
+    .iter()
+    .any(|marker| body.contains(marker));
     if !performs_network_call {
         return None;
     }
@@ -2020,6 +2058,16 @@ fn live_network_hosts_in(body: &str) -> Option<BTreeSet<String>> {
     }
     if !hosts.is_empty() {
         return Some(hosts);
+    }
+    // `host_resolves_locally_cached(host, ...)` performs a real DNS
+    // query against whatever hostname it's given — almost always a
+    // runtime variable here, never a `scheme://` URL, so the
+    // scheme-scanning loop above never finds anything to extract even
+    // though this is unambiguously a live network dependency.
+    if body.contains("host_resolves_locally_cached(") {
+        let mut unknown = BTreeSet::new();
+        unknown.insert("<dynamic-or-unresolved-host>".to_string());
+        return Some(unknown);
     }
     let dynamically_composed_url = body.contains("://{") || body.contains("format!(\"https://");
     if !saw_scheme || (!saw_non_reserved_host && !dynamically_composed_url) {

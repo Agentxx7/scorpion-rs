@@ -98,22 +98,20 @@ jobs:
     runs-on: ubuntu-latest
     # Bypass class closed (Codex adversarial review): "proxy state during
     # assurance execution — GitHub Actions run steps are separate
-    # processes; an `unset` performed in the firewall/probe step does not
-    # guarantee later test steps inherit cleared proxy variables." Each
-    # `run:` step below is its own shell process; the firewall step's own
-    # `unset HTTP_PROXY ...` (further down) only ever cleared that one
-    # step's process environment, not any step that runs after it. A
-    # job-level `env:` block is inherited by *every* step's process
-    # (unlike a shell `unset`, which dies with the step that ran it), so
-    # every step in this job — the pre-build/dependency-fetch steps
-    # before lockdown, the firewall step itself, and every assurance-
-    # execution step after it — starts with these proxy variables
-    # explicitly forced empty, both upper- and lower-case forms. This
-    # closes the exact gap named: a proxy variable set by the runner
-    # environment (or a prior step, if GitHub Actions semantics ever
-    # changed) can no longer route a post-lockdown `cargo test` process
-    # through a loopback proxy and regain effective external network
-    # access despite the firewall's DROP rule.
+    # processes; an `unset` performed in one step does not guarantee
+    # later test steps inherit cleared proxy variables." Each `run:` step
+    # below is its own shell process, so a plain `unset` in one step's
+    # script dies with that step. A job-level `env:` block, by contrast,
+    # is inherited by *every* step's process, so every step in this job —
+    # the pre-build/dependency-fetch steps before isolation, the
+    # namespace-setup step itself, and every assurance-execution step
+    # after it — starts with these proxy variables explicitly forced
+    # empty, both upper- and lower-case forms. This closes the exact gap
+    # named: a proxy variable set by the runner environment (or a prior
+    # step, if GitHub Actions semantics ever changed) can no longer route
+    # a namespace-isolated `cargo test` process through a loopback proxy
+    # and regain effective external network access despite the namespace
+    # having no route out.
     env:
       HTTP_PROXY: ""
       HTTPS_PROXY: ""
@@ -173,73 +171,93 @@ jobs:
       # Runtime egress denial for the deterministic phase — the primary
       # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
       # alone. GitHub-hosted ubuntu-latest runners grant the runner user
-      # passwordless sudo, so this is designed as a real, working rule
-      # set, not aspirational — but see the NOTE below on what could and
-      # could not be verified.
+      # passwordless sudo and ship `iproute2` (the `ip` command,
+      # including `ip netns`) standard on the image, so this is designed
+      # as a real, working mechanism, not aspirational.
       #
-      # Fixes over the prior version, each closing a specific demonstrated
-      # bypass:
-      #   - `ip6tables` rules mirror every `iptables` (IPv4) rule — the
-      #     prior version left IPv6 completely unrestricted.
-      #   - No DNS is permitted at all (the prior version allowed any
-      #     external DNS server on port 53, itself a viable exfiltration/
-      #     tunneling channel). The deterministic phase's tests are all
-      #     either pure in-memory logic or LOCAL_NETWORK (127.0.0.1)
-      #     fixtures — none of them legitimately need to resolve a
-      #     hostname, so none is allowed to.
-      #   - `-F`/`-X` flush every pre-existing OUTPUT rule (both stacks)
-      #     before adding any of ours, so no earlier ACCEPT rule — from
-      #     the runner image's own default configuration, which this
-      #     workflow does not control — can out-rank the REJECT below by
-      #     rule-ordering accident. The explicit rule *order* added here
-      #     (loopback ACCEPT, then REJECT) is itself now the only source
-      #     of truth for this chain.
-      #   - `set -euo pipefail` plus checking each `sudo iptables`/
-      #     `ip6tables` call's own exit status: if firewall setup itself
-      #     fails partway (e.g. the runner image lacks `iptables`, or
-      #     sudo is unexpectedly unavailable), the step fails closed —
-      #     the job stops here rather than silently proceeding into the
-      #     "deterministic" phase with no enforcement at all.
-      #   - Explicit post-install probes prove the lockdown is actually
-      #     active before any test runs: loopback must still work,
-      #     IPv4 external must fail, IPv6 external must fail. Any probe
-      #     behaving the wrong way fails the step.
+      # History (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
+      # EXECUTION_001): an earlier, host-global-iptables version of this
+      # step failed twice in sequence, both times for the same underlying
+      # design reason:
+      #   1. First real execution (run 32880266079): `-P OUTPUT DROP`
+      #      with no ESTABLISHED,RELATED exception cut off the GitHub
+      #      Actions runner agent's own already-open connection back to
+      #      GitHub the instant the policy took effect, so the agent
+      #      could never report this step's (or any later step's)
+      #      result — the step showed permanently `in_progress` for
+      #      30+ minutes although its own commands are all near-instant.
+      #      Fixed by accepting ESTABLISHED,RELATED traffic first.
+      #   2. That fix made this step itself succeed, but the very next
+      #      step (a `cargo test` invocation, long enough for GitHub's
+      #      own infrastructure to recycle the runner's one preserved
+      #      connection) hung the same way: run 32884308840's job was
+      #      force-completed by GitHub itself as a failure ~60 minutes
+      #      after that step started, its own step record frozen
+      #      mid-flight with no `completed_at` ever recorded. GitHub's
+      #      own annotation on that run named the mechanism directly:
+      #      "The hosted runner lost communication with the server...
+      #      blocks its network access can cause this error." A repeat
+      #      run (32889345557), with that step wrapped in a local,
+      #      network-independent `timeout 600`, still showed it frozen
+      #      `in_progress` more than ten minutes past that bound —
+      #      evidence the *test process* was not what was stuck (a local
+      #      `timeout` needs no network to fire); the runner's own
+      #      reporting channel was.
       #
-      # NOTE (was unverified, now real, see
-      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001):
-      # this step's first real execution (run 32880266079, on this exact
-      # rule set minus the ESTABLISHED,RELATED accept below) hung
-      # indefinitely — the workflow API showed this step permanently
-      # `in_progress`, with every job after it never even starting, for
-      # 30+ minutes on rules whose own commands are all near-instant and
-      # whose own probes are all explicitly bounded (`curl --max-time 3`,
-      # `sleep 1`). Root cause (well-reasoned inference, not directly
-      # observed — this session's own API access could not read live
-      # step logs, 403 "must have admin rights"; GitHub-hosted runner
-      # jobs run directly on the VM, not in a nested container, so the
-      # Actions runner *agent* process shares this exact host network
-      # namespace with the `sudo iptables` commands below): the original
-      # rule set had no exception for already-ESTABLISHED connections,
-      # so `-P OUTPUT DROP` correctly blocked new external connections
-      # but also cut off the runner agent's own already-open outbound
-      # connection back to GitHub's own service — the one it needs to
-      # report this very step's completion. The script's internal probes
-      # likely finished in seconds exactly as designed; GitHub simply
-      # never found out, because the agent could no longer tell it
-      # anything. Fixed by accepting ESTABLISHED/RELATED traffic first,
-      # on both stacks — the standard, well-known idiom for exactly this
-      # class of self-inflicted lockout, preserving the intended
-      # property exactly (still-open connections survive; genuinely new
-      # outbound connections, which is what every later `cargo test`
-      # process making a fresh external request would need, remain
-      # denied) without weakening it. Every `sudo iptables`/`ip6tables`
-      # call below now also has explicit before/after logging and a
-      # bounded `timeout`, as defense in depth against the separate,
-      # still-possible failure mode of genuine `/run/xtables.lock`
-      # contention (this was not what actually happened here, per the
-      # reasoning above, but a 10s bound costs nothing and turns that
-      # class of hang into a fast, loud failure instead of a silent one).
-      - name: Deny external network egress for the deterministic test phase (IPv4 + IPv6, fail-closed, self-verifying)
+      # Root cause: a host-global iptables policy does not merely
+      # constrain the test processes — GitHub-hosted runner jobs execute
+      # every step directly on the host VM, not inside a nested
+      # per-step container, so the Actions runner *agent* process shares
+      # this exact network namespace with any `sudo iptables` command a
+      # step runs. An ESTABLISHED,RELATED exception only preserves the
+      # one connection already open at rule-install time; it cannot let
+      # the agent open a *new* one later, which GitHub's own
+      # infrastructure evidently requires it to do periodically.
+      #
+      # Fix: stop sharing the isolation boundary instead of continuing
+      # to patch exceptions into a shared one. This step creates a
+      # dedicated network namespace (`ip netns`); only the six
+      # `cargo test` invocations below run inside it, via
+      # `sudo ip netns exec spider_ci ...`. The runner agent process
+      # itself is never placed in this namespace and keeps its normal,
+      # completely unrestricted host networking throughout — the class
+      # of defect above is now structurally impossible for this
+      # mechanism to reproduce, not merely made less likely. A namespace
+      # with no interface beyond loopback also has no route to anywhere
+      # else, so a test that accidentally reaches for external network
+      # fails immediately (ENETUNREACH) instead of hanging on a silent
+      # iptables DROP — a second, independent improvement.
+      #
+      # Accepted trade-off, stated plainly rather than hidden: commands
+      # run via `sudo ip netns exec` execute as root (entering a
+      # namespace requires CAP_SYS_ADMIN). This is not a new privilege
+      # boundary crossed by this design — the runner user already has
+      # unrestricted passwordless root via `sudo` on this platform, the
+      # same root the prior iptables version already exercised — but it
+      # does mean the deterministic test phase itself now also runs as
+      # root, not as the normal unprivileged runner user. No test in this
+      # phase is known to depend on running unprivileged; if one is ever
+      # found to, that is a new, narrow, separately classifiable finding,
+      # not a reason this fix was wrong to make.
+      #
+      #   - `set -euo pipefail` plus checking each command's own exit
+      #     status: if namespace setup itself fails (e.g. the runner
+      #     image lacks `iproute2`, or sudo is unexpectedly unavailable),
+      #     the step fails closed — the job stops here rather than
+      #     silently proceeding into the "deterministic" phase with no
+      #     enforcement at all.
+      #   - Explicit post-setup probes, run *inside* the namespace, prove
+      #     the isolation is actually active before any test runs:
+      #     loopback must still work, IPv4 external must fail, IPv6
+      #     external must fail — and a fourth probe, run *outside* the
+      #     namespace (the runner agent's own normal path), proves host
+      #     networking is unaffected, the specific property whose
+      #     absence caused both prior failures. Any probe behaving the
+      #     wrong way fails the step.
+      #   - Every command has explicit before/after logging and a
+      #     bounded `timeout`, defense in depth against any command
+      #     hanging for an unrelated reason.
+      - name: Create an isolated network namespace for the deterministic test phase (IPv4 + IPv6, fail-closed, self-verifying, runner-agent-external)
         run: |
           set -euo pipefail
 
@@ -252,98 +270,64 @@ jobs:
             echo "END: $*"
           }
 
-          # Flush first: no rule from the runner image's own default
-          # OUTPUT chain configuration survives to compete with ours.
-          run_bounded sudo iptables -F OUTPUT
-          run_bounded sudo ip6tables -F OUTPUT
+          # A leftover namespace from a prior attempt on the same runner
+          # would make `ip netns add` fail; deleting it first (ignoring
+          # "does not exist") keeps this step idempotent without ever
+          # silently reusing a namespace whose state this step didn't
+          # itself just create.
+          sudo ip netns delete spider_ci 2>/dev/null || true
 
-          # Established/related first, on both stacks — the GitHub
-          # Actions runner agent's own already-open outbound connection
-          # to GitHub's service must survive this lockdown, or the agent
-          # can never report this step's (or any later step's) result.
-          # This does not weaken the property being enforced: the probes
-          # below open genuinely *new* connections, which this rule does
-          # not match, so "external egress denied" is exactly as strict
-          # as before for anything that isn't already an established
-          # connection predating this step.
-          run_bounded sudo iptables  -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-          run_bounded sudo ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+          run_bounded sudo ip netns add spider_ci
+          # Loopback inside a fresh namespace starts administratively
+          # down — this is the *only* interface that will ever exist in
+          # this namespace; no veth, no bridge, no route to the host or
+          # the internet is ever created, on either IP stack, so there is
+          # no external egress path to firewall in the first place.
+          run_bounded sudo ip netns exec spider_ci ip link set lo up
 
-          # Loopback only beyond that. No DNS, no external host, on
-          # either stack, for any genuinely new connection.
-          run_bounded sudo iptables  -A OUTPUT -o lo -j ACCEPT
-          run_bounded sudo iptables  -A OUTPUT -d 127.0.0.0/8 -j ACCEPT
-          run_bounded sudo iptables  -P OUTPUT DROP
-          run_bounded sudo ip6tables -A OUTPUT -o lo -j ACCEPT
-          run_bounded sudo ip6tables -A OUTPUT -d ::1/128 -j ACCEPT
-          run_bounded sudo ip6tables -P OUTPUT DROP
-
-          # A proxy env var pointed at an allowed (loopback) address could
-          # let `curl` route an "external" probe through it and appear to
-          # succeed/fail for the wrong reason — unset every case variant
-          # before probing, so each probe measures the firewall, not a
-          # proxy configuration. This job's own `env:` block (see above)
-          # already forces every one of these empty for this step's
-          # process (and every other step's, including the assurance
-          # steps that follow) — this `unset` is kept as a second,
-          # belt-and-suspenders guarantee specifically for this probe's
-          # own shell, since an empty-string env var and a genuinely
-          # unset one are not always treated identically by every tool.
-          unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy NO_PROXY no_proxy
-
-          echo "Probe: IPv4 loopback (must succeed)"
-          python3 -m http.server 18734 --bind 127.0.0.1 &>/dev/null &
+          echo "Probe: loopback inside the namespace (must succeed)"
+          sudo ip netns exec spider_ci python3 -m http.server 18734 --bind 127.0.0.1 &>/dev/null &
           server_pid=$!
-          trap "kill $server_pid 2>/dev/null || true" EXIT
+          trap "sudo kill $server_pid 2>/dev/null || true" EXIT
           sleep 1
-          if ! curl -sS --max-time 3 -o /dev/null http://127.0.0.1:18734/; then
-            echo "::error::IPv4 loopback connectivity failed — firewall rules are too strict, LOCAL_NETWORK fixtures cannot run"
+          if ! sudo ip netns exec spider_ci curl -sS --max-time 3 -o /dev/null http://127.0.0.1:18734/; then
+            echo "::error::IPv4 loopback connectivity failed inside the namespace — LOCAL_NETWORK fixtures cannot run"
             exit 1
           fi
 
-          echo "Probe: IPv6 loopback (must succeed)"
-          python3 -m http.server 18735 --bind ::1 &>/dev/null &
-          server6_pid=$!
-          trap "kill $server_pid $server6_pid 2>/dev/null || true" EXIT
-          sleep 1
-          if ! curl -sS --max-time 3 -g -o /dev/null "http://[::1]:18735/"; then
-            echo "::error::IPv6 loopback connectivity failed — firewall rules are too strict, LOCAL_NETWORK fixtures cannot run"
+          echo "Probe: IPv4 external egress from inside the namespace (must be denied)"
+          if sudo ip netns exec spider_ci curl -sS --max-time 3 -o /dev/null https://1.1.1.1/ 2>/dev/null; then
+            echo "::error::IPv4 external egress succeeded from inside the namespace — isolation is not active"
             exit 1
           fi
 
-          echo "Probe: IPv4 external egress (must be denied)"
-          if curl -sS --max-time 3 -o /dev/null https://1.1.1.1/ 2>/dev/null; then
-            echo "::error::IPv4 external egress succeeded — firewall lockdown is not active"
+          echo "Probe: IPv6 external egress from inside the namespace (must be denied)"
+          if sudo ip netns exec spider_ci curl -sS --max-time 3 -6 -o /dev/null https://[2606:4700:4700::1111]/ 2>/dev/null; then
+            echo "::error::IPv6 external egress succeeded from inside the namespace — isolation is not active"
             exit 1
           fi
 
-          echo "Probe: IPv6 external egress (must be denied)"
-          if curl -sS --max-time 3 -6 -o /dev/null https://[2606:4700:4700::1111]/ 2>/dev/null; then
-            echo "::error::IPv6 external egress succeeded — firewall lockdown is not active"
+          echo "Probe: the runner agent's own (unrestricted, outside-the-namespace) connectivity is unaffected"
+          if ! curl -sS --max-time 5 -o /dev/null https://api.github.com/; then
+            echo "::error::the host's own network broke as a side effect of namespace setup — this must never happen"
             exit 1
           fi
 
-          echo "Firewall lockdown confirmed active (IPv4/IPv6 loopback usable, IPv4/IPv6 external egress denied)."
-      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
-      # this step (and every `cargo test` step below it in this job) is
-      # now the first thing that has ever run behind a genuinely-active
-      # firewall — the lockdown step above never actually succeeded on a
-      # real GitHub Actions run until this same frontier's own fix. A
-      # bounded `timeout` plus explicit BEGIN/END logging on every such
-      # step is deliberate defense in depth: if any test in here still
-      # makes a network/DNS attempt this repository's own
-      # `LIVE_NETWORK_TESTS.toml` registry doesn't recognize (checked and
-      # not what caused the one hang observed so far — `--skip
-      # website::crawl` already substring-matches `website::crawl_invalid`
-      # too, libtest's own default `--skip` semantics, confirmed locally),
-      # a silent `iptables -j DROP` (no RST, no ICMP-unreachable) can make
-      # that attempt hang for a very long, OS-timeout-dependent duration
-      # instead of failing fast — turning an indefinite, invisible wait
-      # into a fast, loud, diagnosable failure.
+          echo "Network namespace isolation confirmed active (loopback usable inside spider_ci, IPv4/IPv6 external egress denied inside spider_ci, host/runner-agent networking outside the namespace unaffected)."
+      # Each of the six `cargo test` invocations below runs as
+      # `sudo ip netns exec spider_ci cargo test ...` (see the namespace
+      # setup step above for why). The two steps whose exact `run:` text
+      # is required, CI_ENFORCED evidence (the closure/architecture
+      # assurance suite, and the CAPTCHA CI-portable evidence step) keep
+      # that bare, unwrapped form; the other four also add BEGIN/END
+      # logging plus a bounded `timeout 600`, defense in depth against
+      # any test genuinely hanging for an unrelated reason now that a
+      # real, working isolation mechanism is finally in place to test
+      # against.
       - name: Cargo test spider lib, deterministic only (default features)
         run: |
           echo "BEGIN: spider lib, default features"
-          if ! timeout 600 cargo test -p spider --lib -- \
+          if ! timeout 600 sudo ip netns exec spider_ci cargo test -p spider --lib -- \
             --skip website::crawl \
             --skip website::scrape \
             --skip website::not_crawl_blacklist \
@@ -365,11 +349,17 @@ jobs:
       # to any change in this job) — the full `website::*` suite needs a
       # larger stack to run in-process together under `chrome`.
       - name: Cargo test spider lib, deterministic only (chrome cache cache_request)
-        env:
-          RUST_MIN_STACK: "67108864"
         run: |
           echo "BEGIN: spider lib, chrome cache cache_request"
-          if ! timeout 600 cargo test -p spider --lib \
+          # RUST_MIN_STACK is passed explicitly to `env` here, not via
+          # this step's own `env:` block: `sudo` resets the environment
+          # by default and does not propagate arbitrary variables across
+          # that boundary, so a job/step-level `env:` value would
+          # silently never reach the namespace-isolated process. `env
+          # VAR=value cmd` is the standard, sudoers-policy-independent
+          # way to guarantee a variable reaches a specific child process
+          # regardless of what gets reset in between.
+          if ! timeout 600 sudo ip netns exec spider_ci env RUST_MIN_STACK=67108864 cargo test -p spider --lib \
             --features "chrome cache cache_request" -- \
             --skip website::crawl \
             --skip website::scrape \
@@ -401,21 +391,29 @@ jobs:
       # is itself required, non-gated CI, not merely a local development
       # check (Codex adversarial review: "the independent behavioral
       # suite must be in REQUIRED assurance CI").
-      # Deliberately NOT wrapped in `timeout`/`if`/echo like the steps
-      # around it (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
-      # EXECUTION_001's own defense-in-depth): this repository's own
-      # closure_harness.rs requires the `--test closure_harness` etc.
-      # flags to appear as a real, direct, unambiguous `cargo test`
-      # invocation with no shell control-flow wrapper at all
+      # Deliberately not wrapped in `timeout`/`if`/echo like the steps
+      # around it: this repository's own closure_harness.rs requires the
+      # `--test closure_harness` etc. flags to appear as a real, direct,
+      # unambiguous `cargo test` invocation
       # (`closure_harness_itself_is_a_real_required_test_flag_in_ci`,
-      # confirmed locally — wrapping this exact step broke that check:
-      # "a non-executing wrapper (`echo ...`) does not count"). The same
-      # strict-grammar requirement will apply to whichever step this
-      # CAPTCHA capability's own future `[stages.CI_ENFORCED]` entry
-      # cites, so this step (and the CAPTCHA one below) must stay bare.
+      # confirmed locally — wrapping this exact step in `echo`/`if`/`fi`
+      # broke that check: "a non-executing wrapper (`echo ...`) does not
+      # count"). It *is* prefixed with `sudo ip netns exec spider_ci`
+      # (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_
+      # 001's namespace-isolation redesign) — `executable_test_command`/
+      # `parse_test_selection` in closure_harness.rs were extended,
+      # generically and capability-ID-independently, to recognize this
+      # one fixed, enumerable isolation-wrapper form as equally
+      # "genuinely executable," the same way they already recognized a
+      # bare `cargo test ...` — anything else (echo, if/then/fi, timeout,
+      # or any other prefix shape) remains rejected exactly as before.
+      # The same requirement will apply to whichever step this CAPTCHA
+      # capability's own future `[stages.CI_ENFORCED]` entry cites, so
+      # this step (and the CAPTCHA one below) must keep exactly this
+      # form.
       - name: Cargo test closure/architecture assurance suite (chrome cache cache_request)
         run: >-
-          cargo test -p spider --test architecture_guardrails --test closure_harness
+          sudo ip netns exec spider_ci cargo test -p spider --test architecture_guardrails --test closure_harness
           --test closure_harness_integrity --test closure_harness_behavioral_contract
           --features "chrome cache cache_request"
       # SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_PARTITION_001:
@@ -438,23 +436,22 @@ jobs:
       # oopif_challenge`) is `#[ignore]`d for exactly that reason — its
       # own real-hardware pass is `OPERATOR_OBSERVED`/`LIVE_ENVIRONMENT_
       # DEPENDENT` evidence in the ledger, not CI-executed evidence.
-      # Deliberately bare/unwrapped, same rationale as the assurance-suite
-      # step above: this is the exact step SCORPION_CANONICAL_CAPTCHA_
-      # MACHINE_READABLE_CAPABILITY_COVERAGE_001's own future
-      # `[stages.CI_ENFORCED]` entry is expected to cite, and
-      # closure_harness.rs's CI_ENFORCED grammar requires a direct,
-      # unwrapped `cargo test ...` invocation — no echo/if/timeout shell
+      # Same rationale as the assurance-suite step above: this is the
+      # exact step SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_
+      # CAPABILITY_COVERAGE_001's own future `[stages.CI_ENFORCED]` entry
+      # is expected to cite, so it keeps the one recognized isolation
+      # prefix (`sudo ip netns exec spider_ci`) and no other shell
       # wrapper.
       - name: Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)
         run: >-
-          cargo test -p spider --test browser_challenge_detection_real
+          sudo ip netns exec spider_ci cargo test -p spider --test browser_challenge_detection_real
           --test captcha_browser_binding_real --test captcha_browser_frame_action_real
           --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
           --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma"
       - name: Cargo test canonical credential-cache regression (exact features)
         run: |
           echo "BEGIN: canonical credential-cache regression"
-          if ! timeout 600 cargo test -p spider --lib cache_request --features "chrome cache cache_request"; then
+          if ! timeout 600 sudo ip netns exec spider_ci cargo test -p spider --lib cache_request --features "chrome cache cache_request"; then
             echo "::error::TIMED OUT (600s) OR FAILED: canonical credential-cache regression"
             exit 1
           fi
@@ -473,7 +470,7 @@ jobs:
       - name: Cargo test spider credential-cache regression (chrome_remote_cache)
         run: |
           echo "BEGIN: spider credential-cache regression (chrome_remote_cache)"
-          if ! timeout 600 cargo test -p spider --lib --features chrome_remote_cache \
+          if ! timeout 600 sudo ip netns exec spider_ci cargo test -p spider --lib --features chrome_remote_cache \
             utils::tests::test_cache_enabled_excludes_authorized -- --exact; then
             echo "::error::TIMED OUT (600s) OR FAILED: spider credential-cache regression (chrome_remote_cache)"
             exit 1

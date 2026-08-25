@@ -1679,14 +1679,61 @@ fn shell_text_is_unambiguous(text: &str) -> bool {
     true
 }
 
+/// SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
+/// the deterministic test phase runs inside a dedicated network
+/// namespace (`sudo ip netns exec <name> cargo test ...`) rather than
+/// under a host-global iptables policy, so the GitHub Actions runner
+/// agent — which must keep its own unrestricted connection to GitHub's
+/// control plane — sits structurally *outside* the isolation boundary
+/// instead of being carved back into connectivity via an
+/// ESTABLISHED,RELATED exception on a shared, host-global policy. (A
+/// host-global `-P OUTPUT DROP` was proven, by real remote observation,
+/// to starve the runner agent's own required reconnection: GitHub's own
+/// annotation on the affected run read "The hosted runner lost
+/// communication with the server... blocks its network access can
+/// cause this error.") This is a second, equally strict, equally
+/// enumerable "genuinely executable" grammar — not a general wrapper
+/// allowance: exactly the four fixed tokens `sudo ip netns exec`, then
+/// one namespace-name token, then a command that must itself satisfy
+/// the ordinary bare `cargo test ...` grammar below. No other prefix of
+/// any shape (echo, if/then/fi, timeout, or any other network-isolation
+/// mechanism) is recognized — expanding this allowlist to a different
+/// concrete, enumerable form is a deliberate, reviewed decision, not a
+/// blanket exemption.
+const NETWORK_NAMESPACE_ISOLATION_PREFIX: [&str; 4] = ["sudo", "ip", "netns", "exec"];
+
+/// If `text` begins with exactly `sudo ip netns exec <name>` (four fixed
+/// tokens, then one namespace-name token), returns the remaining text
+/// after that 5-token prefix so callers can apply the ordinary bare-
+/// `cargo test` grammar to what's left. Returns `None` unchanged for
+/// anything else, including a prefix that only partially matches or has
+/// nothing after the namespace name.
+fn strip_network_namespace_isolation_prefix(text: &str) -> Option<String> {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 6 {
+        return None;
+    }
+    if tokens[0..4] != NETWORK_NAMESPACE_ISOLATION_PREFIX {
+        return None;
+    }
+    // tokens[4] is the namespace name — any single non-empty token is
+    // accepted here; the whole-string shell-metacharacter/backslash/
+    // quote/comment checks the caller already runs on the full text
+    // cover its content, and it carries no semantic meaning of its own
+    // beyond being a plain identifier.
+    Some(tokens[5..].join(" "))
+}
+
 /// Strict allowlist grammar, not a denylist heuristic: rather than trying
 /// to recognize and reject every possible shell wrapper (`echo`, `printf`,
 /// `if false; then ... fi`, `$(...)`, backticks, `eval`, POSIX
 /// `name() { }` functions, `&&`/`||` chains, `>`/`<` redirection, `;`
 /// sequencing, `#` comments, `\` continuations) — an open-ended and
 /// always-incomplete list — this only *accepts* a command that is
-/// structurally nothing but a direct `cargo test` invocation: the first
-/// two whitespace tokens must be exactly `cargo` and `test`, the text
+/// structurally nothing but a direct `cargo test` invocation, optionally
+/// preceded by the one fixed network-namespace-isolation prefix above:
+/// the first two whitespace tokens (after stripping that optional fixed
+/// prefix, if present) must be exactly `cargo` and `test`, the text
 /// must be shell-unambiguous (see `shell_text_is_unambiguous`), no other
 /// shell metacharacter appears anywhere in the string, and it does not
 /// carry `--no-run` (Codex adversarial review: a `--no-run` step —
@@ -1715,7 +1762,9 @@ fn executable_test_command(command: &str) -> bool {
     {
         return false;
     }
-    let mut tokens = normalized.split_whitespace();
+    let effective = strip_network_namespace_isolation_prefix(&normalized);
+    let effective = effective.as_deref().unwrap_or(&normalized);
+    let mut tokens = effective.split_whitespace();
     tokens.next() == Some("cargo") && tokens.next() == Some("test")
 }
 
@@ -2075,6 +2124,33 @@ fn parse_test_selection(run: &str) -> Option<TestSelection> {
     while i < before_tokens.len() {
         match before_tokens[i] {
             "cargo" | "test" => i += 1,
+            // SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
+            // EXECUTION_001: the same fixed `sudo ip netns exec <name>`
+            // isolation prefix `executable_test_command` recognizes,
+            // skipped here too — wherever it appears in the token
+            // stream, not only at position 0, since a step wrapped in
+            // `echo "BEGIN..."` / `if ! timeout 600 ...; then` puts real
+            // wrapper text before it. Consumed as one 5-token unit
+            // (`sudo`, `ip`, `netns`, `exec`, the namespace name), the
+            // same way `"cargo" | "test"` are already recognized and
+            // skipped wherever they occur, rather than treated as
+            // positional filters. Bypass class closed: a *bare* strip-
+            // only-at-position-0 version of this left `ip` (from the
+            // buried, un-stripped prefix on every wrapped step) to fall
+            // through to the generic catch-all as a spurious positional
+            // filter — and `ip` is a substring of some real test names
+            // (e.g. `website::test_crawl_subscription`, via
+            // "subscr-ip-tion"), silently making `selection_excludes`
+            // report a live-network test as *not* excluded from a step
+            // that never actually runs it.
+            "sudo"
+                if before_tokens.get(i + 1) == Some(&"ip")
+                    && before_tokens.get(i + 2) == Some(&"netns")
+                    && before_tokens.get(i + 3) == Some(&"exec")
+                    && before_tokens.get(i + 4).is_some() =>
+            {
+                i += 5;
+            }
             "--lib" => {
                 lib = true;
                 i += 1;
@@ -4839,6 +4915,32 @@ fn structural_parser_rejects_known_adversarial_fixtures() {
     assert!(!executable_test_command(
         "cargo test -p spider --lib --test closure_harness --no-run"
     ));
+    // SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
+    // the one recognized network-namespace-isolation prefix, and only
+    // that exact fixed form.
+    assert!(executable_test_command(
+        "sudo ip netns exec spider_ci cargo test -p spider --lib"
+    ));
+    assert!(!executable_test_command(
+        "sudo ip netns exec spider_ci cargo test -p spider --lib --no-run"
+    ));
+    // A partial/reordered/substituted prefix is not the recognized form.
+    assert!(!executable_test_command(
+        "ip netns exec spider_ci cargo test -p spider --lib"
+    ));
+    assert!(!executable_test_command(
+        "sudo ip netns exec spider_ci echo cargo test -p spider --lib"
+    ));
+    assert!(!executable_test_command(
+        "sudo ip netns exec spider_ci sudo ip netns exec other cargo test -p spider --lib"
+    ));
+    // A namespace name with nothing after it is not executable.
+    assert!(!executable_test_command("sudo ip netns exec spider_ci"));
+    // The prefix without an actual `cargo test` tail is rejected exactly
+    // like the bare-command grammar rejects a non-cargo-test command.
+    assert!(!executable_test_command(
+        "sudo ip netns exec spider_ci rm -rf /"
+    ));
     let dynamic = "#[tokio::test] async fn dynamic() { let h = \"real.invalid\"; Website::new(&format!(\"https://{h}\")).crawl().await; }";
     assert!(live_network_hosts_in(dynamic).is_some());
     let mixed = "#[tokio::test] async fn mixed() { TcpListener::bind(\"127.0.0.1:0\"); Website::new(\"https://choosealicense.com\").crawl().await; }";
@@ -4995,6 +5097,20 @@ fn structural_parser_rejects_known_adversarial_fixtures() {
     assert!(parse_test_selection("cargo test -p spider --doc").is_none());
     assert!(parse_test_selection("cargo test -p spider --tests").is_none());
     assert!(parse_test_selection("cargo test -p spider --lib --features chrome").is_some());
+
+    // SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
+    // a network-namespace-isolated invocation must parse to the exact
+    // same selection as its bare equivalent, not spill `sudo`/`ip`/
+    // `netns`/`exec`/the namespace name into `positional_filters` as
+    // five bogus test-name filters.
+    let bare = parse_test_selection("cargo test -p spider --lib --features chrome")
+        .expect("bare command must parse");
+    let netns_wrapped = parse_test_selection(
+        "sudo ip netns exec spider_ci cargo test -p spider --lib --features chrome",
+    )
+    .expect("netns-wrapped command must parse identically to its bare equivalent");
+    assert!(same_test_selection(&bare, &netns_wrapped));
+    assert!(netns_wrapped.positional_filters.is_empty());
 
     // Malformed recognized-option rejection (Codex adversarial review):
     // a trailing flag with no value must never be silently accepted as

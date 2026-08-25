@@ -450,8 +450,8 @@ jobs:
             --skip website::test_crawl_glob \
             --skip website::test_crawl_pause_resume \
             --skip website::test_crawl_proxy \
-            --skip website::test_crawl_shutdown; then
-            echo "::error::TIMED OUT (600s) OR FAILED: spider lib, default features"
+            --skip website::test_crawl_shutdown > /tmp/step8.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step8.log "spider lib, default features"
             exit 1
           fi
           echo "END: spider lib, default features"
@@ -482,8 +482,8 @@ jobs:
             --skip website::test_crawl_glob \
             --skip website::test_crawl_pause_resume \
             --skip website::test_crawl_proxy \
-            --skip website::test_crawl_shutdown; then
-            echo "::error::TIMED OUT (600s) OR FAILED: spider lib, chrome cache cache_request"
+            --skip website::test_crawl_shutdown > /tmp/step9.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step9.log "spider lib, chrome cache cache_request"
             exit 1
           fi
           echo "END: spider lib, chrome cache cache_request"
@@ -562,8 +562,8 @@ jobs:
       - name: Cargo test canonical credential-cache regression (exact features)
         run: |
           echo "BEGIN: canonical credential-cache regression"
-          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --lib cache_request --features "chrome cache cache_request"; then
-            echo "::error::TIMED OUT (600s) OR FAILED: canonical credential-cache regression"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --lib cache_request --features "chrome cache cache_request" > /tmp/step12.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step12.log "canonical credential-cache regression"
             exit 1
           fi
           echo "END: canonical credential-cache regression"
@@ -582,8 +582,8 @@ jobs:
         run: |
           echo "BEGIN: spider credential-cache regression (chrome_remote_cache)"
           if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --lib --features chrome_remote_cache \
-            utils::tests::test_cache_enabled_excludes_authorized -- --exact; then
-            echo "::error::TIMED OUT (600s) OR FAILED: spider credential-cache regression (chrome_remote_cache)"
+            utils::tests::test_cache_enabled_excludes_authorized -- --exact > /tmp/step13.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step13.log "spider credential-cache regression (chrome_remote_cache)"
             exit 1
           fi
           echo "END: spider credential-cache regression (chrome_remote_cache)"

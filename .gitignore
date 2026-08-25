@@ -14,6 +14,10 @@ result-*
 example.png
 .idea
 scripts/
+# The generic `scripts/` ignore above (local dev tooling) is not meant
+# to swallow .github/scripts/ — real, checked-in CI helper scripts
+# referenced by .github/workflows/*.yml, not local-only tooling.
+!.github/scripts/
 # Local-only integration probes (network-map experiments, fixtures, etc.)
 spider/tests/_*.rs
 spider/tests/fixtures/

@@ -199,7 +199,7 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # family were never in VERIFIED to begin with (see [stages.VERIFIED]'s
 # own comment for the corrected three-test accounting); and a real CI
 # workflow step was added.
-reviewed_commit = "62713dc5a13d8808f83b2ae30df1c49a7dbec969"
+reviewed_commit = "314607a13746296da3c7948451a6dd89ab062b45"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",

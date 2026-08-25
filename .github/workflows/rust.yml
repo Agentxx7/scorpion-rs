@@ -414,6 +414,28 @@ jobs:
       # any test genuinely hanging for an unrelated reason now that a
       # real, working isolation mechanism is finally in place to test
       # against.
+      # Deliberately no `#` comments *inside* any of the four wrapped
+      # `run: |` bodies below (this one and the three that follow) —
+      # `shell_text_is_unambiguous` (closure_harness.rs) rejects any
+      # run: value containing an unquoted `#` at all, precisely so a
+      # `--skip` flag can never sit hidden after one where a naive text
+      # scan would still "see" it; real regression hit while building
+      # this exact step, when an explanatory comment placed *inside* the
+      # run: body made this step (and the other three) silently
+      # invisible to `required_ci_excludes_every_registered_live_test`'s
+      # own step-relevance scan. Output capture (to surface the actual
+      # failing test/error text via `::error::` annotations on failure,
+      # the way the namespace-setup step's own `run_bounded` already
+      # does) was also attempted here and reverted: every diagnostic
+      # wrapper construct tried (`case`/`in`, `while`/`do`, `grep -E`)
+      # introduced either a rejected dash-flag token or a short bare
+      # word that turned out to be an accidental substring of a
+      # registered live-network test name (`in` inside
+      # `website::crawl_invalid`, `do` inside
+      # `website::test_crawl_subdomains`), each silently corrupting
+      # `required_ci_excludes_every_registered_live_test`'s own
+      # positional-filter parsing. Simpler and safer to keep these four
+      # steps at a plain pass/fail signal.
       - name: Cargo test spider lib, deterministic only (default features)
         run: |
           echo "BEGIN: spider lib, default features"
@@ -438,17 +460,16 @@ jobs:
       # (confirmed identical on baseline `HEAD` via `git stash`, unrelated
       # to any change in this job) — the full `website::*` suite needs a
       # larger stack to run in-process together under `chrome`.
+      # RUST_MIN_STACK is passed explicitly to `env` here, not via this
+      # step's own `env:` block: `sudo` resets the environment by default
+      # and does not propagate arbitrary variables across that boundary,
+      # so a job/step-level `env:` value would silently never reach the
+      # namespace-isolated process. `env VAR=value cmd` is the standard,
+      # sudoers-policy-independent way to guarantee a variable reaches a
+      # specific child process regardless of what gets reset in between.
       - name: Cargo test spider lib, deterministic only (chrome cache cache_request)
         run: |
           echo "BEGIN: spider lib, chrome cache cache_request"
-          # RUST_MIN_STACK is passed explicitly to `env` here, not via
-          # this step's own `env:` block: `sudo` resets the environment
-          # by default and does not propagate arbitrary variables across
-          # that boundary, so a job/step-level `env:` value would
-          # silently never reach the namespace-isolated process. `env
-          # VAR=value cmd` is the standard, sudoers-policy-independent
-          # way to guarantee a variable reaches a specific child process
-          # regardless of what gets reset in between.
           if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup RUST_MIN_STACK=67108864 cargo test -p spider --lib \
             --features "chrome cache cache_request" -- \
             --skip website::crawl \

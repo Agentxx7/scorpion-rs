@@ -119,12 +119,34 @@ jobs:
       HTTPS_PROXY: ""
       ALL_PROXY: ""
       NO_PROXY: ""
-      http_proxy: ""
-      https_proxy: ""
-      all_proxy: ""
-      no_proxy: ""
     steps:
       - uses: actions/checkout@v7
+      # SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001:
+      # GitHub Actions' own workflow-file validator rejects a job-level
+      # `env:` mapping containing both `HTTP_PROXY` and `http_proxy` (and
+      # the https_proxy/all_proxy/no_proxy pairs) as the same key already
+      # defined — case-insensitive collision detection at the schema
+      # level, unlike the real POSIX shell environment these variables
+      # actually populate, where the two casings are genuinely distinct
+      # and different tools check either one. Found for real: this exact
+      # duplication has sat undetected in this file since before this
+      # session, only surfacing now that GitHub Actions execution was
+      # re-enabled for this repository — every workflow in this file
+      # failed to even parse (zero jobs started, any commit, until this
+      # one). The lowercase forms move here, set via `$GITHUB_ENV` (the
+      # officially supported mechanism for one step to export env vars to
+      # every later step in the same job), preserving the original
+      # security property exactly — every step from this point onward
+      # still starts with all eight upper/lowercase proxy variables
+      # forced empty — without hitting the static schema's duplicate-key
+      # check, since a `$GITHUB_ENV` write is not part of the YAML `env:`
+      # mapping at all.
+      - name: "Clear lowercase proxy env vars for every later step (GitHub's env: schema rejects case-only duplicate keys)"
+        run: |
+          echo "http_proxy=" >> "$GITHUB_ENV"
+          echo "https_proxy=" >> "$GITHUB_ENV"
+          echo "all_proxy=" >> "$GITHUB_ENV"
+          echo "no_proxy=" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
           path: |

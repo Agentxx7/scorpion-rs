@@ -218,7 +218,9 @@ jobs:
       # to patch exceptions into a shared one. This step creates a
       # dedicated network namespace (`ip netns`); only the six
       # `cargo test` invocations below run inside it, via
-      # `sudo ip netns exec spider_ci ...`. The runner agent process
+      # `sudo --preserve-env=PATH ip netns exec spider_ci ...` (the
+      # `--preserve-env=PATH` is required, not cosmetic — see the probe
+      # further down this same step for why). The runner agent process
       # itself is never placed in this namespace and keeps its normal,
       # completely unrestricted host networking throughout — the class
       # of defect above is now structurally impossible for this
@@ -313,9 +315,26 @@ jobs:
             exit 1
           fi
 
-          echo "Network namespace isolation confirmed active (loopback usable inside spider_ci, IPv4/IPv6 external egress denied inside spider_ci, host/runner-agent networking outside the namespace unaffected)."
+          # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
+          # EXECUTION_001: `sudo` resets the environment — including
+          # PATH — to its own `secure_path` policy by default, which
+          # will not include this runner's rustup-managed
+          # `~/.cargo/bin`. Every downstream `cargo test` step below
+          # therefore uses `sudo --preserve-env=PATH` specifically (not
+          # `-E`, which would preserve everything, wider than needed).
+          # Proven here, fast and explicitly, rather than discovered
+          # only via a downstream step's opaque failure: `cargo` must
+          # actually resolve inside the namespace, as root, with this
+          # exact flag combination, before any real test step runs.
+          echo "Probe: cargo resolves inside the namespace as root with --preserve-env=PATH"
+          if ! run_bounded sudo --preserve-env=PATH ip netns exec spider_ci cargo --version; then
+            echo "::error::cargo did not resolve inside the namespace via sudo --preserve-env=PATH ip netns exec — every downstream cargo test step in this job would fail the same way"
+            exit 1
+          fi
+
+          echo "Network namespace isolation confirmed active (loopback usable inside spider_ci, IPv4/IPv6 external egress denied inside spider_ci, host/runner-agent networking outside the namespace unaffected, cargo resolves inside it)."
       # Each of the six `cargo test` invocations below runs as
-      # `sudo ip netns exec spider_ci cargo test ...` (see the namespace
+      # `sudo --preserve-env=PATH ip netns exec spider_ci cargo test ...` (see the namespace
       # setup step above for why). The two steps whose exact `run:` text
       # is required, CI_ENFORCED evidence (the closure/architecture
       # assurance suite, and the CAPTCHA CI-portable evidence step) keep
@@ -327,7 +346,7 @@ jobs:
       - name: Cargo test spider lib, deterministic only (default features)
         run: |
           echo "BEGIN: spider lib, default features"
-          if ! timeout 600 sudo ip netns exec spider_ci cargo test -p spider --lib -- \
+          if ! timeout 600 sudo --preserve-env=PATH ip netns exec spider_ci cargo test -p spider --lib -- \
             --skip website::crawl \
             --skip website::scrape \
             --skip website::not_crawl_blacklist \
@@ -359,7 +378,7 @@ jobs:
           # VAR=value cmd` is the standard, sudoers-policy-independent
           # way to guarantee a variable reaches a specific child process
           # regardless of what gets reset in between.
-          if ! timeout 600 sudo ip netns exec spider_ci env RUST_MIN_STACK=67108864 cargo test -p spider --lib \
+          if ! timeout 600 sudo --preserve-env=PATH ip netns exec spider_ci env RUST_MIN_STACK=67108864 cargo test -p spider --lib \
             --features "chrome cache cache_request" -- \
             --skip website::crawl \
             --skip website::scrape \
@@ -398,7 +417,7 @@ jobs:
       # (`closure_harness_itself_is_a_real_required_test_flag_in_ci`,
       # confirmed locally — wrapping this exact step in `echo`/`if`/`fi`
       # broke that check: "a non-executing wrapper (`echo ...`) does not
-      # count"). It *is* prefixed with `sudo ip netns exec spider_ci`
+      # count"). It *is* prefixed with `sudo --preserve-env=PATH ip netns exec spider_ci`
       # (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_
       # 001's namespace-isolation redesign) — `executable_test_command`/
       # `parse_test_selection` in closure_harness.rs were extended,
@@ -413,7 +432,7 @@ jobs:
       # form.
       - name: Cargo test closure/architecture assurance suite (chrome cache cache_request)
         run: >-
-          sudo ip netns exec spider_ci cargo test -p spider --test architecture_guardrails --test closure_harness
+          sudo --preserve-env=PATH ip netns exec spider_ci cargo test -p spider --test architecture_guardrails --test closure_harness
           --test closure_harness_integrity --test closure_harness_behavioral_contract
           --features "chrome cache cache_request"
       # SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_PARTITION_001:
@@ -440,18 +459,18 @@ jobs:
       # exact step SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_
       # CAPABILITY_COVERAGE_001's own future `[stages.CI_ENFORCED]` entry
       # is expected to cite, so it keeps the one recognized isolation
-      # prefix (`sudo ip netns exec spider_ci`) and no other shell
+      # prefix (`sudo --preserve-env=PATH ip netns exec spider_ci`) and no other shell
       # wrapper.
       - name: Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)
         run: >-
-          sudo ip netns exec spider_ci cargo test -p spider --test browser_challenge_detection_real
+          sudo --preserve-env=PATH ip netns exec spider_ci cargo test -p spider --test browser_challenge_detection_real
           --test captcha_browser_binding_real --test captcha_browser_frame_action_real
           --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
           --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma"
       - name: Cargo test canonical credential-cache regression (exact features)
         run: |
           echo "BEGIN: canonical credential-cache regression"
-          if ! timeout 600 sudo ip netns exec spider_ci cargo test -p spider --lib cache_request --features "chrome cache cache_request"; then
+          if ! timeout 600 sudo --preserve-env=PATH ip netns exec spider_ci cargo test -p spider --lib cache_request --features "chrome cache cache_request"; then
             echo "::error::TIMED OUT (600s) OR FAILED: canonical credential-cache regression"
             exit 1
           fi
@@ -470,7 +489,7 @@ jobs:
       - name: Cargo test spider credential-cache regression (chrome_remote_cache)
         run: |
           echo "BEGIN: spider credential-cache regression (chrome_remote_cache)"
-          if ! timeout 600 sudo ip netns exec spider_ci cargo test -p spider --lib --features chrome_remote_cache \
+          if ! timeout 600 sudo --preserve-env=PATH ip netns exec spider_ci cargo test -p spider --lib --features chrome_remote_cache \
             utils::tests::test_cache_enabled_excludes_authorized -- --exact; then
             echo "::error::TIMED OUT (600s) OR FAILED: spider credential-cache regression (chrome_remote_cache)"
             exit 1

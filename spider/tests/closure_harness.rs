@@ -3937,16 +3937,99 @@ fn closure_relevant_files(entry: &LedgerFile) -> Vec<(PathBuf, String)> {
     relevant_files
 }
 
-/// Asserts `commit` contains byte-identical copies, at that exact
-/// revision, of every file `closure_relevant_files` names for `entry`.
-/// Shared by both `CLOSED.closed_commit` and
-/// `ADVERSARIALLY_VERIFIED.reviewed_commit` — bypass class closed (Codex
-/// adversarial review): "review ADVERSARIALLY_VERIFIED binding... bind it
-/// to the same relevant evidence revision model [as CLOSED]." A
-/// historical ancestor whose ledger and harness bytes happen to match
-/// today's but whose implementation or test file has since drifted fails
-/// this check under either stage.
+/// `[proof.*]` classes whose *records* are expected to be added only
+/// after `reviewed_commit`/`closed_commit` — they are the review/closure
+/// evidence itself, produced by an act (an operator observation, a real
+/// CI run) that necessarily happens later in time than the commit being
+/// cited, and by a lifecycle-progression fact that shrinks over time
+/// (`UNPROVEN.missing`) as the other classes fill in. Never
+/// `CODE_PROVEN`/`LIVE_ENVIRONMENT_DEPENDENT`, which describe the
+/// capability's own architecture/requirements and must stay bound.
+const LEDGER_ATTESTATION_ONLY_PROOF_CLASSES: [&str; 3] =
+    ["OPERATOR_OBSERVED", "CI_PROVEN", "UNPROVEN"];
+
+/// `[stages.*]` tables that, by the stage-order model itself
+/// (`CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md` section 2),
+/// can only ever be *added* in a commit strictly after the one they name
+/// as `reviewed_commit`/`closed_commit` — a table announcing "this
+/// capability was reviewed/closed as of commit X" cannot itself already
+/// exist at X without X's own hash being known before X is created.
+/// `DESIGNED`/`IMPLEMENTED`/`VERIFIED`/`WIRED`/`PRODUCTION_REACHABLE`
+/// remain fully bound: those describe what was actually reviewed, not
+/// when review happened.
+const LEDGER_ATTESTATION_ONLY_STAGES: [&str; 3] =
+    ["ADVERSARIALLY_VERIFIED", "CI_ENFORCED", "CLOSED"];
+
+/// Parses `source` as this ledger entry's own TOML and removes exactly
+/// the attestation-only fields above (the top-level `stage` claim, the
+/// `LEDGER_ATTESTATION_ONLY_PROOF_CLASSES` proof records, and the
+/// `LEDGER_ATTESTATION_ONLY_STAGES` tables) — never anything else. `None`
+/// on a parse failure (an unparseable revision can never satisfy the
+/// binding check that consumes this).
+fn ledger_toml_minus_attestation_fields(source: &str) -> Option<toml::Value> {
+    let mut table: toml::Table = source.parse().ok()?;
+    table.remove("stage");
+    if let Some(toml::Value::Table(proof)) = table.get_mut("proof") {
+        for class in LEDGER_ATTESTATION_ONLY_PROOF_CLASSES {
+            proof.remove(class);
+        }
+    }
+    if let Some(toml::Value::Table(stages)) = table.get_mut("stages") {
+        for stage in LEDGER_ATTESTATION_ONLY_STAGES {
+            stages.remove(stage);
+        }
+    }
+    Some(toml::Value::Table(table))
+}
+
+/// Whether `old` and `new` — the same ledger entry's own TOML source at
+/// two different commits — are identical in every field *except* the
+/// attestation-only ones `ledger_toml_minus_attestation_fields` strips.
+/// Structural TOML equality, not text equality: a comment-only edit no
+/// longer breaks this (comments were never semantic), but any real field
+/// difference does, including a field that exists at one revision and
+/// not the other — nothing is silently ignored merely for being new;
+/// only the fixed, named allowlist above is ever stripped before
+/// comparing. `false` if either revision fails to parse.
+fn ledger_toml_unchanged_except_attestation_fields(old: &str, new: &str) -> bool {
+    match (
+        ledger_toml_minus_attestation_fields(old),
+        ledger_toml_minus_attestation_fields(new),
+    ) {
+        (Some(old), Some(new)) => old == new,
+        _ => false,
+    }
+}
+
+/// Asserts `commit` contains, for every file `closure_relevant_files`
+/// names for `entry`, either a byte-identical copy at that exact revision
+/// (every file except the ledger entry itself) or — for the ledger entry
+/// itself only — a TOML-semantically-identical copy modulo the fixed
+/// attestation-only allowlist above
+/// (`ledger_toml_unchanged_except_attestation_fields`). Shared by both
+/// `CLOSED.closed_commit` and `ADVERSARIALLY_VERIFIED.reviewed_commit` —
+/// bypass class closed (Codex adversarial review): "review
+/// ADVERSARIALLY_VERIFIED binding... bind it to the same relevant
+/// evidence revision model [as CLOSED]." A historical ancestor whose
+/// ledger and harness bytes happen to match today's but whose
+/// implementation or test file has since drifted still fails this check
+/// under either stage — the ledger-file exception is narrow (a fixed,
+/// named field allowlist, generic across every capability, never a
+/// capability-ID special case) and does not touch any other file's own
+/// full byte-identity requirement.
+///
+/// This exception exists because `reviewed_commit`/`closed_commit` name
+/// a commit that, by definition, cannot itself already contain a table
+/// citing its own not-yet-computed hash — the same self-reference cycle
+/// this comment (and `SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001`'s
+/// own closure report) documents in full. Before this fix, *no* ledger
+/// entry in this repository's history had ever reached
+/// `ADVERSARIALLY_VERIFIED` or `CLOSED` under ordinary, forward-only Git
+/// history (confirmed: only `TEMPLATE.toml`'s commented-out example ever
+/// referenced `[stages.CLOSED]` at all) — this was a structural defect in
+/// this generic contract, not a property specific to any one capability.
 fn assert_commit_binds_relevant_files(commit: &str, entry: &LedgerFile, field_name: &str) {
+    let ledger_relative = format!("docs/frontier/ledger/{}.toml", entry.filename);
     for (expected_path, relative) in closure_relevant_files(entry) {
         let expected = read(&expected_path);
         let output = Command::new("git")
@@ -3955,11 +4038,21 @@ fn assert_commit_binds_relevant_files(commit: &str, entry: &LedgerFile, field_na
             .args(["show", &format!("{commit}:{relative}")])
             .output()
             .unwrap_or_else(|error| panic!("git show failed: {error}"));
+        let matches = if relative == ledger_relative {
+            output.status.success()
+                && ledger_toml_unchanged_except_attestation_fields(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &expected,
+                )
+        } else {
+            output.status.success() && output.stdout == expected.as_bytes()
+        };
         assert!(
-            output.status.success() && output.stdout == expected.as_bytes(),
-            "{}: {field_name}'s revision does not contain the exact current {relative} — a \
-             stale evidence file at the claimed revision means this is not the revision this \
-             harness actually just verified",
+            matches,
+            "{}: {field_name}'s revision does not contain the exact current {relative} (or, \
+             for the ledger entry itself, differs in a substantive, non-attestation-only \
+             field) — a stale evidence file at the claimed revision means this is not the \
+             revision this harness actually just verified",
             entry.path.display()
         );
     }

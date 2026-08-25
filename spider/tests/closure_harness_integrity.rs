@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 const CLOSURE_HARNESS_SHA256: &str =
-    "4884b19d90096180c5ee40808aad79035fc49beaebbf074af844e87b0cba7cad";
+    "46be0569cb904d97afe92ae9106c96db20221a494b2c27c0aca6ff249babb180";
 
 #[test]
 fn closure_harness_contains_required_independent_checks() {
@@ -28,6 +28,8 @@ fn closure_harness_contains_required_independent_checks() {
         "live_network_registry_matches_detected_reality",
         "proof_class_records_are_typed_bound_and_non_substitutable",
         "closed_requires_every_declared_proof_class_independently",
+        "assert_commit_binds_relevant_files",
+        "ledger_toml_unchanged_except_attestation_fields",
     ] {
         assert!(
             source.contains(marker),

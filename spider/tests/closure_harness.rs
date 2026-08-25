@@ -1681,7 +1681,8 @@ fn shell_text_is_unambiguous(text: &str) -> bool {
 
 /// SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
 /// the deterministic test phase runs inside a dedicated network
-/// namespace (`sudo ip netns exec <name> env PATH=<literal> cargo test
+/// namespace (`sudo ip netns exec <name> env PATH=<literal>
+/// HOME=<literal> CARGO_HOME=<literal> RUSTUP_HOME=<literal> cargo test
 /// ...`) rather than under a host-global iptables policy, so the GitHub
 /// Actions runner agent — which must keep its own unrestricted
 /// connection to GitHub's control plane — sits structurally *outside*
@@ -1691,62 +1692,84 @@ fn shell_text_is_unambiguous(text: &str) -> bool {
 /// real remote observation, to starve the runner agent's own required
 /// reconnection: GitHub's own annotation on the affected run read "The
 /// hosted runner lost communication with the server... blocks its
-/// network access can cause this error.") The trailing `env
-/// PATH=<literal>` is required, not cosmetic: plain `sudo` resets PATH
-/// to its own `secure_path` sudoers policy, which does not include a
-/// rustup-managed `~/.cargo/bin` — proven for real, by remote
-/// observation, when the first namespace-isolated run failed every
-/// downstream step near-instantly (not a hang, not a genuine test
-/// failure). `sudo --preserve-env=PATH` was tried next and *also*
-/// observed to fail identically on a real remote run — `secure_path`,
-/// per sudo's own documented behavior, overrides even an explicit
-/// `--preserve-env=PATH`. Only explicitly constructing the exec'd
-/// child's own environment via `env`, after sudo has already elevated
-/// (a boundary `secure_path` has no say over), actually works. This is
-/// a second, equally strict, equally enumerable "genuinely executable"
-/// grammar — not a general wrapper allowance: exactly the four fixed
-/// tokens `sudo ip netns exec`, then one namespace-name token, then the
-/// two fixed tokens `env` and the one exact, literal, non-shell-
-/// expanded PATH value below, then a command that must itself satisfy
-/// the ordinary bare `cargo test ...` grammar. No other prefix of any
-/// shape (echo, if/then/fi, timeout, `$PATH` shell expansion, or any
-/// other network-isolation mechanism) is recognized — expanding this
-/// allowlist to a different concrete, enumerable form is a deliberate,
-/// reviewed decision, not a blanket exemption.
+/// network access can cause this error.") The trailing `env` literals
+/// are required, not cosmetic — both proven necessary by real,
+/// sequential remote observations, not assumed up front:
+/// - PATH: plain `sudo` resets PATH to its own `secure_path` sudoers
+///   policy, which does not include a rustup-managed `~/.cargo/bin` —
+///   the first namespace-isolated run failed every downstream step
+///   near-instantly (not a hang, not a genuine test failure).
+///   `sudo --preserve-env=PATH` was tried next and *also* observed to
+///   fail identically — `secure_path`, per sudo's own documented
+///   behavior, overrides even an explicit `--preserve-env=PATH`.
+/// - HOME/CARGO_HOME/RUSTUP_HOME: `sudo` also resets HOME to `/root` by
+///   default — even with PATH correctly fixed (confirmed correct via a
+///   `::notice::` probe of the runner's real cargo path), `cargo
+///   --version` still failed as root inside the namespace, because
+///   `cargo`/`rustup` resolve their installed-toolchain state under
+///   `$HOME/.cargo`/`$HOME/.rustup`, and root has none there.
+///
+/// Only explicitly constructing the exec'd child's own environment via
+/// `env`, after sudo has already elevated (a boundary `secure_path` has
+/// no say over), actually works. This is a second, equally strict,
+/// equally enumerable "genuinely executable" grammar — not a general
+/// wrapper allowance: exactly the four fixed tokens `sudo ip netns
+/// exec`, then one namespace-name token, then the fixed token `env`,
+/// then the four exact, literal, non-shell-expanded env-assignment
+/// values below (in this exact order), then a command that must itself
+/// satisfy the ordinary bare `cargo test ...` grammar. No other prefix
+/// of any shape (echo, if/then/fi, timeout, `$VAR` shell expansion, or
+/// any other network-isolation mechanism) is recognized — expanding
+/// this allowlist to a different concrete, enumerable form is a
+/// deliberate, reviewed decision, not a blanket exemption.
 const NETWORK_NAMESPACE_ISOLATION_PREFIX: [&str; 4] = ["sudo", "ip", "netns", "exec"];
 
-/// The exact, literal (never shell-expanded — `$PATH` itself contains a
-/// `$`, which `executable_test_command`'s metacharacter check forbids
-/// outright) PATH value every network-namespace-isolated `cargo test`
-/// step must carry, matching `.github/workflows/rust.yml`'s own literal
-/// value byte for byte.
-const NETWORK_NAMESPACE_ISOLATION_PATH_LITERAL: &str =
-    "PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// The exact, literal (never shell-expanded — `$PATH` etc. themselves
+/// contain a `$`, which `executable_test_command`'s metacharacter check
+/// forbids outright), ordered env-assignment values every network-
+/// namespace-isolated `cargo test` step must carry after `env`, matching
+/// `.github/workflows/rust.yml`'s own literal values byte for byte.
+const NETWORK_NAMESPACE_ISOLATION_ENV_LITERALS: [&str; 4] = [
+    "PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "HOME=/home/runner",
+    "CARGO_HOME=/home/runner/.cargo",
+    "RUSTUP_HOME=/home/runner/.rustup",
+];
 
 /// If `text` begins with exactly `sudo ip netns exec <name> env
-/// PATH=<literal>` (four fixed tokens, one namespace-name token, then
-/// two more fixed tokens), returns the remaining text after that
-/// 7-token prefix so callers can apply the ordinary bare-`cargo test`
-/// grammar to what's left. Returns `None` unchanged for anything else,
-/// including a prefix that only partially matches, uses a different
-/// PATH value, or has nothing after it.
+/// PATH=<literal> HOME=<literal> CARGO_HOME=<literal>
+/// RUSTUP_HOME=<literal>` (four fixed tokens, one namespace-name token,
+/// then the fixed token `env`, then the four ordered literal env
+/// assignments), returns the remaining text after that 10-token prefix
+/// so callers can apply the ordinary bare-`cargo test` grammar to
+/// what's left. Returns `None` unchanged for anything else, including a
+/// prefix that only partially matches, uses a different or reordered
+/// literal, or has nothing after it.
 fn strip_network_namespace_isolation_prefix(text: &str) -> Option<String> {
     let tokens: Vec<&str> = text.split_whitespace().collect();
-    if tokens.len() < 7 {
-        return None;
-    }
-    if tokens[0..4] != NETWORK_NAMESPACE_ISOLATION_PREFIX {
-        return None;
-    }
     // tokens[4] is the namespace name — any single non-empty token is
-    // accepted here; the whole-string shell-metacharacter/backslash/
+    // accepted there; the whole-string shell-metacharacter/backslash/
     // quote/comment checks the caller already runs on the full text
     // cover its content, and it carries no semantic meaning of its own
     // beyond being a plain identifier.
-    if tokens[5] != "env" || tokens[6] != NETWORK_NAMESPACE_ISOLATION_PATH_LITERAL {
+    if !network_namespace_isolation_prefix_at(&tokens, 0) {
         return None;
     }
-    Some(tokens[7..].join(" "))
+    Some(tokens[10..].join(" "))
+}
+
+/// True if `tokens[i..]` begins with the full, fixed 10-token network-
+/// namespace-isolation prefix (`sudo ip netns exec <name> env
+/// PATH=<literal> HOME=<literal> CARGO_HOME=<literal>
+/// RUSTUP_HOME=<literal>`). Shared by `strip_network_namespace_
+/// isolation_prefix` (position 0 only) and `parse_test_selection`'s
+/// token-stream scan (anywhere in the stream), so the two can never
+/// silently drift apart on what counts as "the recognized prefix."
+fn network_namespace_isolation_prefix_at(tokens: &[&str], i: usize) -> bool {
+    tokens.len() >= i + 10
+        && tokens[i..i + 4] == NETWORK_NAMESPACE_ISOLATION_PREFIX
+        && tokens[i + 5] == "env"
+        && tokens[i + 6..i + 10] == NETWORK_NAMESPACE_ISOLATION_ENV_LITERALS
 }
 
 /// Strict allowlist grammar, not a denylist heuristic: rather than trying
@@ -2151,34 +2174,26 @@ fn parse_test_selection(run: &str) -> Option<TestSelection> {
             "cargo" | "test" => i += 1,
             // SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
             // EXECUTION_001: the same fixed `sudo ip netns exec <name>
-            // env PATH=<literal>` isolation prefix
+            // env PATH=<literal> HOME=<literal> CARGO_HOME=<literal>
+            // RUSTUP_HOME=<literal>` isolation prefix
             // `executable_test_command` recognizes, skipped here too —
             // wherever it appears in the token stream, not only at
             // position 0, since a step wrapped in `echo "BEGIN..."` /
             // `if ! timeout 600 ...; then` puts real wrapper text before
-            // it. Consumed as one 7-token unit (`sudo`, `ip`, `netns`,
-            // `exec`, the namespace name, `env`, the literal PATH
-            // value), the same way `"cargo" | "test"` are already
-            // recognized and skipped wherever they occur, rather than
-            // treated as positional filters. Bypass class closed: a
-            // *bare* strip-only-at-position-0 version of this left `ip`
-            // (from the buried, un-stripped prefix on every wrapped step)
-            // to fall through to the generic catch-all as a spurious
-            // positional filter — and `ip` is a substring of some real
-            // test names (e.g. `website::test_crawl_subscription`, via
-            // "subscr-ip-tion"), silently making `selection_excludes`
-            // report a live-network test as *not* excluded from a step
-            // that never actually runs it.
-            "sudo"
-                if before_tokens.get(i + 1) == Some(&"ip")
-                    && before_tokens.get(i + 2) == Some(&"netns")
-                    && before_tokens.get(i + 3) == Some(&"exec")
-                    && before_tokens.get(i + 4).is_some()
-                    && before_tokens.get(i + 5) == Some(&"env")
-                    && before_tokens.get(i + 6)
-                        == Some(&NETWORK_NAMESPACE_ISOLATION_PATH_LITERAL) =>
-            {
-                i += 7;
+            // it. Consumed as one 10-token unit, the same way
+            // `"cargo" | "test"` are already recognized and skipped
+            // wherever they occur, rather than treated as positional
+            // filters. Bypass class closed: a *bare* strip-only-at-
+            // position-0 version of this left `ip` (from the buried,
+            // un-stripped prefix on every wrapped step) to fall through
+            // to the generic catch-all as a spurious positional filter —
+            // and `ip` is a substring of some real test names (e.g.
+            // `website::test_crawl_subscription`, via "subscr-ip-tion"),
+            // silently making `selection_excludes` report a live-network
+            // test as *not* excluded from a step that never actually
+            // runs it.
+            "sudo" if network_namespace_isolation_prefix_at(&before_tokens, i) => {
+                i += 10;
             }
             "--lib" => {
                 lib = true;
@@ -4947,7 +4962,7 @@ fn structural_parser_rejects_known_adversarial_fixtures() {
     // SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001:
     // the one recognized network-namespace-isolation prefix, and only
     // that exact fixed form.
-    const NETNS_PREFIX: &str = "sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    const NETNS_PREFIX: &str = "sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup";
     assert!(executable_test_command(&format!(
         "{NETNS_PREFIX} cargo test -p spider --lib"
     )));
@@ -4956,7 +4971,7 @@ fn structural_parser_rejects_known_adversarial_fixtures() {
     )));
     // A partial/reordered/substituted prefix is not the recognized form.
     assert!(!executable_test_command(
-        "ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin cargo test -p spider --lib"
+        "ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --lib"
     ));
     // The previously-tried (and remotely observed to fail)
     // --preserve-env=PATH form is deliberately no longer recognized.
@@ -4966,10 +4981,17 @@ fn structural_parser_rejects_known_adversarial_fixtures() {
     assert!(!executable_test_command(
         "sudo ip netns exec spider_ci cargo test -p spider --lib"
     ));
-    // A wrong/different PATH literal is not the recognized form either
-    // — this is a fixed, reviewed value, not a free-text allowance.
+    // A PATH-only env (missing HOME/CARGO_HOME/RUSTUP_HOME — the
+    // earlier, remotely-observed-insufficient form) is not the
+    // recognized form either.
     assert!(!executable_test_command(
-        "sudo ip netns exec spider_ci env PATH=/usr/bin cargo test -p spider --lib"
+        "sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin cargo test -p spider --lib"
+    ));
+    // A wrong/different literal value anywhere in the four is not the
+    // recognized form either — these are fixed, reviewed values, not a
+    // free-text allowance.
+    assert!(!executable_test_command(
+        "sudo ip netns exec spider_ci env PATH=/usr/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --lib"
     ));
     assert!(!executable_test_command(&format!(
         "{NETNS_PREFIX} echo cargo test -p spider --lib"
@@ -5170,15 +5192,9 @@ fn structural_parser_rejects_known_adversarial_fixtures() {
     assert_eq!(netns_wrapped_with_preamble.package, bare.package);
     assert_eq!(netns_wrapped_with_preamble.lib, bare.lib);
     assert_eq!(netns_wrapped_with_preamble.features, bare.features);
-    for isolation_token in [
-        "sudo",
-        "ip",
-        "netns",
-        "exec",
-        "spider_ci",
-        "env",
-        NETWORK_NAMESPACE_ISOLATION_PATH_LITERAL,
-    ] {
+    let mut isolation_tokens = vec!["sudo", "ip", "netns", "exec", "spider_ci", "env"];
+    isolation_tokens.extend(NETWORK_NAMESPACE_ISOLATION_ENV_LITERALS);
+    for isolation_token in isolation_tokens {
         assert!(
             !netns_wrapped_with_preamble
                 .positional_filters

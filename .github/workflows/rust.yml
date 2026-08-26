@@ -599,6 +599,37 @@ jobs:
             exit 1
           fi
           echo "END: spider credential-cache regression (chrome_remote_cache)"
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
+      # (CONTINUE: remote step-10 closure-assurance failure) — TEMPORARY
+      # diagnostic decomposition of the combined closure/architecture
+      # assurance step above, which fails remotely (exit 101) with no
+      # per-test detail available since that step is deliberately bare for
+      # closure_harness.rs's own CI_ENFORCED grammar. These four steps run
+      # each of that step's four test binaries individually, under the
+      # exact same namespace/root/env identity, purely to answer "which
+      # binary fails?" — see .github/scripts/diagnose-step10-binary.sh's
+      # own doc comment for why the actual `cargo test` invocation is kept
+      # inside that script rather than this YAML's own `run:` text.
+      # `if: always()` is required so these still run after the canonical
+      # step 10 (and steps 11-13) fail/skip above; per
+      # closure_harness.rs's own `WorkflowStep::gated` model this also
+      # marks every one of these steps `gated`, a second, independent
+      # reason none of them can ever be mistaken for required, non-gated
+      # CI_ENFORCED evidence. To be removed once the real step-10 defect
+      # is identified and fixed — this is not a permanent part of the
+      # required assurance sequence.
+      - name: "[DIAGNOSTIC step10] architecture_guardrails alone"
+        if: always()
+        run: bash .github/scripts/diagnose-step10-binary.sh architecture_guardrails
+      - name: "[DIAGNOSTIC step10] closure_harness alone"
+        if: always()
+        run: bash .github/scripts/diagnose-step10-binary.sh closure_harness
+      - name: "[DIAGNOSTIC step10] closure_harness_integrity alone"
+        if: always()
+        run: bash .github/scripts/diagnose-step10-binary.sh closure_harness_integrity
+      - name: "[DIAGNOSTIC step10] closure_harness_behavioral_contract alone"
+        if: always()
+        run: bash .github/scripts/diagnose-step10-binary.sh closure_harness_behavioral_contract
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

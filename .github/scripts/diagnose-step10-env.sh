@@ -20,45 +20,59 @@
 # this job would ever have surfaced (steps 8/9 run `cargo test` only,
 # never `git`, under this same root+namespace identity).
 #
+# Every line of output is emitted as `::notice::`/`::warning::`
+# (GitHub Actions workflow-command syntax) rather than plain stdout —
+# a real gap found empirically this round: plain stdout from a
+# workflow step is only visible in raw job logs, which return 403
+# (admin rights required) for this session; only `::error::`/
+# `::warning::`/`::notice::`-prefixed lines are visible via the public
+# check-runs annotations API regardless of step outcome. Multi-line
+# values are re-emitted one `::notice::` line at a time (the
+# `%0A`/newline workflow-command escaping is fragile across runners),
+# since annotations are what this diagnostic exists to be read through.
+#
 # Kept out of the workflow YAML's own `run:` text and marked `gated` via
 # the calling step's `if: always()`, same rationale and precedent as
 # diagnose-step10-binary.sh and report-test-step-failure.sh.
 set -uo pipefail
 
+notice() {
+  while IFS= read -r line; do
+    echo "::notice::${line}"
+  done <<< "$1"
+}
+
 root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 print_identity() {
-  echo "id: $(id)"
-  echo "whoami: $(whoami 2>&1)"
-  echo "USER=${USER:-<unset>} LOGNAME=${LOGNAME:-<unset>} HOME=${HOME:-<unset>}"
-  echo "PATH=${PATH:-<unset>}"
-  echo "CARGO_HOME=${CARGO_HOME:-<unset>} RUSTUP_HOME=${RUSTUP_HOME:-<unset>}"
-  echo "TMPDIR=${TMPDIR:-<unset>} XDG_CACHE_HOME=${XDG_CACHE_HOME:-<unset>} XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-<unset>}"
-  echo "CI=${CI:-<unset>} GITHUB_ACTIONS=${GITHUB_ACTIONS:-<unset>} GITHUB_WORKSPACE=${GITHUB_WORKSPACE:-<unset>}"
-  echo "RUST_MIN_STACK=${RUST_MIN_STACK:-<unset>} RUST_TEST_THREADS=${RUST_TEST_THREADS:-<unset>}"
-  echo "umask: $(umask)"
-  echo "nproc: $(nproc 2>&1)"
-  echo "repo dir owner: $(stat -c '%U(%u):%G(%g) %n' "${root}" 2>&1)"
-  echo "target dir owner: $(stat -c '%U(%u):%G(%g) %n' "${root}/target" 2>&1)"
-  echo "/tmp owner/perms: $(stat -c '%U(%u):%G(%g) %a %n' /tmp 2>&1)"
-  echo "git --version: $(git --version 2>&1)"
-  echo "git config --global --get-all safe.directory: $(git config --global --get-all safe.directory 2>&1 || echo '<none/error>')"
-  echo "git config --system --get-all safe.directory: $(git config --system --get-all safe.directory 2>&1 || echo '<none/error>')"
-  echo "git -C <root> rev-parse HEAD: $(git -C "${root}" rev-parse HEAD 2>&1)"
+  notice "id: $(id)"
+  notice "whoami: $(whoami 2>&1)"
+  notice "USER=${USER:-<unset>} LOGNAME=${LOGNAME:-<unset>} HOME=${HOME:-<unset>}"
+  notice "CARGO_HOME=${CARGO_HOME:-<unset>} RUSTUP_HOME=${RUSTUP_HOME:-<unset>}"
+  notice "TMPDIR=${TMPDIR:-<unset>} XDG_CACHE_HOME=${XDG_CACHE_HOME:-<unset>} XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-<unset>}"
+  notice "CI=${CI:-<unset>} GITHUB_ACTIONS=${GITHUB_ACTIONS:-<unset>} GITHUB_WORKSPACE=${GITHUB_WORKSPACE:-<unset>}"
+  notice "RUST_MIN_STACK=${RUST_MIN_STACK:-<unset>} RUST_TEST_THREADS=${RUST_TEST_THREADS:-<unset>}"
+  notice "umask: $(umask)"
+  notice "nproc: $(nproc 2>&1)"
+  notice "repo dir owner: $(stat -c '%U(%u):%G(%g) %n' "${root}" 2>&1)"
+  notice "target dir owner: $(stat -c '%U(%u):%G(%g) %n' "${root}/target" 2>&1)"
+  notice "/tmp owner/perms: $(stat -c '%U(%u):%G(%g) %a %n' /tmp 2>&1)"
+  notice "git --version: $(git --version 2>&1)"
+  notice "git config --global --get-all safe.directory: $(git config --global --get-all safe.directory 2>&1 || echo '<none/error>')"
+  notice "git config --system --get-all safe.directory: $(git config --system --get-all safe.directory 2>&1 || echo '<none/error>')"
+  notice "git -C <root> rev-parse HEAD: $(git -C "${root}" rev-parse HEAD 2>&1)"
 }
 
-echo "=== NORMAL USER (no sudo, no namespace) ==="
+notice "=== NORMAL USER (no sudo, no namespace) ==="
 print_identity
-echo
 
-echo "=== TRUE REMOTE IDENTITY: sudo ip netns exec spider_ci env PATH=... HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup ==="
+notice "=== TRUE REMOTE IDENTITY: sudo ip netns exec spider_ci env PATH=... HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup ==="
 inner_script="$(mktemp)"
 cat > "${inner_script}" <<INNER_EOF
 set -uo pipefail
 echo "id: \$(id)"
 echo "whoami: \$(whoami 2>&1)"
 echo "USER=\${USER:-<unset>} LOGNAME=\${LOGNAME:-<unset>} HOME=\${HOME:-<unset>}"
-echo "PATH=\${PATH:-<unset>}"
 echo "CARGO_HOME=\${CARGO_HOME:-<unset>} RUSTUP_HOME=\${RUSTUP_HOME:-<unset>}"
 echo "TMPDIR=\${TMPDIR:-<unset>} XDG_CACHE_HOME=\${XDG_CACHE_HOME:-<unset>} XDG_CONFIG_HOME=\${XDG_CONFIG_HOME:-<unset>}"
 echo "CI=\${CI:-<unset>} GITHUB_ACTIONS=\${GITHUB_ACTIONS:-<unset>} GITHUB_WORKSPACE=\${GITHUB_WORKSPACE:-<unset>}"
@@ -69,22 +83,14 @@ echo "/tmp owner/perms: \$(stat -c '%U(%u):%G(%g) %a %n' /tmp 2>&1)"
 echo "git --version: \$(git --version 2>&1)"
 echo "git config --global --get-all safe.directory: \$(git config --global --get-all safe.directory 2>&1 || echo '<none/error>')"
 echo "git config --system --get-all safe.directory: \$(git config --system --get-all safe.directory 2>&1 || echo '<none/error>')"
-echo "--- exact closure_harness.rs git invocations, run under this identity ---"
-echo "[1] git -C <root> cat-file -t HEAD:"
-git -C "${root}" cat-file -t HEAD
-echo "  exit=\$?"
-echo "[2] git -C <root> merge-base --is-ancestor HEAD HEAD:"
-git -C "${root}" merge-base --is-ancestor HEAD HEAD
-echo "  exit=\$?"
-echo "[3] git -C <root> show HEAD:.github/workflows/rust.yml (first line only):"
-git -C "${root}" show HEAD:.github/workflows/rust.yml | head -1
-echo "  exit=\$?"
-echo "[4] git -C <root> rev-parse HEAD:"
-git -C "${root}" rev-parse HEAD
-echo "  exit=\$?"
+echo "[1] git -C <root> cat-file -t HEAD: \$(git -C "${root}" cat-file -t HEAD 2>&1) | exit=\$?"
+echo "[2] git -C <root> merge-base --is-ancestor HEAD HEAD: \$(git -C "${root}" merge-base --is-ancestor HEAD HEAD 2>&1) | exit=\$?"
+echo "[3] git -C <root> show HEAD:.github/workflows/rust.yml (first line): \$(git -C "${root}" show HEAD:.github/workflows/rust.yml 2>&1 | head -1) | exit=\$?"
+echo "[4] git -C <root> rev-parse HEAD: \$(git -C "${root}" rev-parse HEAD 2>&1) | exit=\$?"
 INNER_EOF
 
-sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup bash "${inner_script}"
+inner_output="$(sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup bash "${inner_script}" 2>&1)"
 rc=$?
 rm -f "${inner_script}"
-echo "root-identity block exit status: ${rc}"
+notice "${inner_output}"
+notice "root-identity block exit status: ${rc}"

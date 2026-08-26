@@ -7,19 +7,34 @@ summary = "Machine-readable, harness-checked description of the already-shipped 
 # construction, including PaliGemma) routes through a method call on a
 # local variable this harness's AST adjacency check cannot bind to a
 # type — see [stages.WIRED]'s own comment and this entry's SDD section 3.
-# ADVERSARIALLY_VERIFIED re-attested against the CI-portable-evidence-
-# partition commit (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_
-# PARTITION_001, commit 11aaf9c4) — see [stages.ADVERSARIALLY_VERIFIED]
-# below. CI_ENFORCED is not yet claimed: this repository's real
-# GitHub-hosted Actions have not executed any push in this session
-# (confirmed directly against the public Actions API — zero runs for
-# every commit pushed throughout this whole multi-frontier effort, last
-# real execution 2026-08-13), so no observed remote result exists to
-# bind CI_ENFORCED/CLOSED to, even though the workflow step itself is
-# real, non-gated, and locally verified against the exact command it
-# runs.
-stage = "ADVERSARIALLY_VERIFIED"
+# CI_ENFORCED claimed for real (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_
+# AND_CLOSED_ACTIVATION_001): the CAPTCHA CI-portable evidence step
+# (spider_core job, .github/workflows/rust.yml) has now genuinely
+# executed successfully on real remote GitHub Actions CI — run
+# 32927984609, commit 97092abcfa536828e21eb1a5ba54a8875e33f55b, 25
+# passed / 0 failed / 2 ignored — after two real, independent,
+# previously-unexercised CI defects were found and fixed on the way
+# there (a shallow-clone commit-reachability gap blocking the whole
+# closure/architecture assurance suite, and a missing pre-build +
+# missing thread-stack-size accommodation specific to this step; see
+# SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001's
+# own closure report for the full trace). See [stages.CI_ENFORCED] and
+# [proof.CI_PROVEN] below for the machine-readable binding.
+stage = "CI_ENFORCED"
 required_proof_classes = ["CODE_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
+# CI_PROVEN is deliberately NOT added here: `required_proof_classes` is
+# a top-level field, not one of the LEDGER_ATTESTATION_ONLY_STAGES/
+# LEDGER_ATTESTATION_ONLY_PROOF_CLASSES fields `ledger_toml_unchanged_
+# except_attestation_fields` strips before comparing a cited
+# reviewed_commit's own ledger content against current HEAD — changing
+# it would make reviewed_commit's self-reference constraint
+# unsatisfiable by any real, already-existing commit (no prior commit
+# could ever have "CI_PROVEN" already listed, and a commit cannot cite
+# its own not-yet-computed hash). [proof.CI_PROVEN] below is real,
+# genuine, machine-readable evidence regardless of whether it is
+# "required" — required_proof_classes only governs closed_requires_
+# every_declared_proof_class_independently's CLOSED-time completeness
+# check, not whether a present, well-formed proof record is honored.
 
 [proof.CODE_PROVEN]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
@@ -56,10 +71,19 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 requirements = ["real headless Chrome", "real CUDA-capable GPU", "pinned local PaliGemma checkpoint (SCORPION_PALIGEMMA_PINNED_ARTIFACTS)"]
 observed = false # classification is not observation; see proof.OPERATOR_OBSERVED for the actual observations
 
-[proof.UNPROVEN]
+[proof.CI_PROVEN]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-missing = ["CI_PROVEN", "CI_ENFORCED"]
-reason = "GitHub Actions execution has since been re-enabled and observed running for real (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001 confirmed real workflow runs being created for the first time since 2026-08-13), but no run has yet completed the CAPTCHA CI-portable evidence step successfully end to end — the deterministic test phase's network-isolation mechanism has gone through two real, remotely-observed infrastructure failures (self-inflicted runner-connectivity loss under a host-global iptables policy, diagnosed and fixed across SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001) and the fix (a dedicated network namespace so the runner agent no longer shares the isolation boundary with the tests) has not yet been proven by a genuine successful remote run. The CI-portable evidence-selecting workflow step itself is real and locally verified, but CI_ENFORCED/CI_PROVEN/CLOSED remain withheld until an actual successful GitHub Actions execution of exactly that step is observed."
+commit = "97092abcfa536828e21eb1a5ba54a8875e33f55b"
+run_commit = "97092abcfa536828e21eb1a5ba54a8875e33f55b"
+workflow = ".github/workflows/rust.yml"
+run_id = "32927984609"
+run_url = "https://github.com/Agentxx7/scorpion-rs/actions/runs/32927984609"
+job = "spider_core"
+step = "Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)"
+command_identity = "package=spider;lib=false;tests=browser_challenge_detection_real,captcha_browser_binding_real,captcha_browser_frame_action_real,captcha_browser_oopif_action_real,captcha_browser_oopif_streaming_shipping_real,captcha_browser_production_binding_real;features=chrome,local_paligemma;filters=;exact=false;skip="
+conclusion = "success"
+result = "25 passed, 0 failed, 2 ignored (the same two genuinely hardware-dependent tests VERIFIED/OPERATOR_OBSERVED already classify)."
+note = "This exact commit (97092abc) predates the harness grammar fix (4c0bfbf5, SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001) that lets closure_harness.rs itself structurally recognize this step's real run: text — the run's own success is unaffected by that fix, which only concerns how this ledger's evidence is later verified, not what genuinely executed on GitHub's infrastructure at the time."
 
 [stages.DESIGNED]
 sdd = "docs/frontier/CANONICAL_CAPTCHA_PRODUCTION_CAPABILITY_SDD.md"
@@ -184,23 +208,30 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against SCORPION_CANONICAL_CACHE_REQUEST_FRESH_ENTRY_HIT_
-# RELIABILITY_001's product-fix commit (ba15d837), which touched
-# spider/src/utils/mod.rs — one of this capability's own
-# closure_relevant_files (cited by IMPLEMENTED/VERIFIED/WIRED evidence
-# via Website::crawl's chrome_fetch_params call graph) — and therefore
-# invalidated the prior reviewed_commit's (98a782ce) binding, exactly
-# as SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_
-# 001's own drift check requires. This is a pure attestation-only
-# field update: no CAPTCHA stage, evidence, or bypass-attempt entry
-# below changed. The underlying fix (ba15d837) widened two
-# feature-gated cache functions' #[cfg] from `any(cache_chrome_hybrid,
-# cache_chrome_hybrid_mem)` to `all(chrome, cache_request)` and added a
-# missing with_cache_skip_browser(true) test call in
-# spider/src/website.rs; it did not touch CAPTCHA detection, solving,
+# Re-attested against 4c0bfbf5 (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_
+# AND_CLOSED_ACTIVATION_001's own harness grammar fix), which touched
+# spider/tests/closure_harness.rs and spider/tests/closure_harness_
+# integrity.rs — both unconditionally closure_relevant_files for every
+# ledger entry regardless of stage — and therefore invalidated the
+# prior reviewed_commit's (ba15d837) binding, exactly as SCORPION_
+# CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's own
+# drift check requires. Pure attestation-only field update for THIS
+# stage table: no ADVERSARIALLY_VERIFIED evidence or bypass-attempt
+# entry below changed. (This same commit range also adds [stages.
+# CI_ENFORCED] and [proof.CI_PROVEN] below — additions, not
+# modifications, to this file; ADVERSARIALLY_VERIFIED/CI_ENFORCED/
+# CLOSED stage tables and the `stage` claim itself are the fixed,
+# generic attestation-only allowlist `ledger_toml_unchanged_except_
+# attestation_fields` already excludes from this exact byte-comparison,
+# by design — a table announcing "reviewed as of commit X" cannot
+# itself already exist at X.) The underlying harness fix (4c0bfbf5)
+# taught executable_test_command/parse_test_selection to recognize an
+# additional literal env-assignment token (RUST_MIN_STACK=<value>)
+# after the existing PATH/HOME/CARGO_HOME/RUSTUP_HOME namespace-
+# isolation prefix; it did not touch CAPTCHA detection, solving,
 # provider routing, frame/OOPIF handling, or any symbol this
 # capability's evidence cites.
-reviewed_commit = "ba15d8371d14e0ebc76518dc4e02277ae6b0c498"
+reviewed_commit = "4c0bfbf5d649ea03662c60b258340e4ac057ee62"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -210,3 +241,26 @@ bypass_attempts = [
     "mutate this capability's own machine-readable ledger evidence (missing OOPIF action production symbol, comment-only symbol, nonexistent VERIFIED test reference, spider_worker false-claimed as production-reachable, macro-shielded PaliGemma routing hop claimed as WIRED) -> the real closure_harness verifier subprocess rejects every one, proven via 5 real, isolated `--exact` mutation tests (spider/tests/closure_harness_behavioral_contract.rs:behavioral_verifier_rejects_missing_oopif_action_production_symbol, behavioral_verifier_rejects_comment_only_captcha_symbol, behavioral_verifier_rejects_evidence_pointing_to_nonexistent_paligemma_test, behavioral_verifier_rejects_production_reachable_claim_for_a_non_calling_artifact, behavioral_verifier_rejects_macro_shielded_paligemma_routing_hop_as_wired)",
     "cite a stale reviewed_commit whose ledger content no longer matches HEAD's substantive fields -> the real closure_harness verifier rejects it (this exact scenario was hit for real while building this commit, when the prior reviewed_commit was tested against the post-partition ledger, and correctly failed before being corrected here)",
 ]
+
+[stages.CI_ENFORCED]
+# The declared structural command below must, and does, structurally
+# match this repository's own real, non-gated, applicable `run:` step
+# named "Cargo test CAPTCHA CI-portable evidence (chrome
+# local_paligemma)" in the spider_core job of .github/workflows/
+# rust.yml — verified directly against ci_enforced_commands_are_real_
+# required_non_gated_steps_with_exact_feature_match before this table
+# was written, not merely asserted. That step also carries the same
+# `sudo ip netns exec spider_ci env PATH=<literal> HOME=<literal>
+# CARGO_HOME=<literal> RUSTUP_HOME=<literal> RUST_MIN_STACK=67108864`
+# prefix as SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
+# EXECUTION_001's own deterministic-lib step — recognized only after
+# 4c0bfbf5's harness grammar fix (see [stages.ADVERSARIALLY_VERIFIED]
+# above), which this reviewed_commit binding already accounts for.
+package = "spider"
+lib = false
+test_targets = ["browser_challenge_detection_real", "captcha_browser_binding_real", "captcha_browser_frame_action_real", "captcha_browser_production_binding_real", "captcha_browser_oopif_action_real", "captcha_browser_oopif_streaming_shipping_real"]
+feature_set = "chrome local_paligemma"
+positional_filters = []
+exact = false
+skip = []
+ci_workflow_file = ".github/workflows/rust.yml"

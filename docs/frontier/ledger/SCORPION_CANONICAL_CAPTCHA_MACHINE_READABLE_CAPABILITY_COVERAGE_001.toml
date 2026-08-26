@@ -216,30 +216,26 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against 4c0bfbf5 (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_
-# AND_CLOSED_ACTIVATION_001's own harness grammar fix), which touched
-# spider/tests/closure_harness.rs and spider/tests/closure_harness_
-# integrity.rs — both unconditionally closure_relevant_files for every
-# ledger entry regardless of stage — and therefore invalidated the
-# prior reviewed_commit's (ba15d837) binding, exactly as SCORPION_
-# CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's own
-# drift check requires. Pure attestation-only field update for THIS
-# stage table: no ADVERSARIALLY_VERIFIED evidence or bypass-attempt
-# entry below changed. (This same commit range also adds [stages.
-# CI_ENFORCED] and [proof.CI_PROVEN] below — additions, not
-# modifications, to this file; ADVERSARIALLY_VERIFIED/CI_ENFORCED/
-# CLOSED stage tables and the `stage` claim itself are the fixed,
-# generic attestation-only allowlist `ledger_toml_unchanged_except_
-# attestation_fields` already excludes from this exact byte-comparison,
-# by design — a table announcing "reviewed as of commit X" cannot
-# itself already exist at X.) The underlying harness fix (4c0bfbf5)
-# taught executable_test_command/parse_test_selection to recognize an
-# additional literal env-assignment token (RUST_MIN_STACK=<value>)
-# after the existing PATH/HOME/CARGO_HOME/RUSTUP_HOME namespace-
-# isolation prefix; it did not touch CAPTCHA detection, solving,
-# provider routing, frame/OOPIF handling, or any symbol this
-# capability's evidence cites.
-reviewed_commit = "4c0bfbf5d649ea03662c60b258340e4ac057ee62"
+# Re-attested against 4b2177a9 (SCORPION_DECENTRALIZED_FEATURE_
+# COMPOSITION_AND_BENCHES_BUILD_RECONCILIATION_001's production fix),
+# which touched spider/src/page.rs — cited by this capability's own
+# [stages.WIRED].callers chain (Page::new_streaming, Page::new_base
+# hops) and therefore one of its closure_relevant_files regardless of
+# stage — invalidating the prior reviewed_commit's (4c0bfbf5) binding,
+# exactly as SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_
+# REFERENCE_001's own drift check requires. Pure attestation-only field
+# update: no ADVERSARIALLY_VERIFIED evidence or bypass-attempt entry
+# below changed. The underlying fix (4b2177a9) removed a stale
+# `#[cfg(not(feature = "decentralized"))]` gate from four internal
+# error-classification helpers (request_error_to_failure and its own
+# callees) and added a previously-missing decentralized get_url_final
+# implementation, both restricted to spider/src/page.rs; it did not
+# touch CAPTCHA detection, solving, provider routing, frame/OOPIF
+# handling, or any symbol this capability's evidence cites — confirmed
+# directly: neither Page::new_streaming nor Page::new_base (the two
+# WIRED hops this capability's callers chain actually names) appear in
+# that commit's diff at all.
+reviewed_commit = "4b2177a9f8a05ba7db242b87b59280c770c97b8f"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -279,18 +275,21 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
 # present and independently satisfied — verified directly against
 # closed_requires_every_declared_proof_class_independently before this
-# table was written. closed_commit cites 73ee4ac3, the commit that
-# added [stages.CI_ENFORCED]/[proof.CI_PROVEN] above: its own fresh,
-# independent remote Rust workflow run (triggered by that exact push,
-# not reused from an earlier commit) completed with spider_core
-# SUCCESS end to end, including the closure/architecture assurance
-# suite (which itself re-verified this ledger's new CI_ENFORCED entry
-# under the grammar-fixed harness) and the CAPTCHA CI-portable
-# evidence step. No production code, CAPTCHA runtime, PaliGemma
-# runtime, provider routing, frame/OOPIF logic, cache runtime, or
-# CLI/MCP semantics changed anywhere in this whole activation
-# sequence — a real `git diff` across every commit in it touches only
-# .github/workflows/rust.yml, spider/tests/closure_harness.rs,
-# spider/tests/closure_harness_integrity.rs, and this ledger file
-# itself.
-closed_commit = "73ee4ac373012da9479504d9c7b1ebf49f2f5e52"
+# table was written. closed_commit re-bound to 4b2177a9 for the exact
+# same reason reviewed_commit above was: spider/src/page.rs is a
+# closure_relevant_file (WIRED.callers cites Page::new_streaming/
+# Page::new_base), and the prior closed_commit (73ee4ac3) no longer
+# binds it byte-for-byte once SCORPION_DECENTRALIZED_FEATURE_
+# COMPOSITION_AND_BENCHES_BUILD_RECONCILIATION_001's fix landed. Every
+# other closure_relevant_file (.github/workflows/rust.yml, spider/
+# tests/closure_harness*.rs, spider/Cargo.toml, every shipping
+# artifact's Cargo.toml, every other IMPLEMENTED/VERIFIED/WIRED-cited
+# file) is untouched by that commit — confirmed directly, its diff is
+# spider/src/page.rs only. No production code, CAPTCHA runtime,
+# PaliGemma runtime, provider routing, frame/OOPIF logic, cache
+# runtime, or CLI/MCP semantics changed: 4b2177a9 removed a stale
+# decentralized-only cfg gate from internal error-classification
+# helpers and added a missing decentralized get_url_final
+# implementation, neither of which this capability's own evidence
+# cites or depends on.
+closed_commit = "4b2177a9f8a05ba7db242b87b59280c770c97b8f"

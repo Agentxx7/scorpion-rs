@@ -126,7 +126,48 @@ jobs:
       ALL_PROXY: ""
       NO_PROXY: ""
     steps:
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
+      # (CONTINUE: remote step-10 closure-assurance failure) — real root
+      # cause, proven both by a real remote panic and a genuine local
+      # `git clone --depth 1 --no-local` reproduction of the exact same
+      # failure: `actions/checkout@v7` defaults to a *shallow* clone
+      # (`fetch-depth: 1`, one commit only). closure_harness.rs's own
+      # `git_object_type`/`git_commit_reachable_from_head` (and every
+      # ledger check built on them — ADVERSARIALLY_VERIFIED.reviewed_
+      # commit, CLOSED.closed_commit, CODE_PROVEN/CI_PROVEN commit
+      # fields, and closure_harness_behavioral_contract.rs's own fixture
+      # commits, e.g. VALID_BASE's CODE_PROVEN commit) call real `git
+      # cat-file -t <sha>`/`git merge-base --is-ancestor <sha> HEAD`
+      # against the checked-out repository for *any* commit SHA a ledger
+      # or fixture cites — the overwhelming majority of which are
+      # ancestors of HEAD, not HEAD itself. Under a depth-1 shallow
+      # clone, only the current HEAD commit object exists on disk at
+      # all; every one of those `git cat-file`/`merge-base` calls for an
+      # older commit genuinely fails with "fatal: could not get object
+      # info" / "fatal: Not a valid commit name" — reproduced verbatim,
+      # exit 128 both ways, against a real `--depth 1` clone of this
+      # exact repository. This was never about root/namespace execution
+      # identity (H1, directly rejected earlier this round: the exact
+      # same three git subcommands all succeed, exit 0, under the true
+      # root+namespace identity when targeting `HEAD`, which a shallow
+      # clone always has) — it is a real, environment-level gap
+      # (`fetch-depth: 0` is the standard, well-known fix for any CI job
+      # that needs to reason about git history rather than only the tip
+      # commit) that had simply never been exercised by a real, complete
+      # remote run reaching this suite before: this frontier's own
+      # parent (SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
+      # EXECUTION_001) is precisely the fix that first let a real run
+      # reach step 10 at all. A larger *fixed* depth (e.g. 100) was
+      # deliberately rejected as a magic-number non-fix: any ledger
+      # commit reference older than that number would silently break
+      # again, and this repository's own re-attestation history already
+      # produces many such commits over time. Scoped to this job only —
+      # `architecture_guardrails`/`closure_harness`/`closure_harness_
+      # integrity`/`closure_harness_behavioral_contract` run exclusively
+      # here, not in any other job in this workflow.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       # SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001:
       # GitHub Actions' own workflow-file validator rejects a job-level
       # `env:` mapping containing both `HTTP_PROXY` and `http_proxy` (and
@@ -599,44 +640,6 @@ jobs:
             exit 1
           fi
           echo "END: spider credential-cache regression (chrome_remote_cache)"
-      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
-      # (CONTINUE: remote step-10 closure-assurance failure) — TEMPORARY
-      # diagnostic, narrowed from an earlier per-binary decomposition
-      # (already established remotely: architecture_guardrails and
-      # closure_harness_integrity pass standalone; closure_harness and
-      # closure_harness_behavioral_contract each fail on exactly two
-      # tests) and an earlier execution-identity/environment matrix
-      # (already established remotely: the exact `git` subcommands
-      # closure_harness.rs itself calls all succeed, exit 0, under the
-      # true root+namespace identity — H1/dubious-ownership rejected).
-      # These four steps now run exactly the four specific failing
-      # `#[test]` functions, one at a time, under the same true identity,
-      # with `--nocapture --test-threads=1`, to finally surface the real
-      # panic/assertion detail — see
-      # .github/scripts/diagnose-step10-exact.sh's own doc comment for
-      # why the actual `cargo test` invocation is kept inside that script
-      # rather than this YAML's own `run:` text, and why only the panic
-      # block (not the whole test binary's output) is emitted.
-      # `if: always()` is required so these still run after the canonical
-      # step 10 (and steps 11-13) fail/skip above; per
-      # closure_harness.rs's own `WorkflowStep::gated` model this also
-      # marks every one of these steps `gated`, a second, independent
-      # reason none of them can ever be mistaken for required, non-gated
-      # CI_ENFORCED evidence. To be removed once the real step-10 defect
-      # is identified and fixed — this is not a permanent part of the
-      # required assurance sequence.
-      - name: "[DIAGNOSTIC step10 exact] closure_harness :: adversarially_verified_binds_a_real_reviewed_commit_to_this_capability"
-        if: always()
-        run: bash .github/scripts/diagnose-step10-exact.sh closure_harness adversarially_verified_binds_a_real_reviewed_commit_to_this_capability
-      - name: "[DIAGNOSTIC step10 exact] closure_harness :: proof_class_records_are_typed_bound_and_non_substitutable"
-        if: always()
-        run: bash .github/scripts/diagnose-step10-exact.sh closure_harness proof_class_records_are_typed_bound_and_non_substitutable
-      - name: "[DIAGNOSTIC step10 exact] closure_harness_behavioral_contract :: behavioral_verifier_accepts_a_genuinely_valid_fixture"
-        if: always()
-        run: bash .github/scripts/diagnose-step10-exact.sh closure_harness_behavioral_contract behavioral_verifier_accepts_a_genuinely_valid_fixture
-      - name: "[DIAGNOSTIC step10 exact] closure_harness_behavioral_contract :: behavioral_ci_proven_accepts_exact_run_and_configured_step_identity"
-        if: always()
-        run: bash .github/scripts/diagnose-step10-exact.sh closure_harness_behavioral_contract behavioral_ci_proven_accepts_exact_run_and_configured_step_identity
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

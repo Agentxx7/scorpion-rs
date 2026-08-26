@@ -7,20 +7,28 @@ summary = "Machine-readable, harness-checked description of the already-shipped 
 # construction, including PaliGemma) routes through a method call on a
 # local variable this harness's AST adjacency check cannot bind to a
 # type — see [stages.WIRED]'s own comment and this entry's SDD section 3.
-# CI_ENFORCED claimed for real (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_
-# AND_CLOSED_ACTIVATION_001): the CAPTCHA CI-portable evidence step
-# (spider_core job, .github/workflows/rust.yml) has now genuinely
-# executed successfully on real remote GitHub Actions CI — run
-# 32927984609, commit 97092abcfa536828e21eb1a5ba54a8875e33f55b, 25
-# passed / 0 failed / 2 ignored — after two real, independent,
-# previously-unexercised CI defects were found and fixed on the way
-# there (a shallow-clone commit-reachability gap blocking the whole
-# closure/architecture assurance suite, and a missing pre-build +
-# missing thread-stack-size accommodation specific to this step; see
+# CLOSED (SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_
+# ACTIVATION_001): the CAPTCHA CI-portable evidence step (spider_core
+# job, .github/workflows/rust.yml) has genuinely executed successfully
+# on real remote GitHub Actions CI, twice independently — run
+# 32927984609 (commit 97092abc, 25 passed / 0 failed / 2 ignored,
+# cited by [proof.CI_PROVEN]) and again on the exact commit that added
+# [stages.CI_ENFORCED] itself (73ee4ac3, cited by [stages.CLOSED].
+# closed_commit), confirming the lifecycle-metadata change did not
+# itself regress anything — after two real, independent, previously-
+# unexercised CI defects were found and fixed on the way there (a
+# shallow-clone commit-reachability gap blocking the whole closure/
+# architecture assurance suite, and a missing pre-build + missing
+# thread-stack-size accommodation specific to this step; see
 # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001's
-# own closure report for the full trace). See [stages.CI_ENFORCED] and
-# [proof.CI_PROVEN] below for the machine-readable binding.
-stage = "CI_ENFORCED"
+# own closure report for the full trace), and one real, generic
+# verifier grammar defect found and fixed (executable_test_command/
+# parse_test_selection could not recognize the namespace-isolation
+# prefix when an additional literal env-assignment token like
+# RUST_MIN_STACK=<value> followed it; see commit 4c0bfbf5). See
+# [stages.CI_ENFORCED], [proof.CI_PROVEN], and [stages.CLOSED] below
+# for the machine-readable binding.
+stage = "CLOSED"
 required_proof_classes = ["CODE_PROVEN", "OPERATOR_OBSERVED", "LIVE_ENVIRONMENT_DEPENDENT"]
 # CI_PROVEN is deliberately NOT added here: `required_proof_classes` is
 # a top-level field, not one of the LEDGER_ATTESTATION_ONLY_STAGES/
@@ -264,3 +272,25 @@ positional_filters = []
 exact = false
 skip = []
 ci_workflow_file = ".github/workflows/rust.yml"
+
+[stages.CLOSED]
+# required_proof_classes = ["CODE_PROVEN", "OPERATOR_OBSERVED",
+# "LIVE_ENVIRONMENT_DEPENDENT"] (deliberately not CI_PROVEN — see
+# [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
+# present and independently satisfied — verified directly against
+# closed_requires_every_declared_proof_class_independently before this
+# table was written. closed_commit cites 73ee4ac3, the commit that
+# added [stages.CI_ENFORCED]/[proof.CI_PROVEN] above: its own fresh,
+# independent remote Rust workflow run (triggered by that exact push,
+# not reused from an earlier commit) completed with spider_core
+# SUCCESS end to end, including the closure/architecture assurance
+# suite (which itself re-verified this ledger's new CI_ENFORCED entry
+# under the grammar-fixed harness) and the CAPTCHA CI-portable
+# evidence step. No production code, CAPTCHA runtime, PaliGemma
+# runtime, provider routing, frame/OOPIF logic, cache runtime, or
+# CLI/MCP semantics changed anywhere in this whole activation
+# sequence — a real `git diff` across every commit in it touches only
+# .github/workflows/rust.yml, spider/tests/closure_harness.rs,
+# spider/tests/closure_harness_integrity.rs, and this ledger file
+# itself.
+closed_commit = "73ee4ac373012da9479504d9c7b1ebf49f2f5e52"

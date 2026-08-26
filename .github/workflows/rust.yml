@@ -217,6 +217,35 @@ jobs:
           --features "chrome cache cache_request" --no-run
       - name: Pre-build chrome_remote_cache regression binary (network still open)
         run: cargo test -p spider --lib --features chrome_remote_cache --no-run
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
+      # (CONTINUE: remote step-10 closure-assurance failure — now step
+      # 11, CAPTCHA CI-portable evidence). Real root cause, proven via a
+      # temporary remote diagnostic (since removed): the two pre-build
+      # steps above compile every binary for `chrome cache cache_request`
+      # and `chrome_remote_cache` — but the CAPTCHA CI-portable evidence
+      # step below compiles a *third*, distinct feature combination,
+      # `chrome local_paligemma`, which was never pre-built here at all.
+      # Once step 10's own unrelated blocker (shallow-clone commit
+      # reachability, fixed above) was resolved and step 11 became
+      # reachable on real CI for the first time ever, its own `cargo
+      # test` invocation — running *after* network isolation below —
+      # had to fetch `local_paligemma`-only dependencies (monostate,
+      # float8, gemm-c32, onig, and others) fresh, and failed outright:
+      # "Could not resolve hostname (Could not resolve host: static.
+      # crates.io)". This directly contradicts this file's own stated
+      # intent for the pre-build phase (see the comment above: "compiles
+      # every binary this job will later execute without running
+      # anything") — the CAPTCHA binaries were simply missing from it,
+      # not a case for weakening isolation or opening egress back up.
+      # Mirrors the two pre-build steps above exactly: same six test
+      # targets and feature set as the canonical step 11 command below,
+      # `--no-run`, network still open.
+      - name: Pre-build CAPTCHA CI-portable evidence binaries (network still open)
+        run: >-
+          cargo test -p spider --test browser_challenge_detection_real
+          --test captcha_browser_binding_real --test captcha_browser_frame_action_real
+          --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
+          --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma" --no-run
       # Runtime egress denial for the deterministic phase — the primary
       # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
       # alone. GitHub-hosted ubuntu-latest runners grant the runner user

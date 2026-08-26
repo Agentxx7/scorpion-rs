@@ -1,6 +1,9 @@
 use crate::utils::abs::convert_abs_path;
 use crate::utils::templates::EMPTY_HTML_BASIC;
-#[cfg(not(feature = "decentralized"))]
+// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+// RECONCILIATION_001: stale decentralized gate removed -- see
+// `request_error_to_failure`'s own doc comment. `RequestError` (spider/
+// src/utils/mod.rs) is gated only on `wreq`, not decentralized.
 use crate::utils::RequestError;
 use crate::utils::{
     css_selectors::{compiled_base_element_selector, compiled_selector, compiled_xml_selector},
@@ -2471,7 +2474,13 @@ pub struct Page {
     pub links: HashSet<CaseInsensitiveString>,
     /// The external urls to group with the domain.
     pub external_domains_caseless: Arc<HashSet<CaseInsensitiveString>>,
-    /// The final destination of the page if redirects were performed [Unused].
+    /// The final destination of the page if redirects were performed.
+    ///
+    /// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+    /// RECONCILIATION_001: no longer `[Unused]` -- `build()` (this file)
+    /// already populated this from `PageResponse.final_url` before this
+    /// fix; `get_url_final()`'s new decentralized implementation is its
+    /// first real reader.
     pub final_redirect_destination: Option<String>,
     #[cfg(feature = "time")]
     /// The duration from start of parsing to end of gathering links.
@@ -3152,7 +3161,18 @@ pub(crate) fn chrome_permanent_failure_status(code: &str) -> StatusCode {
 }
 
 /// Extract a specific type of error from a chain of errors.
-#[cfg(not(feature = "decentralized"))]
+///
+/// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+/// RECONCILIATION_001: this used to be `#[cfg(not(feature =
+/// "decentralized"))]` -- a stale gate carried forward from an unrelated
+/// January 2025 fix (77ec77e4, "fix feat decentralize compile error
+/// status") that gated off a since-superseded `reqwest`-only error-status
+/// helper shape. This function only walks `dyn std::error::Error` source
+/// chains via the standard library -- nothing about it is
+/// decentralized-incompatible, and `request_error_to_failure` (its real,
+/// only-ever caller) needs it under decentralized too: `PageResponse.
+/// failure` is populated from real call sites that already compile
+/// unconditionally (spider/src/utils/mod.rs).
 fn extract_specific_error<'a, T: std::error::Error + 'static>(
     error: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a T> {
@@ -3177,7 +3197,11 @@ fn extract_specific_error<'a, T: std::error::Error + 'static>(
 /// processed the request, and the condition is often deterministic (server
 /// bug rather than transient noise). Retrying just adds load on a broken
 /// endpoint without a meaningful chance of success.
-#[cfg(not(feature = "decentralized"))]
+///
+/// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+/// RECONCILIATION_001: stale decentralized gate removed -- see
+/// `extract_specific_error`'s own doc comment. `h2 = "0.4"` is a plain,
+/// unconditional (non-optional) dependency, available in every build.
 fn should_attempt_retry(error: &(dyn std::error::Error + 'static)) -> bool {
     if let Some(e) = extract_specific_error::<h2::Error>(error) {
         if e.is_go_away() && e.is_remote() && e.reason() == Some(h2::Reason::NO_ERROR) {
@@ -3212,7 +3236,10 @@ fn should_attempt_retry(error: &(dyn std::error::Error + 'static)) -> bool {
 /// Walks the source chain via `extract_specific_error` (no allocation, no
 /// locks). Hot path runs only on the error branch; never invoked on the
 /// happy path of a successful request.
-#[cfg(not(feature = "decentralized"))]
+///
+/// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+/// RECONCILIATION_001: stale decentralized gate removed -- see
+/// `extract_specific_error`'s own doc comment.
 #[inline]
 fn h2_permanent_reason_status(err: &crate::client::Error) -> Option<StatusCode> {
     let h2_err = extract_specific_error::<h2::Error>(err)?;
@@ -3247,7 +3274,24 @@ fn h2_permanent_reason_status(err: &crate::client::Error) -> Option<StatusCode> 
 /// For transient classifications (and for callers that don't pre-classify)
 /// the function preserves the original behaviour: examine the raw error
 /// and set `*should_retry = true` when appropriate.
-#[cfg(not(feature = "decentralized"))]
+///
+/// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+/// RECONCILIATION_001: this used to be `#[cfg(not(feature =
+/// "decentralized"))]`, a stale gate carried forward from an unrelated
+/// commit (77ec77e4, January 2025) onto the current canonical
+/// `spider_transport::CrawlerFailure` seam (783de145, "feat: add
+/// canonical crawler response error seam") without re-justification.
+/// Nothing this function depends on is decentralized-incompatible:
+/// `spider_transport` is an unconditional, non-optional dependency
+/// ("available in every build... neutral leaf", per its own Cargo.toml
+/// doc comment), `RequestError` is gated only on `wreq` (not
+/// decentralized), and `h2` is a plain, unconditional dependency. Real
+/// call sites that already compile unconditionally under decentralized
+/// (spider/src/utils/mod.rs, e.g. `handle_response_bytes_writer_inner`)
+/// need this exact function to populate `PageResponse.failure` -- no
+/// decentralized-specific alternative failure-mapping exists anywhere
+/// in this codebase (confirmed by search), unlike `Page::get_url_final`/
+/// `PageData::url_final`'s genuine, deliberate split.
 pub(crate) fn request_error_to_failure(err: RequestError) -> spider_transport::CrawlerFailure {
     use spider_transport::{BackendProvenance, CrawlerFailure, CrawlerFailureKind};
 
@@ -7175,6 +7219,30 @@ impl Page {
     /// URL getter for page.
     pub fn get_url(&self) -> &str {
         &self.url
+    }
+
+    /// Url getter for page after redirects.
+    ///
+    /// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+    /// RECONCILIATION_001: this variant was simply missing (unlike
+    /// `get_url`/`take_url` above, which already have both a
+    /// `not(decentralized)` and a `decentralized` implementation), leaving
+    /// real callers under `decentralized` (spider/src/features/
+    /// acquisition_binding.rs, spider/src/features/agent_acquisition.rs,
+    /// spider/src/utils/evidence.rs) with no way to compile at all. Not a
+    /// stub: the decentralized `Page` struct carries the identical
+    /// `final_redirect_destination: Option<String>` field, and the
+    /// decentralized `build()` (this file) already populates it from the
+    /// same `PageResponse.final_url` source the non-decentralized path
+    /// uses -- so this mirrors the non-decentralized implementation's
+    /// exact logic, returning the real, truthful post-redirect URL rather
+    /// than fabricating or silently falling back to the requested URL.
+    #[cfg(feature = "decentralized")]
+    pub fn get_url_final(&self) -> &str {
+        match self.final_redirect_destination.as_ref() {
+            Some(u) => u,
+            _ => &self.url,
+        }
     }
 
     /// Html getter for bytes on the page.
@@ -14600,4 +14668,64 @@ mod chrome_hedge_dns_tests {
             "net::ERR_INTERNET_DISCONNECTED"
         ));
     }
+}
+
+/// SCORPION_DECENTRALIZED_FEATURE_COMPOSITION_AND_BENCHES_BUILD_
+/// RECONCILIATION_001: proves the new decentralized `get_url_final`
+/// returns real, truthful data -- the actual redirect destination
+/// carried in `PageResponse.final_url` through the decentralized
+/// `build()`, never a fabricated value -- exactly mirroring the
+/// non-decentralized implementation's own semantics (same match on the
+/// same `final_redirect_destination` field). Two cases: no redirect
+/// (falls back to the requested URL, not empty/fabricated), and a real
+/// redirect (returns the actual destination, distinct from the
+/// requested URL). Deliberately does not assert anything about
+/// `get_url()`'s own return value here: empirically, decentralized
+/// `build()` does not thread its `url: &str` parameter into `Page.url`
+/// at all (a real, pre-existing gap, unaffected by this fix, in a
+/// completely different code path than the one this frontier's
+/// directive named) -- asserting a specific value for it here would
+/// misrepresent this test as proof of something this fix did not touch.
+#[test]
+#[cfg(feature = "decentralized")]
+fn test_decentralized_get_url_final_reflects_real_redirect_never_fabricated() {
+    use crate::utils::PageResponse;
+
+    // No redirect occurred: final URL must fall back to the requested
+    // URL fallback path (`&self.url`), never a fabricated/empty value
+    // unrelated to what was actually observed.
+    let no_redirect = PageResponse {
+        content: Some(b"<html></html>".to_vec()),
+        status_code: StatusCode::OK,
+        final_url: None,
+        ..Default::default()
+    };
+    let page = build("https://example.com/start", no_redirect);
+    assert_eq!(
+        page.get_url_final(),
+        page.get_url(),
+        "no redirect occurred -- final URL must equal the same requested-URL fallback \
+         get_url() itself returns, never a fabricated value"
+    );
+
+    // A real redirect occurred: final URL must reflect the actual
+    // destination PageResponse carried, not disappear or silently revert
+    // to the requested URL.
+    let redirected = PageResponse {
+        content: Some(b"<html></html>".to_vec()),
+        status_code: StatusCode::OK,
+        final_url: Some("https://example.com/final-destination".to_string()),
+        ..Default::default()
+    };
+    let page = build("https://example.com/start", redirected);
+    assert_eq!(
+        page.get_url_final(),
+        "https://example.com/final-destination",
+        "final URL must reflect the real redirect destination carried by PageResponse"
+    );
+    assert_ne!(
+        page.get_url_final(),
+        page.get_url(),
+        "a real redirect must not silently disappear back into the requested-URL fallback"
+    );
 }

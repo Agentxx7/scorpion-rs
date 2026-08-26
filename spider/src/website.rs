@@ -12847,12 +12847,12 @@ impl Website {
                 let semaphore: Arc<Semaphore> = self.setup_semaphore();
                 let mut q = self.channel_queue.as_ref().map(|q| q.0.subscribe());
                 let domain = self.url.inner().as_str();
-                self.domain_parsed = parse_absolute_url(&domain);
+                self.domain_parsed = parse_absolute_url(domain);
                 let persist_links = self.status == CrawlStatus::Start;
 
                 let mut interval = tokio::time::interval(Duration::from_millis(15));
 
-                let (sitemap_path, needs_trailing) = self.get_sitemap_setup(&domain);
+                let (sitemap_path, needs_trailing) = self.get_sitemap_setup(domain);
 
                 self.configuration.sitemap_url = Some(Box::new(
                     string_concat!(domain, if needs_trailing { "/" } else { "" }, sitemap_path)
@@ -12886,7 +12886,7 @@ impl Website {
                 };
 
                 let mut extra_links = self.extra_links.clone();
-                self.dequeue(&mut q, &mut *extra_links, &mut exceeded_budget)
+                self.dequeue(&mut q, &mut extra_links, &mut exceeded_budget)
                     .await;
                 self.extra_links.clone_from(&extra_links);
                 let mut set: JoinSet<Option<Page>> = JoinSet::new();
@@ -12944,7 +12944,7 @@ impl Website {
 
                                     let mut page = Page::new(
                                         &sitemap_url,
-                                        &client,
+                                        client,
                                         &new_page,
                                         false, // we use the initial about:blank page.
                                         self.configuration.referer.clone(),
@@ -12972,7 +12972,7 @@ impl Website {
                                         && !page.get_html_bytes_u8().ends_with(b"</html>");
 
                                     if is_xml {
-                                        let reader = SiteMapReader::new(&*page.get_html_bytes_u8());
+                                        let reader = SiteMapReader::new(page.get_html_bytes_u8());
 
                                         for entity in reader {
                                             if !self.handle_process(handle, &mut interval, async {}).await {
@@ -13036,7 +13036,7 @@ impl Website {
                                                                 > = None;
                                                                 let (mut page, succeeded) =
                                                                     Page::new_streaming(
-                                                                        &link.inner(),
+                                                                        link.inner(),
                                                                         &client,
                                                                         &new_page,
                                                                         false,
@@ -13062,7 +13062,7 @@ impl Website {
 
                                                                     if let Err(elasped) = tokio::time::timeout(
                                                                         tokio::time::Duration::from_secs(10),
-                                                                        async { intercept_handle.await },
+                                                                        intercept_handle,
                                                                     )
                                                                     .await
                                                                     {
@@ -13111,7 +13111,7 @@ impl Website {
                                                     match sitemap_entry.loc {
                                                         Location::Url(url) => {
                                                             sitemaps.push(Box::new(CompactString::new(
-                                                                &url.as_str(),
+                                                                url.as_str(),
                                                             )));
                                                         }
                                                         Location::None | Location::ParseErr(_) => (),
@@ -13196,7 +13196,7 @@ impl Website {
                                                             HashSet<CaseInsensitiveString>,
                                                         > = None;
                                                         let (mut page, succeeded) = Page::new_streaming(
-                                                            &link.inner(),
+                                                            link.inner(),
                                                             &client,
                                                             &new_page,
                                                             false,
@@ -13220,7 +13220,7 @@ impl Website {
 
                                                             if let Err(elasped) = tokio::time::timeout(
                                                                 tokio::time::Duration::from_secs(10),
-                                                                async { intercept_handle.await },
+                                                                intercept_handle,
                                                             )
                                                             .await
                                                             {
@@ -13275,31 +13275,15 @@ impl Website {
                         },
                         Some(result) = set.join_next(), if !set.is_empty() => {
                             if let Ok(res) = result {
-                                match res {
-                                    Some(page) => {
-                                        if let Some(signature) = page.signature {
-                                            if self.is_signature_allowed(signature).await {
-                                                if let Some(mut links) = page.page_links.clone() {
-                                                    self.dequeue(&mut q, &mut links, &mut exceeded_budget).await;
-                                                    self.extra_links_extend(*links)
-                                                }
-                                                self.insert_signature(signature).await;
-
-                                                channel_send_page(
-                                                    &shared.0, page.clone(), &shared.1,
-                                                )
-                                                .await;
-                                                if scrape || persist_links {
-                                                    if let Some(p) = self.pages.as_mut() {
-                                                        push_page_capped(p, page);
-                                                    }
-                                                }
-                                            }
-                                        } else {
+                                if let Some(page) = res {
+                                    if let Some(signature) = page.signature {
+                                        if self.is_signature_allowed(signature).await {
                                             if let Some(mut links) = page.page_links.clone() {
                                                 self.dequeue(&mut q, &mut links, &mut exceeded_budget).await;
                                                 self.extra_links_extend(*links)
                                             }
+                                            self.insert_signature(signature).await;
+
                                             channel_send_page(
                                                 &shared.0, page.clone(), &shared.1,
                                             )
@@ -13310,8 +13294,21 @@ impl Website {
                                                 }
                                             }
                                         }
+                                    } else {
+                                        if let Some(mut links) = page.page_links.clone() {
+                                            self.dequeue(&mut q, &mut links, &mut exceeded_budget).await;
+                                            self.extra_links_extend(*links)
+                                        }
+                                        channel_send_page(
+                                            &shared.0, page.clone(), &shared.1,
+                                        )
+                                        .await;
+                                        if scrape || persist_links {
+                                            if let Some(p) = self.pages.as_mut() {
+                                                push_page_capped(p, page);
+                                            }
+                                        }
                                     }
-                                    _ => ()
                                 }
                             } else {
                                 break;
@@ -13320,36 +13317,22 @@ impl Website {
                         else => break,
                     }
 
-                    if sitemaps.len() == 0 || exceeded_budget {
+                    if sitemaps.is_empty() || exceeded_budget {
                         break;
                     }
                 }
 
                 while let Some(result) = set.join_next().await {
                     if let Ok(res) = result {
-                        match res {
-                            Some(page) => {
-                                if let Some(signature) = page.signature {
-                                    if self.is_signature_allowed(signature).await {
-                                        if let Some(mut links) = page.page_links.clone() {
-                                            self.dequeue(&mut q, &mut links, &mut exceeded_budget)
-                                                .await;
-                                            self.extra_links_extend(*links)
-                                        }
-                                        self.insert_signature(signature).await;
-                                        channel_send_page(&shared.0, page.clone(), &shared.1).await;
-                                        if scrape || persist_links {
-                                            if let Some(p) = self.pages.as_mut() {
-                                                push_page_capped(p, page);
-                                            }
-                                        }
-                                    }
-                                } else {
+                        if let Some(page) = res {
+                            if let Some(signature) = page.signature {
+                                if self.is_signature_allowed(signature).await {
                                     if let Some(mut links) = page.page_links.clone() {
                                         self.dequeue(&mut q, &mut links, &mut exceeded_budget)
                                             .await;
                                         self.extra_links_extend(*links)
                                     }
+                                    self.insert_signature(signature).await;
                                     channel_send_page(&shared.0, page.clone(), &shared.1).await;
                                     if scrape || persist_links {
                                         if let Some(p) = self.pages.as_mut() {
@@ -13357,8 +13340,18 @@ impl Website {
                                         }
                                     }
                                 }
+                            } else {
+                                if let Some(mut links) = page.page_links.clone() {
+                                    self.dequeue(&mut q, &mut links, &mut exceeded_budget).await;
+                                    self.extra_links_extend(*links)
+                                }
+                                channel_send_page(&shared.0, page.clone(), &shared.1).await;
+                                if scrape || persist_links {
+                                    if let Some(p) = self.pages.as_mut() {
+                                        push_page_capped(p, page);
+                                    }
+                                }
                             }
-                            _ => (),
                         }
                     }
                 }

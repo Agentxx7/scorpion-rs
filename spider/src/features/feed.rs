@@ -160,7 +160,7 @@ fn map_entry(
             .or_else(|| {
                 let facts = rss_facts?;
                 (facts.guid_is_permalink)
-                    .then(|| facts.guid.as_deref())
+                    .then_some(facts.guid.as_deref())
                     .flatten()
                     .filter(|guid| url::Url::parse(guid).is_ok())
                     .map(str::to_string)

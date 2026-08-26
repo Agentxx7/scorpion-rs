@@ -1736,15 +1736,15 @@ const NETWORK_NAMESPACE_ISOLATION_ENV_LITERALS: [&str; 4] = [
     "RUSTUP_HOME=/home/runner/.rustup",
 ];
 
-/// If `text` begins with exactly `sudo ip netns exec <name> env
-/// PATH=<literal> HOME=<literal> CARGO_HOME=<literal>
-/// RUSTUP_HOME=<literal>` (four fixed tokens, one namespace-name token,
-/// then the fixed token `env`, then the four ordered literal env
-/// assignments), returns the remaining text after that 10-token prefix
-/// so callers can apply the ordinary bare-`cargo test` grammar to
-/// what's left. Returns `None` unchanged for anything else, including a
-/// prefix that only partially matches, uses a different or reordered
-/// literal, or has nothing after it.
+/// If `text` begins with the fixed 10-token network-namespace-isolation
+/// prefix (`sudo ip netns exec <name> env PATH=<literal> HOME=<literal>
+/// CARGO_HOME=<literal> RUSTUP_HOME=<literal>`), optionally followed by
+/// zero or more additional literal env-assignment tokens (see
+/// `network_namespace_isolation_prefix_len_at`), returns the remaining
+/// text after that whole prefix so callers can apply the ordinary
+/// bare-`cargo test` grammar to what's left. Returns `None` unchanged
+/// for anything else, including a prefix that only partially matches,
+/// uses a different or reordered literal, or has nothing after it.
 fn strip_network_namespace_isolation_prefix(text: &str) -> Option<String> {
     let tokens: Vec<&str> = text.split_whitespace().collect();
     // tokens[4] is the namespace name — any single non-empty token is
@@ -1752,24 +1752,64 @@ fn strip_network_namespace_isolation_prefix(text: &str) -> Option<String> {
     // quote/comment checks the caller already runs on the full text
     // cover its content, and it carries no semantic meaning of its own
     // beyond being a plain identifier.
-    if !network_namespace_isolation_prefix_at(&tokens, 0) {
-        return None;
-    }
-    Some(tokens[10..].join(" "))
+    let len = network_namespace_isolation_prefix_len_at(&tokens, 0)?;
+    Some(tokens[len..].join(" "))
 }
 
-/// True if `tokens[i..]` begins with the full, fixed 10-token network-
+/// True if `token` looks like a plain `IDENTIFIER=value` environment-
+/// variable assignment — an uppercase-leading identifier of letters,
+/// digits, and underscores, followed by `=` and any value. Used only to
+/// recognize *additional* `env`(1) assignments after the fixed
+/// PATH/HOME/CARGO_HOME/RUSTUP_HOME literals (e.g. `RUST_MIN_STACK=
+/// 67108864`, already a real, established pattern in this workflow's
+/// own steps) — never to admit anything the whole-string shell-
+/// metacharacter/backslash/quote/comment checks haven't already passed,
+/// so this can only widen which *namespace-isolated* commands are
+/// recognized as executable, never weaken what a bare/unprefixed
+/// command requires.
+fn looks_like_env_assignment(token: &str) -> bool {
+    let Some((name, _value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// If `tokens[i..]` begins with the full, fixed 10-token network-
 /// namespace-isolation prefix (`sudo ip netns exec <name> env
 /// PATH=<literal> HOME=<literal> CARGO_HOME=<literal>
-/// RUSTUP_HOME=<literal>`). Shared by `strip_network_namespace_
-/// isolation_prefix` (position 0 only) and `parse_test_selection`'s
-/// token-stream scan (anywhere in the stream), so the two can never
-/// silently drift apart on what counts as "the recognized prefix."
-fn network_namespace_isolation_prefix_at(tokens: &[&str], i: usize) -> bool {
-    tokens.len() >= i + 10
-        && tokens[i..i + 4] == NETWORK_NAMESPACE_ISOLATION_PREFIX
-        && tokens[i + 5] == "env"
-        && tokens[i + 6..i + 10] == NETWORK_NAMESPACE_ISOLATION_ENV_LITERALS
+/// RUSTUP_HOME=<literal>`), optionally followed by zero or more
+/// additional `IDENTIFIER=value` tokens recognized by
+/// `looks_like_env_assignment` (standard `env`(1) usage — `env
+/// NAME=value NAME=value ... cmd` — and every such token has already
+/// passed the whole-string shell-metacharacter/backslash/quote/comment
+/// checks by the time this runs, so recognizing more of them here can
+/// never admit anything shell-ambiguous), returns the total number of
+/// prefix tokens to skip (10 plus however many trailing env-assignment
+/// tokens matched). Returns `None` if the fixed 10-token core prefix
+/// itself isn't present. Shared by `strip_network_namespace_isolation_
+/// prefix` (position 0 only) and `parse_test_selection`'s token-stream
+/// scan (anywhere in the stream), so the two can never silently drift
+/// apart on what counts as "the recognized prefix."
+fn network_namespace_isolation_prefix_len_at(tokens: &[&str], i: usize) -> Option<usize> {
+    if tokens.len() < i + 10
+        || tokens[i..i + 4] != NETWORK_NAMESPACE_ISOLATION_PREFIX
+        || tokens[i + 5] != "env"
+        || tokens[i + 6..i + 10] != NETWORK_NAMESPACE_ISOLATION_ENV_LITERALS
+    {
+        return None;
+    }
+    let mut consumed = 10;
+    while tokens
+        .get(i + consumed)
+        .is_some_and(|token| looks_like_env_assignment(token))
+    {
+        consumed += 1;
+    }
+    Some(consumed)
 }
 
 /// Strict allowlist grammar, not a denylist heuristic: rather than trying
@@ -2223,25 +2263,37 @@ fn parse_test_selection(run: &str) -> Option<TestSelection> {
             // SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_
             // EXECUTION_001: the same fixed `sudo ip netns exec <name>
             // env PATH=<literal> HOME=<literal> CARGO_HOME=<literal>
-            // RUSTUP_HOME=<literal>` isolation prefix
+            // RUSTUP_HOME=<literal>` isolation prefix (optionally
+            // followed by additional literal env-assignment tokens —
+            // see `network_namespace_isolation_prefix_len_at`)
             // `executable_test_command` recognizes, skipped here too —
             // wherever it appears in the token stream, not only at
             // position 0, since a step wrapped in `echo "BEGIN..."` /
             // `if ! timeout 600 ...; then` puts real wrapper text before
-            // it. Consumed as one 10-token unit, the same way
-            // `"cargo" | "test"` are already recognized and skipped
-            // wherever they occur, rather than treated as positional
-            // filters. Bypass class closed: a *bare* strip-only-at-
-            // position-0 version of this left `ip` (from the buried,
-            // un-stripped prefix on every wrapped step) to fall through
-            // to the generic catch-all as a spurious positional filter —
-            // and `ip` is a substring of some real test names (e.g.
+            // it. Consumed as one unit, the same way `"cargo" | "test"`
+            // are already recognized and skipped wherever they occur,
+            // rather than treated as positional filters. Bypass class
+            // closed: a *bare* strip-only-at-position-0 version of this
+            // left `ip` (from the buried, un-stripped prefix on every
+            // wrapped step) to fall through to the generic catch-all as
+            // a spurious positional filter — and `ip` is a substring of
+            // some real test names (e.g.
             // `website::test_crawl_subscription`, via "subscr-ip-tion"),
             // silently making `selection_excludes` report a live-network
             // test as *not* excluded from a step that never actually
-            // runs it.
-            "sudo" if network_namespace_isolation_prefix_at(&before_tokens, i) => {
-                i += 10;
+            // runs it. SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_
+            // CLOSED_ACTIVATION_001: a second, real, empirically-proven
+            // bypass class closed here — without the trailing-env-
+            // assignment tolerance, this branch consumed only the fixed
+            // 10 tokens, leaving a real, already-established
+            // `RUST_MIN_STACK=<value>` token (present on this
+            // workflow's own "chrome cache cache_request" and CAPTCHA
+            // CI-portable evidence steps) to fall through to the same
+            // generic catch-all as a spurious positional filter,
+            // corrupting any CI_ENFORCED structural match against
+            // either step.
+            "sudo" if network_namespace_isolation_prefix_len_at(&before_tokens, i).is_some() => {
+                i += network_namespace_isolation_prefix_len_at(&before_tokens, i).unwrap();
             }
             "--lib" => {
                 lib = true;

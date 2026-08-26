@@ -635,9 +635,24 @@ jobs:
       # is expected to cite, so it keeps the one recognized isolation
       # prefix (`sudo ip netns exec spider_ci env PATH=<literal> HOME=<literal> CARGO_HOME=<literal> RUSTUP_HOME=<literal>`) and no other shell
       # wrapper.
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
+      # (CONTINUE: remote step-10 closure-assurance failure — now step
+      # 11). RUST_MIN_STACK=67108864, same literal value and same
+      # rationale already used on the "chrome cache cache_request" step
+      # above (pre-existing, environment-specific stack overflow at the
+      # default thread stack size under a `chrome`-enabled feature
+      # combination) — proven necessary here too via a temporary remote
+      # diagnostic (since removed): captcha_browser_oopif_streaming_
+      # shipping_real genuinely aborts with "fatal runtime error: stack
+      # overflow" without it, and passes cleanly with it, both confirmed
+      # on real remote CI; every other one of this step's six test
+      # targets already passed both ways, so this is not a blind
+      # bigger-magic-number guess — it is the one binary that actually
+      # needed it, given the one value this workflow already established
+      # is sufficient for this exact stack-overflow class.
       - name: Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)
         run: >-
-          sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test browser_challenge_detection_real
+          sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup RUST_MIN_STACK=67108864 cargo test -p spider --test browser_challenge_detection_real
           --test captcha_browser_binding_real --test captcha_browser_frame_action_real
           --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
           --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma"
@@ -669,45 +684,6 @@ jobs:
             exit 1
           fi
           echo "END: spider credential-cache regression (chrome_remote_cache)"
-      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
-      # (CONTINUE: remote step-10 closure-assurance failure) — TEMPORARY
-      # diagnostic. The prior blocker (step 10, shallow-clone commit
-      # reachability) is now fixed and confirmed passing remotely; step
-      # 11 (CAPTCHA CI-portable evidence) is newly reachable for the
-      # first time ever on real CI and failed (exit 101, no per-test
-      # detail — bare/unwrapped, same closure_harness.rs CI_ENFORCED
-      # grammar constraint as step 10). A local reproduction of this
-      # exact command hit a stack overflow in one binary without
-      # RUST_MIN_STACK set (which the real step-11 command does not
-      # set) — a hypothesis, not yet remote-confirmed. These six steps
-      # run each of step 11's six test binaries individually, under the
-      # true root+namespace identity, both with and without
-      # RUST_MIN_STACK, to get real evidence rather than assume — see
-      # .github/scripts/diagnose-step11-binary.sh's own doc comment.
-      # `if: always()` is required so these still run after step 11
-      # fails above; per closure_harness.rs's own `WorkflowStep::gated`
-      # model this also marks every one of these steps `gated`, a
-      # second, independent reason none can ever be mistaken for
-      # required, non-gated CI_ENFORCED evidence. To be removed once
-      # the real step-11 defect is identified and fixed.
-      - name: "[DIAGNOSTIC step11] browser_challenge_detection_real"
-        if: always()
-        run: bash .github/scripts/diagnose-step11-binary.sh browser_challenge_detection_real
-      - name: "[DIAGNOSTIC step11] captcha_browser_binding_real"
-        if: always()
-        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_binding_real
-      - name: "[DIAGNOSTIC step11] captcha_browser_frame_action_real"
-        if: always()
-        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_frame_action_real
-      - name: "[DIAGNOSTIC step11] captcha_browser_production_binding_real"
-        if: always()
-        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_production_binding_real
-      - name: "[DIAGNOSTIC step11] captcha_browser_oopif_action_real"
-        if: always()
-        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_oopif_action_real
-      - name: "[DIAGNOSTIC step11] captcha_browser_oopif_streaming_shipping_real"
-        if: always()
-        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_oopif_streaming_shipping_real
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

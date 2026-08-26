@@ -640,6 +640,45 @@ jobs:
             exit 1
           fi
           echo "END: spider credential-cache regression (chrome_remote_cache)"
+      # SCORPION_CANONICAL_CI_DETERMINISTIC_NETWORK_LOCKDOWN_EXECUTION_001
+      # (CONTINUE: remote step-10 closure-assurance failure) — TEMPORARY
+      # diagnostic. The prior blocker (step 10, shallow-clone commit
+      # reachability) is now fixed and confirmed passing remotely; step
+      # 11 (CAPTCHA CI-portable evidence) is newly reachable for the
+      # first time ever on real CI and failed (exit 101, no per-test
+      # detail — bare/unwrapped, same closure_harness.rs CI_ENFORCED
+      # grammar constraint as step 10). A local reproduction of this
+      # exact command hit a stack overflow in one binary without
+      # RUST_MIN_STACK set (which the real step-11 command does not
+      # set) — a hypothesis, not yet remote-confirmed. These six steps
+      # run each of step 11's six test binaries individually, under the
+      # true root+namespace identity, both with and without
+      # RUST_MIN_STACK, to get real evidence rather than assume — see
+      # .github/scripts/diagnose-step11-binary.sh's own doc comment.
+      # `if: always()` is required so these still run after step 11
+      # fails above; per closure_harness.rs's own `WorkflowStep::gated`
+      # model this also marks every one of these steps `gated`, a
+      # second, independent reason none can ever be mistaken for
+      # required, non-gated CI_ENFORCED evidence. To be removed once
+      # the real step-11 defect is identified and fixed.
+      - name: "[DIAGNOSTIC step11] browser_challenge_detection_real"
+        if: always()
+        run: bash .github/scripts/diagnose-step11-binary.sh browser_challenge_detection_real
+      - name: "[DIAGNOSTIC step11] captcha_browser_binding_real"
+        if: always()
+        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_binding_real
+      - name: "[DIAGNOSTIC step11] captcha_browser_frame_action_real"
+        if: always()
+        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_frame_action_real
+      - name: "[DIAGNOSTIC step11] captcha_browser_production_binding_real"
+        if: always()
+        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_production_binding_real
+      - name: "[DIAGNOSTIC step11] captcha_browser_oopif_action_real"
+        if: always()
+        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_oopif_action_real
+      - name: "[DIAGNOSTIC step11] captcha_browser_oopif_streaming_shipping_real"
+        if: always()
+        run: bash .github/scripts/diagnose-step11-binary.sh captcha_browser_oopif_streaming_shipping_real
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

@@ -184,22 +184,23 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against SCORPION_CANONICAL_CAPTCHA_CI_ENFORCEABLE_EVIDENCE_
-# PARTITION_001's own evidence-partition commit, which byte-for-byte
-# structurally changed this ledger's own VERIFIED table relative to the
-# prior reviewed_commit (7f90ec83) — genuinely, correctly rejected when
-# tested against the unchanged old value, confirming
-# SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's
-# own drift check works. The underlying bypass evidence below is
-# unchanged from that prior review: none of the actual adversarial-matrix
-# tests moved, were renamed, or were removed — one genuinely
-# hardware-dependent test (website_crawl_shipping_pipeline_detects_and_
-# solves_a_genuine_oopif_challenge) moved out of VERIFIED into
-# OPERATOR_OBSERVED; the other two hardware-dependent tests in this file
-# family were never in VERIFIED to begin with (see [stages.VERIFIED]'s
-# own comment for the corrected three-test accounting); and a real CI
-# workflow step was added.
-reviewed_commit = "98a782ce6c23cd4f76369338a8eeb8f659708669"
+# Re-attested against SCORPION_CANONICAL_CACHE_REQUEST_FRESH_ENTRY_HIT_
+# RELIABILITY_001's product-fix commit (ba15d837), which touched
+# spider/src/utils/mod.rs — one of this capability's own
+# closure_relevant_files (cited by IMPLEMENTED/VERIFIED/WIRED evidence
+# via Website::crawl's chrome_fetch_params call graph) — and therefore
+# invalidated the prior reviewed_commit's (98a782ce) binding, exactly
+# as SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_
+# 001's own drift check requires. This is a pure attestation-only
+# field update: no CAPTCHA stage, evidence, or bypass-attempt entry
+# below changed. The underlying fix (ba15d837) widened two
+# feature-gated cache functions' #[cfg] from `any(cache_chrome_hybrid,
+# cache_chrome_hybrid_mem)` to `all(chrome, cache_request)` and added a
+# missing with_cache_skip_browser(true) test call in
+# spider/src/website.rs; it did not touch CAPTCHA detection, solving,
+# provider routing, frame/OOPIF handling, or any symbol this
+# capability's evidence cites.
+reviewed_commit = "ba15d8371d14e0ebc76518dc4e02277ae6b0c498"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",

@@ -16386,6 +16386,26 @@ async fn test_cache() {
     let mut website: Website = Website::new(&domain);
     website.configuration.cache = true;
     website.configuration.cache_namespace = Some(Box::new(domain.clone()));
+    // SCORPION_CANONICAL_CACHE_REQUEST_FRESH_ENTRY_HIT_RELIABILITY_001:
+    // `cache = true` alone selects `CacheOptions::Yes`, not `SkipBrowser`
+    // — deliberately two separate dials (see `Configuration::
+    // get_cache_options` and every sibling test in this file that
+    // exercises a real repeat-crawl cache hit, all of which call this
+    // explicitly: lines ~16428, ~16479, ~16513, ~16596, ~16641, ~17622,
+    // ~17884, ~17999, ~18031, ~18076, ~18137, ~18219). Without it, a
+    // chrome-capable crawl (this exact test, compiled under `chrome
+    // cache cache_request`) performs a real browser navigation on every
+    // repeat crawl regardless of any cache hit — `cache = true` alone
+    // never promised otherwise, and `cache_skip_browser`'s own default-
+    // false semantics are independently, deliberately tested (see
+    // `website.rs`'s own `with_cache_skip_browser(false); // NOT
+    // skip_browser` sibling test) — so the fix here is this test
+    // matching established, correct, already-tested behavior, not a
+    // change to that behavior itself. Real remote+local evidence (100%
+    // deterministic 2-request failure, not timing-sensitive) traced the
+    // full call graph before landing on this as the actual missing
+    // piece — see this frontier's own closure report for the full trace.
+    website.with_cache_skip_browser(true);
 
     website.crawl().await;
     website.crawl().await;

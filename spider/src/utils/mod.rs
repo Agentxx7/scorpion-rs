@@ -129,7 +129,14 @@ use crate::page::{MAX_CONTENT_LENGTH, MAX_PREALLOC, MAX_PRE_ALLOCATED_HTML_PAGE_
 use crate::tokio_stream::StreamExt;
 use crate::Client;
 
-#[cfg(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))]
+// SCORPION_CANONICAL_CACHE_REQUEST_FRESH_ENTRY_HIT_RELIABILITY_001: widened
+// alongside put_hybrid_cache/cache_chrome_response below — see that real
+// implementation's doc comment. `chrome` + `cache_request` alone (no
+// separate `cache_chrome_hybrid` opt-in needed) is already the exact
+// gate the pre-existing, independent `cache_chrome_response_from_cdp_body`
+// uses for the same dependency, so this matches established precedent
+// rather than inventing a new one.
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 use http_cache_semantics::{RequestLike, ResponseLike};
 
 use log::{info, log_enabled, Level};
@@ -2158,7 +2165,7 @@ pub struct HttpResponse {
 }
 
 /// A HTTP request type for caching.
-#[cfg(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))]
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 pub struct HttpRequestLike {
     ///  The URI component of a request.
     pub uri: http::uri::Uri,
@@ -2168,7 +2175,7 @@ pub struct HttpRequestLike {
     pub headers: http::HeaderMap,
 }
 
-#[cfg(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))]
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 /// A HTTP response type for caching.
 pub struct HttpResponseLike {
     /// The http status code.
@@ -2177,7 +2184,7 @@ pub struct HttpResponseLike {
     pub headers: http::HeaderMap,
 }
 
-#[cfg(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))]
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 impl RequestLike for HttpRequestLike {
     fn uri(&self) -> http::uri::Uri {
         self.uri.clone()
@@ -2193,7 +2200,7 @@ impl RequestLike for HttpRequestLike {
     }
 }
 
-#[cfg(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))]
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 impl ResponseLike for HttpResponseLike {
     fn status(&self) -> StatusCode {
         self.status
@@ -2230,8 +2237,30 @@ pub fn convert_headers(
     header_map
 }
 
-#[cfg(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))]
 /// Store the page to cache to be re-used across HTTP request.
+///
+/// SCORPION_CANONICAL_CACHE_REQUEST_FRESH_ENTRY_HIT_RELIABILITY_001: this
+/// gate used to be `any(cache_chrome_hybrid, cache_chrome_hybrid_mem)` —
+/// real remote and local evidence (`website::test_cache`, deterministic
+/// 100% reproduction, not timing-sensitive) proved that under plain
+/// `chrome` `cache` `cache_request` (the actual, real feature set a
+/// chrome-capable crawl with caching enabled compiles with, with no
+/// separate opt-in), every chrome-fetched response was silently never
+/// persisted at all: this function compiled to the no-op stub below
+/// instead, so a second, otherwise-identical crawl of the same URL
+/// always re-hit the network. `cache_chrome_hybrid` and
+/// `cache_chrome_hybrid_mem` add zero dependencies beyond what
+/// `chrome`/`cache_request` already unconditionally pull in together
+/// (see their own `Cargo.toml` feature lists), so narrowing this
+/// function's availability to that separate flag was never load-bearing
+/// for any real dependency — only an unintentionally stricter gate than
+/// the read side (`try_cache_shortcircuit`/`get_cached_url`, already
+/// gated on plain `cache`/`cache_mem` alone) ever required of it.
+/// `chrome`/`cache_request` also already matches the pre-existing,
+/// independent `cache_chrome_response_from_cdp_body`'s own gate for the
+/// identical dependency — this aligns with established precedent, not a
+/// new one.
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 pub async fn put_hybrid_cache(
     cache_key: &str,
     http_response: HttpResponse,
@@ -2365,7 +2394,9 @@ pub async fn put_hybrid_cache(
     }
 }
 
-#[cfg(not(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem")))]
+/// No-op stub: only compiled when the real implementation's own gate
+/// (`chrome` + `cache_request`, see above) isn't satisfied.
+#[cfg(not(all(feature = "chrome", feature = "cache_request")))]
 /// Store the page to cache to be re-used across HTTP request.
 pub async fn put_hybrid_cache(
     _cache_key: &str,
@@ -2446,11 +2477,30 @@ async fn perform_smart_mouse_movement(
 ) {
 }
 
-/// Cache the chrome response
-#[cfg(all(
-    feature = "chrome",
-    any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem")
-))]
+/// Cache the chrome response.
+///
+/// SCORPION_CANONICAL_CACHE_REQUEST_FRESH_ENTRY_HIT_RELIABILITY_001: this
+/// gate used to be `all(chrome, any(cache_chrome_hybrid,
+/// cache_chrome_hybrid_mem))` — real remote+local evidence
+/// (`website::test_cache`, deterministic, 100% reproducible, not
+/// timing-sensitive) proved a chrome-fetched response was never
+/// persisted at all under plain `chrome` + `cache` + `cache_request`
+/// (no separate `cache_chrome_hybrid` opt-in): this function didn't
+/// exist in that build, so the no-op stub below ran silently instead,
+/// and every repeated chrome fetch of an already-fresh, already-
+/// cacheable page re-hit the network. The read side
+/// (`try_cache_shortcircuit`/`get_cached_url`) was *already* gated on
+/// plain `cache`/`cache_mem` alone — a real, proven asymmetry between
+/// what the read side would consume and what the write side would ever
+/// produce, not a deliberate narrower write policy.
+/// `cache_chrome_hybrid`/`cache_chrome_hybrid_mem` add zero
+/// dependencies beyond what `chrome` + `cache_request` already
+/// unconditionally pull in (see their own `Cargo.toml` feature lists),
+/// so `chrome` + `cache_request` — the same gate the pre-existing,
+/// independent `cache_chrome_response_from_cdp_body` already uses for
+/// this identical dependency — is both sufficient and established
+/// precedent, not a new one.
+#[cfg(all(feature = "chrome", feature = "cache_request"))]
 pub async fn cache_chrome_response(
     target_url: &str,
     page_response: &PageResponse,
@@ -2459,6 +2509,13 @@ pub async fn cache_chrome_response(
     namespace: Option<&str>,
     remote_cache_read_only: bool,
 ) {
+    // Only consumed below under `chrome_remote_cache` — pre-existing,
+    // unrelated to this fix; only became visible under a feature
+    // combination (`chrome` + `cache_request`, no `chrome_remote_cache`)
+    // this function didn't previously compile under at all.
+    #[cfg(not(feature = "chrome_remote_cache"))]
+    let _ = &remote_cache_read_only;
+
     // Skip caching non-success responses. A 4xx / 5xx — including
     // upstream-proxy 504/502 with a non-empty error page body — used to
     // be cached and then served from the local hybrid cache for the same
@@ -2603,11 +2660,9 @@ pub async fn cache_chrome_response(
     }
 }
 
-/// Cache the chrome response
-#[cfg(all(
-    feature = "chrome",
-    not(any(feature = "cache_chrome_hybrid", feature = "cache_chrome_hybrid_mem"))
-))]
+/// No-op stub: only compiled when the real implementation's own gate
+/// (`chrome` + `cache_request`, see above) isn't satisfied.
+#[cfg(all(feature = "chrome", not(feature = "cache_request")))]
 pub async fn cache_chrome_response(
     _target_url: &str,
     _page_response: &PageResponse,

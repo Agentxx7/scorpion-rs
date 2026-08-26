@@ -630,6 +630,9 @@ jobs:
       - name: "[DIAGNOSTIC step10] closure_harness_behavioral_contract alone"
         if: always()
         run: bash .github/scripts/diagnose-step10-binary.sh closure_harness_behavioral_contract
+      - name: "[DIAGNOSTIC step10] execution-identity/environment matrix + real git invocations under true remote identity"
+        if: always()
+        run: bash .github/scripts/diagnose-step10-env.sh
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

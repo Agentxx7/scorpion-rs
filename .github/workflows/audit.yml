@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked || true
+        run: cargo install cargo-audit --locked
       - name: Run audit
         # RUSTSEC-2026-0187 (lopdf < 0.42 stack overflow, process abort — not
         # a catchable panic). spider_mcp's own pdf-extract dependency (the
@@ -23,7 +23,8 @@ jobs:
         # `lopdf ^0.42` — the vulnerable version is NOT in that path.
         #
         # The vulnerable lopdf 0.36.0 remains in Cargo.lock, and cargo-audit
-        # is feature-blind, so it still flags it: memvid-rs 1.2.0 (the
+        # is feature-blind, so the repository config narrowly records it:
+        # memvid-rs 1.2.0 (the
         # latest release) independently hard-pins `lopdf = "^0.36"` in its
         # own manifest. memvid-rs is pulled in only by spider_agent's
         # `memvid` feature, which is only reachable via spider_agent's own
@@ -33,5 +34,7 @@ jobs:
         # spider_agent at all). No default/shipping build of `scorpion` or
         # `spider-mcp` ever resolves the vulnerable path.
         #
-        # Remove this ignore once memvid-rs ships a release on lopdf >= 0.42.
-        run: cargo audit --ignore RUSTSEC-2026-0187
+        # release-gate.yml separately fails if this version enters either
+        # selected V1 artifact. Remove the config exception once memvid-rs
+        # ships a release on lopdf >= 0.42.
+        run: cargo audit

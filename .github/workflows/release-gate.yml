@@ -1,0 +1,41 @@
+name: V1 Release Gate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify source identity
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify pinned toolchain
+        run: |
+          test "$(rustc --version | awk '{print $2}')" = "1.98.0"
+          test "$(cargo --version | awk '{print $2}')" = "1.98.0"
+      - name: Verify locked metadata
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Reject vulnerable dependencies from exact V1 graph
+        run: |
+          set -euo pipefail
+          cargo tree --locked -p spider_cli -p spider_mcp --edges normal > /tmp/v1-tree.txt
+          if grep -E '^(|.* )((lopdf v0\.36\.0)|(hickory-proto v0\.25\.2)|(rsa v0\.9\.10))([ (]|$)' /tmp/v1-tree.txt; then
+            echo "::error::A lockfile-only advisory exception entered the selected V1 graph"
+            exit 1
+          fi
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Verify repository security gate
+        run: cargo audit
+      - name: Build exact locked V1 artifacts
+        run: cargo build --locked -p spider_cli -p spider_mcp
+      - name: Verify V1 executables
+        run: |
+          test -x target/debug/scorpion
+          test -x target/debug/spider-mcp

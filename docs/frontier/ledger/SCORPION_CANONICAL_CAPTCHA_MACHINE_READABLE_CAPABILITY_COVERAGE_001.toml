@@ -216,33 +216,27 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against 3dbb34f7 (SCORPION_CANONICAL_MCP_STDIO_PROTOCOL_
-# PURITY_001's new stdio_protocol_purity target added to the existing
-# `spider_mcp behavioral shipping contract` CI step), which touched
-# .github/workflows/rust.yml — this capability's own CI_ENFORCED.
-# ci_workflow_file, an unconditional closure_relevant_file regardless
-# of stage — invalidating the prior reviewed_commit's (7cc33341)
-# byte-identity binding on it, exactly as SCORPION_CANONICAL_CLOSURE_
-# HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's own drift check
-# requires. Pure attestation-only field update: no ADVERSARIALLY_
-# VERIFIED evidence or bypass-attempt entry below changed, and no
-# behavior this capability depends on changed at all. Confirmed
-# directly: 3dbb34f7's rust.yml change adds one new `cargo test -p
-# spider_mcp --test stdio_protocol_purity` invocation (plus its own
-# report-test-step-failure.sh wiring and non-zero-count guard) to the
-# unrelated `build` job's existing step — the `spider_core` job's own
-# CAPTCHA CI step (test_targets/feature_set/positional_filters/exact/
-# skip all bound by [stages.CI_ENFORCED] below) is byte-for-byte
-# untouched in that diff. 3dbb34f7's other file, spider_mcp/tests/
-# stdio_protocol_purity.rs (new), is not a closure_relevant_file for
-# this capability at all — it is not among the WIRED/PRODUCTION_
-# REACHABLE files this capability's own evidence cites for either
-# shipping artifact's Website::crawl call site. Re-enumerated every
-# CLOSED capability binding rust.yml before this re-bind (grep across
-# every docs/frontier/ledger/*.toml for `ci_workflow_file`/
-# `[stages.CLOSED]`): CAPTCHA is the only one that exists in this
-# repository.
-reviewed_commit = "3dbb34f7737d0e4841e569ccc05f637ff06345a3"
+# Re-attested against c93eec03 (SCORPION_CANONICAL_CLI_SHIPPING_
+# CONTRACT_CI_ENFORCEMENT_001's three new scorpion CLI shipping-
+# contract CI steps), which touched .github/workflows/rust.yml — this
+# capability's own CI_ENFORCED.ci_workflow_file, an unconditional
+# closure_relevant_file regardless of stage — invalidating the prior
+# reviewed_commit's (3dbb34f7) byte-identity binding on it, exactly as
+# SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's
+# own drift check requires. Pure attestation-only field update: no
+# ADVERSARIALLY_VERIFIED evidence or bypass-attempt entry below
+# changed, and no behavior this capability depends on changed at all.
+# Confirmed directly: c93eec03's only change is adding three new
+# `cargo test -p spider_cli --test <target>` invocations (transport_cli,
+# search_cli, headless_chrome_production_stack) to the unrelated
+# `current_product` job — the `spider_core` job's own CAPTCHA CI step
+# (test_targets/feature_set/positional_filters/exact/skip all bound by
+# [stages.CI_ENFORCED] below) is byte-for-byte untouched in that diff,
+# and no other file changed. Re-enumerated every CLOSED capability
+# binding rust.yml before this re-bind (grep across every docs/
+# frontier/ledger/*.toml for `ci_workflow_file`/`[stages.CLOSED]`):
+# CAPTCHA is the only one that exists in this repository.
+reviewed_commit = "c93eec03e6e3ffb90340648aee260461caceadaa"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -282,24 +276,22 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
 # present and independently satisfied — verified directly against
 # closed_requires_every_declared_proof_class_independently before this
-# table was written. closed_commit re-bound to 3dbb34f7 for the exact
+# table was written. closed_commit re-bound to c93eec03 for the exact
 # same reason reviewed_commit above was: .github/workflows/rust.yml
 # (this capability's own CI_ENFORCED.ci_workflow_file) is an
 # unconditional closure_relevant_file, and the prior closed_commit
-# (7cc33341) no longer binds it byte-for-byte once SCORPION_CANONICAL_
-# MCP_STDIO_PROTOCOL_PURITY_001's new CI target landed. Every other
-# closure_relevant_file (spider/tests/closure_harness*.rs, spider/
-# Cargo.toml, every known shipping artifact's Cargo.toml, every other
-# IMPLEMENTED/VERIFIED/WIRED-cited file, spider/src/website.rs,
+# (3dbb34f7) no longer binds it byte-for-byte once SCORPION_CANONICAL_
+# CLI_SHIPPING_CONTRACT_CI_ENFORCEMENT_001's three new CI steps landed.
+# Every other closure_relevant_file (spider/tests/closure_harness*.rs,
+# spider/Cargo.toml, every known shipping artifact's Cargo.toml, every
+# other IMPLEMENTED/VERIFIED/WIRED-cited file, spider/src/website.rs,
 # spider/src/page.rs) is untouched by that commit — confirmed
-# directly, its diff is .github/workflows/rust.yml (one new `cargo
-# test -p spider_mcp --test stdio_protocol_purity` invocation added to
-# the unrelated `build` job's existing step) and spider_mcp/tests/
-# stdio_protocol_purity.rs (new, not a closure_relevant_file for this
-# capability); the `spider_core` job's own CAPTCHA CI step this
-# capability's [stages.CI_ENFORCED] binds is byte-for-byte unchanged.
-# No CAPTCHA detection, solving, provider routing, frame/OOPIF
-# handling, or CI evidence this capability cites changed at all — the
-# change is scoped entirely to spider_mcp's own stdio protocol-purity
-# evidence, a different subsystem.
-closed_commit = "3dbb34f7737d0e4841e569ccc05f637ff06345a3"
+# directly, its diff is .github/workflows/rust.yml only, adding three
+# new `cargo test -p spider_cli --test <target>` invocations to the
+# unrelated `current_product` job; the `spider_core` job's own CAPTCHA
+# CI step this capability's [stages.CI_ENFORCED] binds is byte-for-byte
+# unchanged. No CAPTCHA detection, solving, provider routing,
+# frame/OOPIF handling, or CI evidence this capability cites changed at
+# all — the change is scoped entirely to the scorpion CLI's own
+# shipping-contract evidence, a different subsystem.
+closed_commit = "c93eec03e6e3ffb90340648aee260461caceadaa"

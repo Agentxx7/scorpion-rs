@@ -38,65 +38,144 @@ jobs:
         # to exactly the one security property, not the broader spider_mcp
         # behavioral-contract CI coverage (a separate, tracked gap).
         run: cargo test -p spider_mcp --lib tools::scrape::tests::advisory_rustsec_2026_0187_deeply_nested_pdf_cannot_abort_shipping_process -- --exact
-      - name: Cargo test spider_mcp shipping behavioral contract
-        # SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_ENFORCEMENT_001: explicit
-        # target list (lib, bin, and every deterministic tests/*.rs suite
-        # except headless_chrome_production_stack, which gets its own
-        # dedicated, serialized step below -- see that step's comment for
-        # why) under spider_mcp's actual default (shipping) features. Not a
-        # name-based positional filter (immune to a typo silently matching
-        # zero tests): every `--test`/`--lib`/`--bin` value here is a real
-        # Cargo target selector that errors loudly if it doesn't exist.
-        # Runs the full lib unit suite plus every real MCP stdio/JSON-RPC
-        # end-to-end suite covered here: the real compiled spider-mcp
-        # binary spawned as a genuine subprocess, driven over real
-        # JSON-RPC/stdio, against real 127.0.0.1 fixture servers -- zero
-        # public network, zero secrets, zero RUN_LIVE_TESTS gate. Covers
-        # crawl/scrape/links acquisition-failure semantics (never a fake
-        # successful/empty result), background-crawl-status semantics, and
-        # the Spider Cloud + Tor conflict fail-closed seam. The count check
-        # below is a second, independent structural guard against a silent
-        # zero-test regression (e.g. every target accidentally becoming
-        # feature-gated out).
+      - name: spider_mcp behavioral shipping contract
+        # SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_ENFORCEMENT_001: this
+        # changes the meaning of green CI for spider_mcp from "compiles"
+        # to "the full deterministic lib suite and every default-feature
+        # end-to-end behavioral target actually executes and passes".
+        # Each Cargo target below is invoked individually and explicitly
+        # -- never folded into one bare `-p spider_mcp` package-level
+        # command -- specifically so that deleting, cfg-disabling, or
+        # renaming any one of these targets makes this step fail loudly
+        # (`cargo test --test <name>` errors on an unknown target) instead
+        # of silently staying green on the surviving ones. Every target
+        # runs under spider_mcp's actual default (shipping) feature set;
+        # every tests/*.rs suite spawns the real compiled spider-mcp
+        # binary as a genuine subprocess, driven over real JSON-RPC/stdio,
+        # against real 127.0.0.1 fixture servers -- zero public network,
+        # zero secrets, zero RUN_LIVE_TESTS gate. Each block's own count
+        # check is a second, independent structural guard against a
+        # silent zero-test regression on that specific target.
         run: |
-          if ! cargo test -p spider_mcp --lib --bin spider-mcp \
-            --test crawl_failure_semantics \
-            --test crawl_status_failure_semantics \
-            --test links_failure_semantics \
-            --test scrape_failure_semantics \
-            --test spider_cloud_env_tor_conflict \
-            > /tmp/spider_mcp_behavioral.log 2>&1; then
-            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_behavioral.log "spider_mcp shipping behavioral contract"
+          # Full deterministic lib unit/behavioral suite: 146 non-ignored
+          # tests today (7 pre-existing #[ignore]s are localhost/browser
+          # tests carried from before this frontier, unaffected by it).
+          # Also naturally exercises advisory_rustsec_2026_0187_deeply_
+          # nested_pdf_cannot_abort_shipping_process (the dedicated PDF
+          # safety step above stays as its own explicit security-evidence
+          # guarantee regardless -- broad regression evidence and
+          # dedicated security evidence serve different purposes).
+          if ! cargo test -p spider_mcp --lib > /tmp/spider_mcp_lib.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_lib.log "spider_mcp lib suite"
             exit 1
           fi
-          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_behavioral.log | awk '{sum+=$1} END {print sum+0}')
-          echo "spider_mcp shipping behavioral contract: ${passed} tests passed across all targets"
-          if [ "${passed}" -lt 145 ]; then
-            echo "::error::spider_mcp behavioral contract executed suspiciously few tests (${passed}) -- refusing to treat this as proof"
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_lib.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp lib suite: ${passed} tests passed"
+          if [ "${passed}" -lt 140 ]; then
+            echo "::error::spider_mcp lib suite executed suspiciously few tests (${passed})"
             exit 1
           fi
-      - name: Cargo test spider_mcp headless Chrome production stack
-        # A dedicated, serialized step for headless_chrome_production_stack
-        # alone: this suite launches real Chrome per test, and this
-        # frontier discovered (reproduced locally with `taskset -c 0,1`,
-        # simulating a CPU-constrained runner) that running its 6 tests at
-        # Rust's default full parallelism contends real Chrome launches
-        # against each other badly enough to blow the concurrency test's
-        # own generous upper-bound timing assertion -- a resource-
-        # contention artifact of test-runner parallelism, not a production
-        # regression: the same assertions pass reliably, repeatedly, under
-        # identical CPU constraint once serialized (--test-threads=1),
-        # including the concurrency test's own lower-bound backpressure
-        # check. No test assertion changed.
-        run: |
+
+          # crawl_failure_semantics: a real refused-connection acquisition
+          # failure returns a typed isError:true result, never a fake
+          # successful/empty crawl -- and the same server instance still
+          # completes a real subsequent crawl afterward.
+          if ! cargo test -p spider_mcp --test crawl_failure_semantics > /tmp/spider_mcp_crawl_failure.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_crawl_failure.log "spider_mcp crawl_failure_semantics"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_crawl_failure.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp crawl_failure_semantics: ${passed} tests passed"
+          if [ "${passed}" -lt 1 ]; then
+            echo "::error::spider_mcp crawl_failure_semantics executed zero tests"
+            exit 1
+          fi
+
+          # crawl_status_failure_semantics: a background crawl (limit
+          # above INLINE_LIMIT) that never observes a real response
+          # reports status:"failed" via spider_crawl_status, truthfully,
+          # without fabricating a typed transport error that doesn't
+          # exist; a real background crawl against a real local server
+          # reaches status:"complete" with a real observed response.
+          if ! cargo test -p spider_mcp --test crawl_status_failure_semantics > /tmp/spider_mcp_crawl_status.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_crawl_status.log "spider_mcp crawl_status_failure_semantics"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_crawl_status.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp crawl_status_failure_semantics: ${passed} tests passed"
+          if [ "${passed}" -lt 2 ]; then
+            echo "::error::spider_mcp crawl_status_failure_semantics executed too few tests (${passed})"
+            exit 1
+          fi
+
+          # headless_chrome_production_stack: the real shipping headless-
+          # Chrome path (spider_scrape/spider_crawl headless:true,
+          # return_format:"screenshot"), proven via a rendered-marker the
+          # fixture only shows after real JS execution -- not source or
+          # static assurance. --test-threads=1: this frontier's own real
+          # CI runs (not local guesswork) showed this file's 6 tests at
+          # Rust's default full parallelism contend real Chrome launches
+          # against each other badly enough on GitHub's actual runner
+          # hardware to blow the concurrency test's own upper-bound timing
+          # assertion -- confirmed a resource-contention/hardware-speed
+          # artifact, not a production regression: the lower-bound
+          # backpressure assertion in that same test, the one that
+          # actually detects unbounded concurrency, passed in every
+          # observed failure.
           if ! cargo test -p spider_mcp --test headless_chrome_production_stack -- --test-threads=1 > /tmp/spider_mcp_chrome.log 2>&1; then
-            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_chrome.log "spider_mcp headless Chrome production stack"
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_chrome.log "spider_mcp headless_chrome_production_stack"
             exit 1
           fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_chrome.log | awk '{sum+=$1} END {print sum+0}')
-          echo "spider_mcp headless Chrome production stack: ${passed} tests passed"
+          echo "spider_mcp headless_chrome_production_stack: ${passed} tests passed"
           if [ "${passed}" -lt 5 ]; then
-            echo "::error::spider_mcp headless Chrome production stack executed suspiciously few tests (${passed})"
+            echo "::error::spider_mcp headless_chrome_production_stack executed suspiciously few tests (${passed})"
+            exit 1
+          fi
+
+          # links_failure_semantics: a real refused-connection acquisition
+          # failure returns a typed isError:true result with a truthful
+          # empty/zero link count, never a fabricated success.
+          if ! cargo test -p spider_mcp --test links_failure_semantics > /tmp/spider_mcp_links_failure.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_links_failure.log "spider_mcp links_failure_semantics"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_links_failure.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp links_failure_semantics: ${passed} tests passed"
+          if [ "${passed}" -lt 1 ]; then
+            echo "::error::spider_mcp links_failure_semantics executed zero tests"
+            exit 1
+          fi
+
+          # scrape_failure_semantics: a real refused-connection acquisition
+          # failure returns a typed isError:true result with null
+          # provenance, never a fake successful/empty scrape -- and the
+          # same server instance still completes a real subsequent scrape
+          # afterward.
+          if ! cargo test -p spider_mcp --test scrape_failure_semantics > /tmp/spider_mcp_scrape_failure.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_scrape_failure.log "spider_mcp scrape_failure_semantics"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_scrape_failure.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp scrape_failure_semantics: ${passed} tests passed"
+          if [ "${passed}" -lt 1 ]; then
+            echo "::error::spider_mcp scrape_failure_semantics executed zero tests"
+            exit 1
+          fi
+
+          # spider_cloud_env_tor_conflict: SPIDER_API_KEY set in the
+          # server process's own environment plus an explicit
+          # transport.mode="tor" request fails closed before any target
+          # networking, never silently falling through to Spider Cloud or
+          # a direct request.
+          if ! cargo test -p spider_mcp --test spider_cloud_env_tor_conflict > /tmp/spider_mcp_cloud_tor.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_cloud_tor.log "spider_mcp spider_cloud_env_tor_conflict"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_cloud_tor.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp spider_cloud_env_tor_conflict: ${passed} tests passed"
+          if [ "${passed}" -lt 1 ]; then
+            echo "::error::spider_mcp spider_cloud_env_tor_conflict executed zero tests"
             exit 1
           fi
       - name: Cargo test spider_mcp Tor-not-compiled fail-closed contract

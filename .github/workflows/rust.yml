@@ -55,8 +55,10 @@ jobs:
         # independent structural guard against a silent zero-test regression
         # (e.g. every target accidentally becoming feature-gated out).
         run: |
-          set -o pipefail
-          cargo test -p spider_mcp 2>&1 | tee /tmp/spider_mcp_behavioral.log
+          if ! cargo test -p spider_mcp > /tmp/spider_mcp_behavioral.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_behavioral.log "spider_mcp shipping behavioral contract"
+            exit 1
+          fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_behavioral.log | awk '{sum+=$1} END {print sum+0}')
           echo "spider_mcp shipping behavioral contract: ${passed} tests passed across all targets"
           if [ "${passed}" -lt 150 ]; then
@@ -72,8 +74,10 @@ jobs:
         # typed, never silently falling through to a direct request the
         # operator explicitly tried to route through Tor.
         run: |
-          set -o pipefail
-          cargo test -p spider_mcp --no-default-features --features "feed,sitemap,news_sitemap,robots_sitemap" --test no_transport_tor_feature 2>&1 | tee /tmp/spider_mcp_no_tor.log
+          if ! cargo test -p spider_mcp --no-default-features --features "feed,sitemap,news_sitemap,robots_sitemap" --test no_transport_tor_feature > /tmp/spider_mcp_no_tor.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_no_tor.log "spider_mcp Tor-not-compiled fail-closed contract"
+            exit 1
+          fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_no_tor.log | awk '{sum+=$1} END {print sum+0}')
           echo "spider_mcp Tor-not-compiled contract: ${passed} tests passed"
           if [ "${passed}" -lt 1 ]; then

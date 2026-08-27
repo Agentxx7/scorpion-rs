@@ -152,7 +152,7 @@ fn parse_id(prefix: &'static str, input: &str) -> Result<[u8; ID_BYTES], Identit
         return Err(IdentityParseError::InvalidBody);
     }
     let mut bytes = [0u8; ID_BYTES];
-    for (index, pair) in body.chunks_exact(2).enumerate() {
+    for (index, pair) in body.as_chunks::<2>().0.iter().enumerate() {
         // Reject anything but lowercase hex — no uppercase, no whitespace,
         // no alternate encodings. Exactly one valid textual form per value.
         let hi = hex_nibble(pair[0]).ok_or(IdentityParseError::InvalidBody)?;

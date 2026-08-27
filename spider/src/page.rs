@@ -2994,21 +2994,37 @@ pub fn validate_empty(content: &Option<Vec<u8>>, is_success: bool) -> bool {
 /// (e.g. ERR_TUNNEL_CONNECTION_FAILED, ERR_NAME_NOT_RESOLVED, etc.).
 ///
 /// Chrome renders these pages locally when proxy/network errors occur.
-/// They arrive with HTTP 200 and ~157KB of content (CSS, dino game JS,
-/// base64 error images). Detection uses the structural tail: Chrome error
-/// pages always end with `};</script></html>` (no `</body>` tag) and
-/// contain `"errorCode":"ERR` in the `loadTimeDataRaw` JSON blob.
+/// They arrive with HTTP 200 and ~157KB-255KB of content (CSS, dino game
+/// JS, base64 error images). Detection uses the structural tail: the
+/// rendered template's `<script>` block (the `loadTimeDataRaw` JSON blob)
+/// always closes with `};</script>`, immediately followed by either
+/// `</html>` directly, or `</body></html>` — **both are the real
+/// template**, confirmed against genuine local headless-Chrome output
+/// (SCORPION_CANONICAL_SMART_CHROME_FAILURE_STATUS_TRUTHFULNESS_001's own
+/// preflight reproduced a live `ERR_CONNECTION_REFUSED` interstitial
+/// ending `};</script></body></html>` — the `</body>`-less form this
+/// function originally required exclusively is only one of at least two
+/// real variants across Chrome/Chromium builds, not a universal rule).
+/// The `errorCode` needle must additionally be present in the
+/// `loadTimeDataRaw` JSON blob.
 ///
 /// Two checks, both on the last 4KB only — O(1) for all non-error pages:
-/// 1. `ends_with(b"};</script></html>")` — Chrome error page structure
+/// 1. `ends_with(b"};</script></html>")`, optionally with `</body>`
+///    immediately before `</html>` — Chrome error page structure
 /// 2. `"errorCode":"ERR` present — Chrome-internal JSON key
 ///
-/// Zero false positives: real websites always have `</body>` before
-/// `</html>`, and never contain `loadTimeDataRaw` with `errorCode`.
+/// Zero false positives: real websites don't happen to close a `<script>`
+/// block with the literal bytes `};</script>` immediately before their
+/// closing `</body>`/`</html>` tags *and* embed `loadTimeDataRaw` JSON
+/// with an `errorCode` key — the combination of the exact structural tail
+/// AND the needle is what makes this safe, not the presence/absence of
+/// `</body>` alone.
 #[cfg(not(feature = "decentralized"))]
 #[inline]
 pub fn is_chrome_error_page(content: &[u8]) -> bool {
-    const TAIL: &[u8] = b"};</script></html>";
+    const SCRIPT_CLOSE: &[u8] = b"};</script>";
+    const BODY_CLOSE: &[u8] = b"</body>";
+    const HTML_CLOSE: &[u8] = b"</html>";
     const NEEDLE: &[u8] = b"\"errorCode\":\"ERR";
 
     if content.len() < 500 {
@@ -3022,7 +3038,15 @@ pub fn is_chrome_error_page(content: &[u8]) -> bool {
     }
     let trimmed = &content[..end];
 
-    if !trimmed.ends_with(TAIL) {
+    if !trimmed.ends_with(HTML_CLOSE) {
+        return false;
+    }
+    let before_html = &trimmed[..trimmed.len() - HTML_CLOSE.len()];
+    // Tolerate an explicit `</body>` immediately before `</html>` — both
+    // are the genuine rendered template (see doc comment above).
+    let before_closing_tags = before_html.strip_suffix(BODY_CLOSE).unwrap_or(before_html);
+
+    if !before_closing_tags.ends_with(SCRIPT_CLOSE) {
         return false;
     }
 
@@ -3430,6 +3454,20 @@ pub fn build(url: &str, mut res: PageResponse) -> Page {
         } else {
             StatusCode::from_u16(599).unwrap_or(StatusCode::BAD_GATEWAY)
         };
+        // Truthfulness (SCORPION_CANONICAL_SMART_CHROME_FAILURE_STATUS_
+        // TRUTHFULNESS_001): whatever `observed_status_code` was carrying
+        // (typically a real `200` — genuinely observed by CDP, but for
+        // loading Chrome's own internal `chrome-error://chromewebdata`
+        // interstitial resource, not the target's origin response) no
+        // longer describes a real observation of the *target's* HTTP
+        // response now that the content is confirmed to be that
+        // interstitial. `status_code` above is spider's own synthetic
+        // classification of the underlying `net::ERR_*` failure; pairing
+        // it with a stale "observed 200" would let a caller believe a
+        // real origin response was seen when none was. Matches the
+        // established plain-HTTP failure contract (`observed_status_code
+        // == None` whenever no genuine origin response was observed).
+        res.observed_status_code = None;
     }
 
     // Empty / shell body but success status — upstream returned 200 with
@@ -13802,17 +13840,50 @@ fn test_chrome_error_page_under_500_bytes() {
     );
 }
 
+// SCORPION_CANONICAL_SMART_CHROME_FAILURE_STATUS_TRUTHFULNESS_001: this
+// test previously asserted the OPPOSITE of what real Chrome/Chromium
+// actually renders and asserted `!is_chrome_error_page(...)` for a
+// `</body></html>`-terminated interstitial, on the documented assumption
+// that "Chrome error pages always end with `};</script></html>` (no
+// `</body>` tag)". That assumption was disproven by a real local
+// headless-Chrome reproduction (a genuine `ERR_CONNECTION_REFUSED`
+// interstitial whose actual rendered tail is
+// `};</script></body></html>`) during this frontier's own preflight —
+// the false assertion here was directly downstream of, and silently
+// masked, the production defect: `is_chrome_error_page` rejecting the
+// real template meant `build()`'s reclassification never fired, so a
+// refused connection under `chrome`/`smart` surfaced as a truthful-
+// looking `status_code: 200 OK`. `</body>` immediately before `</html>`
+// is now a recognized, legitimate variant of the same template (see
+// `is_chrome_error_page`'s own doc comment).
 #[cfg(not(feature = "decentralized"))]
 #[test]
-fn test_chrome_error_page_missing_tail() {
+fn test_chrome_error_page_with_body_close_tag_matches() {
     let padding = "x".repeat(1000);
     let html = format!(
         "<html><style>{padding}</style>\
          <script>var loadTimeDataRaw = {{\"errorCode\":\"ERR_FAIL\"}};</script></body></html>"
     );
     assert!(
+        is_chrome_error_page(html.as_bytes()),
+        "the real rendered Chrome error-page template (confirmed via a genuine local \
+         headless-Chrome ERR_CONNECTION_REFUSED reproduction) closes with the script-tag \
+         plus </body></html> tail -- this is not a mismatch, it's the real template"
+    );
+}
+
+#[cfg(not(feature = "decentralized"))]
+#[test]
+fn test_chrome_error_page_genuinely_wrong_tail_still_rejected() {
+    let padding = "x".repeat(1000);
+    let html = format!(
+        "<html><style>{padding}</style>\
+         <script>var loadTimeDataRaw = {{\"errorCode\":\"ERR_FAIL\"}};</script></section></html>"
+    );
+    assert!(
         !is_chrome_error_page(html.as_bytes()),
-        "wrong tail (has </body>) should not match"
+        "a genuinely different structural tail (neither the bare nor the </body> variant \
+         of the real template) must still be rejected"
     );
 }
 

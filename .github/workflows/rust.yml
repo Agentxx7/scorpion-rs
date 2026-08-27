@@ -447,6 +447,16 @@ jobs:
           cargo test -p spider --test scrape_collector_drain --no-run
           cargo test -p spider --test scrape_collector_drain --features smart --no-run
           cargo test -p spider --test scrape_collector_drain --features sitemap --no-run
+      # SCORPION_CANONICAL_SMART_CHROME_FAILURE_STATUS_TRUTHFULNESS_001:
+      # same defensive pattern as the two pre-build steps above — this
+      # target's own feature configs (chrome, smart) are already very
+      # likely fully cached by the chrome/smart pre-build steps earlier
+      # in this job, but pre-built explicitly here too so this step's
+      # correctness does not depend on that happening to be true.
+      - name: Pre-build spider smart/chrome failure-status truthfulness regression binaries (network still open)
+        run: |
+          cargo test -p spider --test smart_chrome_failure_status_truthfulness --features chrome --no-run
+          cargo test -p spider --test smart_chrome_failure_status_truthfulness --features smart --no-run
       # Runtime egress denial for the deterministic phase — the primary
       # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
       # alone. GitHub-hosted ubuntu-latest runners grant the runner user
@@ -938,6 +948,43 @@ jobs:
             exit 1
           fi
           echo "END: spider scrape collector drain regression (sitemap)"
+      # SCORPION_CANONICAL_SMART_CHROME_FAILURE_STATUS_TRUTHFULNESS_001:
+      # mandatory ordinary CI evidence that a refused connection under
+      # chrome/smart acquisition never surfaces as a truthful HTTP 200 --
+      # real headless Chrome (already available on this runner, same as
+      # the CAPTCHA CI-portable evidence steps above), loopback fixtures
+      # only, no RUN_LIVE_TESTS. --test-threads=1 for chrome-launch
+      # stability, matching this repo's own established convention (see
+      # spider_cli/spider_mcp's own headless_chrome_production_stack.rs
+      # CI usage).
+      - name: Cargo test spider smart/chrome failure-status truthfulness regression (chrome)
+        run: |
+          echo "BEGIN: spider smart/chrome failure-status truthfulness regression (chrome)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test smart_chrome_failure_status_truthfulness --features chrome -- --test-threads=1 > /tmp/step17.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step17.log "spider smart/chrome failure-status truthfulness regression (chrome)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step17.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider smart/chrome failure-status truthfulness regression (chrome): ${passed} tests passed"
+          if [ "${passed}" -lt 4 ]; then
+            echo "::error::spider smart/chrome failure-status truthfulness regression (chrome) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider smart/chrome failure-status truthfulness regression (chrome)"
+      - name: Cargo test spider smart/chrome failure-status truthfulness regression (smart)
+        run: |
+          echo "BEGIN: spider smart/chrome failure-status truthfulness regression (smart)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test smart_chrome_failure_status_truthfulness --features smart -- --test-threads=1 > /tmp/step18.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step18.log "spider smart/chrome failure-status truthfulness regression (smart)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step18.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider smart/chrome failure-status truthfulness regression (smart): ${passed} tests passed"
+          if [ "${passed}" -lt 6 ]; then
+            echo "::error::spider smart/chrome failure-status truthfulness regression (smart) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider smart/chrome failure-status truthfulness regression (smart)"
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

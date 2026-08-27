@@ -38,6 +38,48 @@ jobs:
         # to exactly the one security property, not the broader spider_mcp
         # behavioral-contract CI coverage (a separate, tracked gap).
         run: cargo test -p spider_mcp --lib tools::scrape::tests::advisory_rustsec_2026_0187_deeply_nested_pdf_cannot_abort_shipping_process -- --exact
+      - name: Cargo test spider_mcp shipping behavioral contract
+        # SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_ENFORCEMENT_001: package-level
+        # execution (no test-name filter of any kind) under spider_mcp's
+        # actual default (shipping) features -- structurally immune to a
+        # fragile filter silently matching zero tests, since there is no
+        # filter to typo. Runs the full lib unit suite plus every real MCP
+        # stdio/JSON-RPC end-to-end suite: the real compiled spider-mcp
+        # binary spawned as a genuine subprocess, driven over real
+        # JSON-RPC/stdio, against real 127.0.0.1 fixture servers -- zero
+        # public network, zero secrets, zero RUN_LIVE_TESTS gate. Covers
+        # crawl/scrape/links acquisition-failure semantics (never a fake
+        # successful/empty result), background-crawl-status semantics, the
+        # headless Chrome production stack, and the Spider Cloud + Tor
+        # conflict fail-closed seam. The count check below is a second,
+        # independent structural guard against a silent zero-test regression
+        # (e.g. every target accidentally becoming feature-gated out).
+        run: |
+          set -o pipefail
+          cargo test -p spider_mcp 2>&1 | tee /tmp/spider_mcp_behavioral.log
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_behavioral.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp shipping behavioral contract: ${passed} tests passed across all targets"
+          if [ "${passed}" -lt 150 ]; then
+            echo "::error::spider_mcp behavioral contract executed suspiciously few tests (${passed}) -- refusing to treat this as proof"
+            exit 1
+          fi
+      - name: Cargo test spider_mcp Tor-not-compiled fail-closed contract
+        # A dedicated, deterministic suite that only compiles/runs without
+        # the transport_tor feature -- entirely absent from the default
+        # (transport_tor-enabled) build above, and previously never
+        # executed by any CI configuration at all. An explicit
+        # transport.mode = "tor" request against this build must fail
+        # typed, never silently falling through to a direct request the
+        # operator explicitly tried to route through Tor.
+        run: |
+          set -o pipefail
+          cargo test -p spider_mcp --no-default-features --features "feed,sitemap,news_sitemap,robots_sitemap" --test no_transport_tor_feature 2>&1 | tee /tmp/spider_mcp_no_tor.log
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_no_tor.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp Tor-not-compiled contract: ${passed} tests passed"
+          if [ "${passed}" -lt 1 ]; then
+            echo "::error::spider_mcp Tor-not-compiled contract executed zero tests"
+            exit 1
+          fi
       - name: Cargo test spider_agent (default)
         run: cargo test -p spider_agent
       - name: Cargo test spider_agent (openai + search_serper)

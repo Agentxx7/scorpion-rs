@@ -909,6 +909,61 @@ jobs:
         run: cargo test -p spider_cli --bin scorpion
       - name: Cargo test default shipping binary RUN and SHOW fixtures
         run: cargo test -p spider_cli --test research_cli
+      - name: Cargo test default shipping CLI transport/crawl/scrape/download/fetch contract
+        # SCORPION_CANONICAL_CLI_SHIPPING_CONTRACT_CI_ENFORCEMENT_001:
+        # transport_cli.rs is the real, comprehensive crawl/scrape/
+        # download/fetch shipping-contract suite (despite its name) --
+        # spawns the actual compiled scorpion binary against deterministic
+        # local HTTP + fake-SOCKS5 fixtures (no real Tor/public network),
+        # asserting exact exit codes (0 on success, 2 on a refused
+        # acquisition), exact stdout shape, and truthful stderr content.
+        # #![cfg(all(feature = "fetch", feature = "feed", feature =
+        # "transport_tor"))] -- all three are default (shipping) features,
+        # so this already represents the real shipping configuration; it
+        # was never executed by any CI configuration before this frontier.
+        run: |
+          if ! cargo test -p spider_cli --test transport_cli > /tmp/spider_cli_transport.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_cli_transport.log "spider_cli transport_cli"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_cli_transport.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_cli transport_cli: ${passed} tests passed"
+          if [ "${passed}" -lt 25 ]; then
+            echo "::error::spider_cli transport_cli executed too few tests (${passed})"
+            exit 1
+          fi
+      - name: Cargo test default shipping CLI search contract
+        run: |
+          if ! cargo test -p spider_cli --test search_cli > /tmp/spider_cli_search.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_cli_search.log "spider_cli search_cli"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_cli_search.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_cli search_cli: ${passed} tests passed"
+          if [ "${passed}" -lt 2 ]; then
+            echo "::error::spider_cli search_cli executed too few tests (${passed})"
+            exit 1
+          fi
+      - name: Cargo test default shipping CLI headless Chrome production stack
+        # --test-threads=1: this frontier found the same real,
+        # intermittent resource-contention flake already diagnosed and
+        # fixed for the sibling spider_mcp headless Chrome suite (real
+        # Chrome launches contending with each other under full test-
+        # runner parallelism) -- reproduced locally under default
+        # parallelism, absent when serialized. Applied proactively rather
+        # than waiting to rediscover it in real CI; not a production
+        # defect, and no test assertion was weakened.
+        run: |
+          if ! cargo test -p spider_cli --test headless_chrome_production_stack -- --test-threads=1 > /tmp/spider_cli_chrome.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_cli_chrome.log "spider_cli headless_chrome_production_stack"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_cli_chrome.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_cli headless_chrome_production_stack: ${passed} tests passed"
+          if [ "${passed}" -lt 4 ]; then
+            echo "::error::spider_cli headless_chrome_production_stack executed too few tests (${passed})"
+            exit 1
+          fi
 
   # Separately classified: the same 13 live-network tests skipped above,
   # unfiltered, gated behind `RUN_LIVE_TESTS` like the `chrome` job's

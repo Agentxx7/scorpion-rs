@@ -39,30 +39,64 @@ jobs:
         # behavioral-contract CI coverage (a separate, tracked gap).
         run: cargo test -p spider_mcp --lib tools::scrape::tests::advisory_rustsec_2026_0187_deeply_nested_pdf_cannot_abort_shipping_process -- --exact
       - name: Cargo test spider_mcp shipping behavioral contract
-        # SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_ENFORCEMENT_001: package-level
-        # execution (no test-name filter of any kind) under spider_mcp's
-        # actual default (shipping) features -- structurally immune to a
-        # fragile filter silently matching zero tests, since there is no
-        # filter to typo. Runs the full lib unit suite plus every real MCP
-        # stdio/JSON-RPC end-to-end suite: the real compiled spider-mcp
+        # SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_ENFORCEMENT_001: explicit
+        # target list (lib, bin, and every deterministic tests/*.rs suite
+        # except headless_chrome_production_stack, which gets its own
+        # dedicated, serialized step below -- see that step's comment for
+        # why) under spider_mcp's actual default (shipping) features. Not a
+        # name-based positional filter (immune to a typo silently matching
+        # zero tests): every `--test`/`--lib`/`--bin` value here is a real
+        # Cargo target selector that errors loudly if it doesn't exist.
+        # Runs the full lib unit suite plus every real MCP stdio/JSON-RPC
+        # end-to-end suite covered here: the real compiled spider-mcp
         # binary spawned as a genuine subprocess, driven over real
         # JSON-RPC/stdio, against real 127.0.0.1 fixture servers -- zero
         # public network, zero secrets, zero RUN_LIVE_TESTS gate. Covers
         # crawl/scrape/links acquisition-failure semantics (never a fake
-        # successful/empty result), background-crawl-status semantics, the
-        # headless Chrome production stack, and the Spider Cloud + Tor
-        # conflict fail-closed seam. The count check below is a second,
-        # independent structural guard against a silent zero-test regression
-        # (e.g. every target accidentally becoming feature-gated out).
+        # successful/empty result), background-crawl-status semantics, and
+        # the Spider Cloud + Tor conflict fail-closed seam. The count check
+        # below is a second, independent structural guard against a silent
+        # zero-test regression (e.g. every target accidentally becoming
+        # feature-gated out).
         run: |
-          if ! cargo test -p spider_mcp > /tmp/spider_mcp_behavioral.log 2>&1; then
+          if ! cargo test -p spider_mcp --lib --bin spider-mcp \
+            --test crawl_failure_semantics \
+            --test crawl_status_failure_semantics \
+            --test links_failure_semantics \
+            --test scrape_failure_semantics \
+            --test spider_cloud_env_tor_conflict \
+            > /tmp/spider_mcp_behavioral.log 2>&1; then
             bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_behavioral.log "spider_mcp shipping behavioral contract"
             exit 1
           fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_behavioral.log | awk '{sum+=$1} END {print sum+0}')
           echo "spider_mcp shipping behavioral contract: ${passed} tests passed across all targets"
-          if [ "${passed}" -lt 150 ]; then
+          if [ "${passed}" -lt 145 ]; then
             echo "::error::spider_mcp behavioral contract executed suspiciously few tests (${passed}) -- refusing to treat this as proof"
+            exit 1
+          fi
+      - name: Cargo test spider_mcp headless Chrome production stack
+        # A dedicated, serialized step for headless_chrome_production_stack
+        # alone: this suite launches real Chrome per test, and this
+        # frontier discovered (reproduced locally with `taskset -c 0,1`,
+        # simulating a CPU-constrained runner) that running its 6 tests at
+        # Rust's default full parallelism contends real Chrome launches
+        # against each other badly enough to blow the concurrency test's
+        # own generous upper-bound timing assertion -- a resource-
+        # contention artifact of test-runner parallelism, not a production
+        # regression: the same assertions pass reliably, repeatedly, under
+        # identical CPU constraint once serialized (--test-threads=1),
+        # including the concurrency test's own lower-bound backpressure
+        # check. No test assertion changed.
+        run: |
+          if ! cargo test -p spider_mcp --test headless_chrome_production_stack -- --test-threads=1 > /tmp/spider_mcp_chrome.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_chrome.log "spider_mcp headless Chrome production stack"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_chrome.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp headless Chrome production stack: ${passed} tests passed"
+          if [ "${passed}" -lt 5 ]; then
+            echo "::error::spider_mcp headless Chrome production stack executed suspiciously few tests (${passed})"
             exit 1
           fi
       - name: Cargo test spider_mcp Tor-not-compiled fail-closed contract

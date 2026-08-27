@@ -1082,7 +1082,7 @@ jobs:
         # so this already represents the real shipping configuration; it
         # was never executed by any CI configuration before this frontier.
         run: |
-          if ! cargo test -p spider_cli --test transport_cli > /tmp/spider_cli_transport.log 2>&1; then
+          if ! cargo test -p spider_cli --test transport_cli -- --test-threads=1 > /tmp/spider_cli_transport.log 2>&1; then
             bash .github/scripts/report-test-step-failure.sh /tmp/spider_cli_transport.log "spider_cli transport_cli"
             exit 1
           fi

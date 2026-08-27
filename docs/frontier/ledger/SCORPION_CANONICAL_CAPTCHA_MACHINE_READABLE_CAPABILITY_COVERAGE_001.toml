@@ -216,44 +216,34 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against e714af00 (SCORPION_CANONICAL_WEBSITE_SCRAPE_
-# COLLECTOR_RACE_FIX_001's structural fix for the Website::scrape()/
-# scrape_raw()/scrape_smart()/scrape_sitemap() collector-drain race),
-# which touched BOTH .github/workflows/rust.yml (three new spider_core
-# CI steps for the new regression suite) and spider/src/website.rs —
-# both already-established closure_relevant_files for this capability
-# regardless of stage (ci_workflow_file unconditionally; website.rs via
-# this capability's own WIRED chain, as this ledger's own history
-# already notes) — invalidating the prior reviewed_commit's (c93eec03)
-# byte-identity binding on both, exactly as SCORPION_CANONICAL_
-# CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's own drift check
-# requires. Pure attestation-only field update: no ADVERSARIALLY_
-# VERIFIED evidence or bypass-attempt entry below changed, and no
-# CAPTCHA-relevant behavior changed at all. Confirmed directly:
-# e714af00's website.rs diff is scoped entirely to four `scrape*`
-# collector-loop bodies (removing a racy oneshot-vs-broadcast-receiver
-# `biased select!` in favor of draining `rx2.recv().await` alone) —
-# none of `crawl`/`crawl_concurrent`/`crawl_establish` (the functions
-# this capability's own [stages.WIRED] chain actually cites) were
-# touched, confirmed empirically by re-running this harness itself:
-# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
-# source` and `production_reachable_claims_are_grep_verified_against_
-# shipping_manifests` both still passed unchanged against e714af00's
-# working tree; only the two commit-content-identity checks
-# (necessarily, since closure_relevant_files' byte-identity is keyed to
-# a specific commit and both bound files' content did change) required
-# this re-bind. The rust.yml diff adds three new, non-gated
-# `cargo test -p spider --test scrape_collector_drain [--features ...]`
-# steps to the unrelated `spider_core` job, immediately after (not
-# replacing or reordering) the existing credential-cache regression
-# step — this capability's own CAPTCHA CI step (test_targets/
-# feature_set/positional_filters/exact/skip all bound by
-# [stages.CI_ENFORCED] below) is byte-for-byte untouched in that diff.
+# Re-attested against 1d72af62 (SCORPION_CANONICAL_WEBSITE_SCRAPE_
+# COLLECTOR_RACE_FIX_001's own follow-up CI fix: a pre-build step for
+# the new scrape_collector_drain regression suite's three feature
+# configs, added after the real remote spider_core run proved the
+# `--features sitemap` config's own transitive dependency (chrono, via
+# the `sitemap` crate) was never fetched before network lockdown --
+# same gap class this file's own CAPTCHA pre-build step comment already
+# documents), which touched only .github/workflows/rust.yml — this
+# capability's own unconditional closure_relevant_file — invalidating
+# the prior reviewed_commit's (e714af00) byte-identity binding on it.
+# Pure attestation-only field update: no ADVERSARIALLY_VERIFIED
+# evidence or bypass-attempt entry below changed, and no CAPTCHA-
+# relevant behavior changed at all. Confirmed directly: 1d72af62's only
+# diff is one new `Pre-build spider scrape collector drain regression
+# binaries (network still open)` step (three `cargo test ... --no-run`
+# lines) added immediately after the existing `Pre-build CAPTCHA
+# CI-portable evidence binaries` step and before the runtime egress-
+# denial step — this capability's own CAPTCHA pre-build step and its
+# later CI-enforced step (test_targets/feature_set/positional_filters/
+# exact/skip all bound by [stages.CI_ENFORCED] below) are both byte-
+# for-byte untouched in that diff; spider/src/website.rs is untouched
+# by this commit (last touched by e714af00, already accounted for by
+# the prior re-bind's own reasoning, still valid and unchanged since).
 # Re-enumerated every CLOSED capability binding rust.yml before this
 # re-bind (grep across every docs/frontier/ledger/*.toml for
 # `ci_workflow_file`/`[stages.CLOSED]`): CAPTCHA is the only one that
 # exists in this repository.
-reviewed_commit = "e714af00b4836e0ea1a971c94a88450f0801aaec"
+reviewed_commit = "1d72af62b1f02744940ae7e90f5bcf482c7fa080"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -293,28 +283,19 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
 # present and independently satisfied — verified directly against
 # closed_requires_every_declared_proof_class_independently before this
-# table was written. closed_commit re-bound to e714af00 for the exact
+# table was written. closed_commit re-bound to 1d72af62 for the exact
 # same reason reviewed_commit above was: .github/workflows/rust.yml
-# (this capability's own CI_ENFORCED.ci_workflow_file) and
-# spider/src/website.rs (this capability's own WIRED-chain file) are
-# both closure_relevant_files, and the prior closed_commit (c93eec03)
-# no longer binds either byte-for-byte once SCORPION_CANONICAL_
-# WEBSITE_SCRAPE_COLLECTOR_RACE_FIX_001's production fix + three new CI
-# steps landed. Every other closure_relevant_file (spider/tests/
-# closure_harness*.rs, spider/Cargo.toml, every known shipping
-# artifact's Cargo.toml, every other IMPLEMENTED/VERIFIED/WIRED-cited
-# file, spider/src/page.rs) is untouched by that commit — confirmed
-# directly, its diff is .github/workflows/rust.yml (three new
-# `cargo test -p spider --test scrape_collector_drain` steps in the
-# `spider_core` job, none replacing or altering the existing CAPTCHA
-# CI step) and spider/src/website.rs (four `scrape*` collector-loop
-# bodies only — `crawl`/`crawl_concurrent`/`crawl_establish`, the
-# functions this capability's [stages.WIRED] chain actually cites, are
-# byte-for-byte unchanged, confirmed by this same harness's own
-# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
-# source` still passing against e714af00 unmodified). No CAPTCHA
-# detection, solving, provider routing, frame/OOPIF handling, or CI
-# evidence this capability cites changed at all — the change is scoped
-# entirely to a different subsystem (Website::scrape()'s own collector
-# termination correctness).
-closed_commit = "e714af00b4836e0ea1a971c94a88450f0801aaec"
+# (this capability's own CI_ENFORCED.ci_workflow_file) no longer binds
+# byte-for-byte once the new pre-build step for scrape_collector_drain's
+# three feature configs landed. Every other closure_relevant_file
+# (spider/tests/closure_harness*.rs, spider/Cargo.toml, every known
+# shipping artifact's Cargo.toml, every other IMPLEMENTED/VERIFIED/
+# WIRED-cited file, spider/src/website.rs, spider/src/page.rs) is
+# untouched by this commit — confirmed directly, its diff is
+# .github/workflows/rust.yml only, adding one new pre-build step
+# (network still open, `--no-run` only) immediately after the existing
+# CAPTCHA pre-build step; this capability's own CAPTCHA pre-build step
+# and CI-enforced step are both byte-for-byte unchanged in that diff.
+# No CAPTCHA detection, solving, provider routing, frame/OOPIF
+# handling, or CI evidence this capability cites changed at all.
+closed_commit = "1d72af62b1f02744940ae7e90f5bcf482c7fa080"

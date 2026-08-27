@@ -8063,41 +8063,51 @@ impl Website {
                 self.pages = Some(Vec::new());
             }
 
-            // Signal channel to notify when crawl is done
-            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-
             let crawl = async move {
                 w.crawl().await;
+                // Dropping the sender (via unsubscribe) is what the
+                // collector below relies on to terminate: a
+                // `broadcast::Receiver::recv()` structurally guarantees
+                // every already-published message is yielded (`Ok`)
+                // before the channel can ever report `Closed`, so the
+                // collector cannot exit early and discard a page that was
+                // legitimately sent — no separate completion signal is
+                // sent or raced against.
                 w.unsubscribe();
-                // Signal that crawl is complete
-                let _ = done_tx.send(());
             };
 
             let sub = async {
                 loop {
-                    tokio::select! {
-                        biased;
-                        // Check if crawl is done first
-                        _ = &mut done_rx => {
-                            break;
-                        }
-                        result = rx2.recv() => {
-                            if let Ok(page) = result {
-                                if let Some(sid) = page.signature {
-                                    self.insert_signature(sid).await;
+                    match rx2.recv().await {
+                        Ok(page) => {
+                            if let Some(sid) = page.signature {
+                                self.insert_signature(sid).await;
+                            }
+                            {
+                                let url: CaseInsensitiveString = page.get_url().into();
+                                self.insert_link(&url).await;
+                            }
+                            if let Some(p) = self.pages.as_mut() {
+                                push_page_capped(p, page);
+                                #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+                                if crate::utils::detect_system::get_process_memory_state_sync() >= 1
+                                {
+                                    Self::shed_page_html(p).await;
                                 }
-                                { let url: CaseInsensitiveString = page.get_url().into(); self.insert_link(&url).await; }
-                                if let Some(p) = self.pages.as_mut() {
-                                    push_page_capped(p, page);
-                                    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
-                                    if crate::utils::detect_system::get_process_memory_state_sync() >= 1 {
-                                        Self::shed_page_html(p).await;
-                                    }
-                                }
-                            } else {
-                                break;
                             }
                         }
+                        // Lagged: the producer outran this receiver's
+                        // ring-buffer capacity; those specific messages
+                        // are unrecoverably gone (broadcast semantics),
+                        // but the channel is NOT closed — keep draining
+                        // whatever remains rather than abandoning it,
+                        // matching the established fix for the same class
+                        // of bug in `dequeue`'s own queue-draining loop.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        // Closed: every sender is gone *and* every
+                        // already-published message has already been
+                        // yielded above — genuinely done.
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             };
@@ -8118,36 +8128,39 @@ impl Website {
                 self.pages = Some(Vec::new());
             }
 
-            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-
             let crawl = async move {
                 w.crawl_raw().await;
+                // See scrape()'s own comment: dropping the sender via
+                // unsubscribe() is the collector's sole, structurally
+                // guaranteed termination signal — recv() cannot report
+                // Closed until every already-published page is drained.
                 w.unsubscribe();
-                let _ = done_tx.send(());
             };
 
             let sub = async {
                 loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut done_rx => break,
-                        result = rx2.recv() => {
-                            if let Ok(page) = result {
-                                if let Some(sid) = page.signature {
-                                    self.insert_signature(sid).await;
+                    match rx2.recv().await {
+                        Ok(page) => {
+                            if let Some(sid) = page.signature {
+                                self.insert_signature(sid).await;
+                            }
+                            {
+                                let url: CaseInsensitiveString = page.get_url().into();
+                                self.insert_link(&url).await;
+                            }
+                            if let Some(p) = self.pages.as_mut() {
+                                push_page_capped(p, page);
+                                #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+                                if crate::utils::detect_system::get_process_memory_state_sync() >= 1
+                                {
+                                    Self::shed_page_html(p).await;
                                 }
-                                { let url: CaseInsensitiveString = page.get_url().into(); self.insert_link(&url).await; }
-                                if let Some(p) = self.pages.as_mut() {
-                                    push_page_capped(p, page);
-                                    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
-                                    if crate::utils::detect_system::get_process_memory_state_sync() >= 1 {
-                                        Self::shed_page_html(p).await;
-                                    }
-                                }
-                            } else {
-                                break;
                             }
                         }
+                        // Keep draining after a lag; only a genuinely
+                        // closed channel (fully drained) ends the loop.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             };
@@ -8167,36 +8180,39 @@ impl Website {
                 self.pages = Some(Vec::new());
             }
 
-            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-
             let crawl = async move {
                 w.crawl_smart().await;
+                // See scrape()'s own comment: dropping the sender via
+                // unsubscribe() is the collector's sole, structurally
+                // guaranteed termination signal -- recv() cannot report
+                // Closed until every already-published page is drained.
                 w.unsubscribe();
-                let _ = done_tx.send(());
             };
 
             let sub = async {
                 loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut done_rx => break,
-                        result = rx2.recv() => {
-                            if let Ok(page) = result {
-                                if let Some(sid) = page.signature {
-                                    self.insert_signature(sid).await;
+                    match rx2.recv().await {
+                        Ok(page) => {
+                            if let Some(sid) = page.signature {
+                                self.insert_signature(sid).await;
+                            }
+                            {
+                                let url: CaseInsensitiveString = page.get_url().into();
+                                self.insert_link(&url).await;
+                            }
+                            if let Some(p) = self.pages.as_mut() {
+                                push_page_capped(p, page);
+                                #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+                                if crate::utils::detect_system::get_process_memory_state_sync() >= 1
+                                {
+                                    Self::shed_page_html(p).await;
                                 }
-                                { let url: CaseInsensitiveString = page.get_url().into(); self.insert_link(&url).await; }
-                                if let Some(p) = self.pages.as_mut() {
-                                    push_page_capped(p, page);
-                                    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
-                                    if crate::utils::detect_system::get_process_memory_state_sync() >= 1 {
-                                        Self::shed_page_html(p).await;
-                                    }
-                                }
-                            } else {
-                                break;
                             }
                         }
+                        // Keep draining after a lag; only a genuinely
+                        // closed channel (fully drained) ends the loop.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             };
@@ -8216,36 +8232,39 @@ impl Website {
                 self.pages = Some(Vec::new());
             }
 
-            let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-
             let crawl = async move {
                 w.crawl_sitemap().await;
+                // See scrape()'s own comment: dropping the sender via
+                // unsubscribe() is the collector's sole, structurally
+                // guaranteed termination signal -- recv() cannot report
+                // Closed until every already-published page is drained.
                 w.unsubscribe();
-                let _ = done_tx.send(());
             };
 
             let sub = async {
                 loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut done_rx => break,
-                        result = rx2.recv() => {
-                            if let Ok(page) = result {
-                                if let Some(sid) = page.signature {
-                                    self.insert_signature(sid).await;
+                    match rx2.recv().await {
+                        Ok(page) => {
+                            if let Some(sid) = page.signature {
+                                self.insert_signature(sid).await;
+                            }
+                            {
+                                let url: CaseInsensitiveString = page.get_url().into();
+                                self.insert_link(&url).await;
+                            }
+                            if let Some(p) = self.pages.as_mut() {
+                                push_page_capped(p, page);
+                                #[cfg(all(feature = "balance", not(feature = "decentralized")))]
+                                if crate::utils::detect_system::get_process_memory_state_sync() >= 1
+                                {
+                                    Self::shed_page_html(p).await;
                                 }
-                                { let url: CaseInsensitiveString = page.get_url().into(); self.insert_link(&url).await; }
-                                if let Some(p) = self.pages.as_mut() {
-                                    push_page_capped(p, page);
-                                    #[cfg(all(feature = "balance", not(feature = "decentralized")))]
-                                    if crate::utils::detect_system::get_process_memory_state_sync() >= 1 {
-                                        Self::shed_page_html(p).await;
-                                    }
-                                }
-                            } else {
-                                break;
                             }
                         }
+                        // Keep draining after a lag; only a genuinely
+                        // closed channel (fully drained) ends the loop.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             };

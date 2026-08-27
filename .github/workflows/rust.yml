@@ -870,6 +870,59 @@ jobs:
             exit 1
           fi
           echo "END: spider credential-cache regression (chrome_remote_cache)"
+      # SCORPION_CANONICAL_WEBSITE_SCRAPE_COLLECTOR_RACE_FIX_001: mandatory
+      # ordinary CI evidence that Website::scrape()/scrape_raw()/
+      # scrape_smart()/scrape_sitemap() drain every already-published
+      # Page before terminating, instead of racing a completion signal
+      # that could discard the last-published page. Fast/local loopback
+      # fixtures only, no RUN_LIVE_TESTS gating, no `--skip`: these tests
+      # are the deterministic proof, not excluded from it. Three separate
+      # steps for three feature configurations because the fix touches
+      # four functions gated across default/`smart`/`sitemap` features,
+      # and each config exercises a materially different collector call
+      # site.
+      - name: Cargo test spider scrape collector drain regression (default features)
+        run: |
+          echo "BEGIN: spider scrape collector drain regression (default features)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test scrape_collector_drain > /tmp/step14.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step14.log "spider scrape collector drain regression (default features)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step14.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider scrape collector drain regression (default features): ${passed} tests passed"
+          if [ "${passed}" -lt 5 ]; then
+            echo "::error::spider scrape collector drain regression (default features) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider scrape collector drain regression (default features)"
+      - name: Cargo test spider scrape collector drain regression (smart)
+        run: |
+          echo "BEGIN: spider scrape collector drain regression (smart)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test scrape_collector_drain --features smart > /tmp/step15.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step15.log "spider scrape collector drain regression (smart)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step15.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider scrape collector drain regression (smart): ${passed} tests passed"
+          if [ "${passed}" -lt 5 ]; then
+            echo "::error::spider scrape collector drain regression (smart) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider scrape collector drain regression (smart)"
+      - name: Cargo test spider scrape collector drain regression (sitemap)
+        run: |
+          echo "BEGIN: spider scrape collector drain regression (sitemap)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test scrape_collector_drain --features sitemap > /tmp/step16.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step16.log "spider scrape collector drain regression (sitemap)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step16.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider scrape collector drain regression (sitemap): ${passed} tests passed"
+          if [ "${passed}" -lt 6 ]; then
+            echo "::error::spider scrape collector drain regression (sitemap) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider scrape collector drain regression (sitemap)"
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

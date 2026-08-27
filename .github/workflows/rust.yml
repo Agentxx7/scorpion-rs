@@ -432,6 +432,21 @@ jobs:
           --test captcha_browser_binding_real --test captcha_browser_frame_action_real
           --test captcha_browser_production_binding_real --test captcha_browser_oopif_action_real
           --test captcha_browser_oopif_streaming_shipping_real --features "chrome local_paligemma" --no-run
+      # SCORPION_CANONICAL_WEBSITE_SCRAPE_COLLECTOR_RACE_FIX_001: same
+      # exact gap class as the CAPTCHA pre-build step immediately above
+      # (real remote failure observed on the first push of this
+      # target's own `--features sitemap` step: "Could not resolve
+      # hostname (Could not resolve host: static.crates.io)" fetching
+      # `chrono` — the `sitemap` feature's own transitive dependency,
+      # never built anywhere else in this job before). `smart`
+      # (transitively `chrome`) is very likely already fully cached by
+      # the pre-build steps above, but is included here too so this
+      # step's own correctness does not depend on that being true.
+      - name: Pre-build spider scrape collector drain regression binaries (network still open)
+        run: |
+          cargo test -p spider --test scrape_collector_drain --no-run
+          cargo test -p spider --test scrape_collector_drain --features smart --no-run
+          cargo test -p spider --test scrape_collector_drain --features sitemap --no-run
       # Runtime egress denial for the deterministic phase — the primary
       # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
       # alone. GitHub-hosted ubuntu-latest runners grant the runner user

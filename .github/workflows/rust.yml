@@ -1025,7 +1025,7 @@ jobs:
           fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/step20.log | awk '{sum+=$1} END {print sum+0}')
           echo "spider chrome/cache provenance population regression (cache_chrome_hybrid): ${passed} tests passed"
-          if [ "${passed}" -lt 4 ]; then
+          if [ "${passed}" -lt 5 ]; then
             echo "::error::spider chrome/cache provenance population regression (cache_chrome_hybrid) executed too few tests (${passed})"
             exit 1
           fi

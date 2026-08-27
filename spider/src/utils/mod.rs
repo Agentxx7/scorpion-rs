@@ -7398,6 +7398,62 @@ pub(crate) async fn build_engine_error_page_response(
     page_response
 }
 
+/// SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_DISAMBIGUATION_001:
+/// the two non-network sources `fetch_page_html_base`/
+/// `_fetch_page_html_chrome`'s own `cached_html` local used to collapse
+/// into one undifferentiated `Option<String>` before either function
+/// ever got far enough to construct a `PageResponse` — by that point the
+/// source identity (a genuine Scorpion-cache hit vs. a caller-supplied
+/// `Website::set_seeded_html` resource) was already lost, so the
+/// `skip_browser` early return in both functions unconditionally called
+/// [`build_cached_html_page_response`], mislabeling a seeded resource as
+/// `ReconstructedCache`/`CacheLayer` — a real fact, but the *wrong* one.
+///
+/// This carries the content and its real source together from the
+/// moment each is first observed, so the correct constructor can be
+/// chosen later without re-deriving the source from the content itself
+/// (which would be guessing, not propagating a known fact).
+enum SeededOrCachedHtml {
+    /// Caller-supplied via `Website::set_seeded_html` (flows through
+    /// `Page::new_seeded_streaming` -> `fetch_page_html_seeded` ->
+    /// `fetch_page_html_base`'s own `seeded_resource` parameter, or the
+    /// direct-API `_fetch_page_html_chrome`'s `resource` parameter). No
+    /// acquisition backend of any kind is involved — the bytes never
+    /// touched a network client, a cache manager, or any other backend.
+    Seeded(String),
+    /// A genuine hit against Scorpion's own canonical
+    /// `CACACHE_MANAGER`-backed disk/mem cache (`get_cached_url`/
+    /// `get_cached_url_base`).
+    Cached(String),
+}
+
+impl SeededOrCachedHtml {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Seeded(html) | Self::Cached(html) => html,
+        }
+    }
+
+    /// Build the truthful `PageResponse` for this source, per
+    /// SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_
+    /// DISAMBIGUATION_001's own model-sufficiency finding: a genuine
+    /// cache hit gets the already-established `ReconstructedCache`/
+    /// `CacheLayer` pair; a seeded resource gets `ResponseOrigin::
+    /// Synthetic` (the enum's own reserved "not network, not
+    /// reconstructed cache" residual, never before exercised by any
+    /// production call site but structurally designed for exactly this
+    /// fact) paired with `backend: None` — no existing `BackendProvenance`
+    /// variant can truthfully claim any backend was involved when the
+    /// caller supplied the bytes directly, and inventing/misusing one
+    /// would be a false claim, not a fix.
+    fn into_page_response(self, target_url: &str) -> PageResponse {
+        match self {
+            Self::Cached(html) => build_cached_html_page_response(target_url, html),
+            Self::Seeded(html) => build_seeded_html_page_response(target_url, html),
+        }
+    }
+}
+
 #[inline]
 /// Build a cached page response from HTML.
 /// Takes `html` by value so the body is *moved* into the response rather than
@@ -7412,7 +7468,11 @@ pub(crate) async fn build_engine_error_page_response(
 /// truthfully stamps `ResponseOrigin::ReconstructedCache` /
 /// `BackendProvenance::CacheLayer` for (SCORPION_CANONICAL_CHROME_CACHE_
 /// PROVENANCE_POPULATION_001: propagating the same already-known,
-/// already-modeled fact here rather than leaving it `None`).
+/// already-modeled fact here rather than leaving it `None`). Both real
+/// callers now route through `SeededOrCachedHtml::into_page_response`
+/// (SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_
+/// DISAMBIGUATION_001), which is what keeps this true — a seeded
+/// resource is routed to [`build_seeded_html_page_response`] instead.
 pub(crate) fn build_cached_html_page_response(target_url: &str, html: String) -> PageResponse {
     PageResponse {
         content: Some(html.into_bytes()),
@@ -7421,6 +7481,24 @@ pub(crate) fn build_cached_html_page_response(target_url: &str, html: String) ->
         origin: AcquisitionOrigin::NonNetwork,
         response_origin: Some(spider_transport::ResponseOrigin::ReconstructedCache),
         backend: Some(spider_transport::BackendProvenance::CacheLayer),
+        ..Default::default()
+    }
+}
+
+#[inline]
+/// Build a page response from a caller-supplied seeded resource
+/// (`Website::set_seeded_html`). Mirrors [`build_cached_html_page_response`]'s
+/// own shape exactly (content/status/final_url/origin) — only the
+/// provenance stamp differs, per `SeededOrCachedHtml::into_page_response`'s
+/// own doc comment.
+pub(crate) fn build_seeded_html_page_response(target_url: &str, html: String) -> PageResponse {
+    PageResponse {
+        content: Some(html.into_bytes()),
+        status_code: StatusCode::OK,
+        final_url: Some(target_url.to_string()),
+        origin: AcquisitionOrigin::NonNetwork,
+        response_origin: Some(spider_transport::ResponseOrigin::Synthetic),
+        backend: None,
         ..Default::default()
     }
 }
@@ -9214,12 +9292,17 @@ pub async fn fetch_page_html_base<'h>(
     extract: Option<&mut crate::page::ChromeStreamingExtractor<'h>>,
 ) -> PageResponse {
     let skip_browser = cache_skip_browser(&cache_options);
-    let cached_html = if let Some(seeded) = seeded_resource {
+    // SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_DISAMBIGUATION_001:
+    // the source identity is captured here, at the only point either
+    // source is ever actually observed — carried alongside the content
+    // from now on instead of being collapsed into a bare `Option<String>`
+    // and lost before `PageResponse` construction.
+    let cached_html: Option<SeededOrCachedHtml> = if let Some(seeded) = seeded_resource {
         // Reject empty HTML shells from seeded resources too.
         if is_cacheable_body_empty(seeded.as_bytes()) {
             None
         } else {
-            Some(seeded)
+            Some(SeededOrCachedHtml::Seeded(seeded))
         }
     } else {
         get_cached_url(
@@ -9229,6 +9312,7 @@ pub async fn fetch_page_html_base<'h>(
             cache_namespace,
         )
         .await
+        .map(SeededOrCachedHtml::Cached)
     };
     let cached = cached_html.is_some();
 
@@ -9236,21 +9320,18 @@ pub async fn fetch_page_html_base<'h>(
     // Section D/E: covers BOTH a disk/mem cache hit and a caller-seeded
     // resource (`seeded_resource` above) — neither ever touches the
     // network, so the omitted `origin` here safely inherits
-    // `AcquisitionOrigin`'s `NonNetwork` default.
+    // `AcquisitionOrigin`'s `NonNetwork` default. The truthful
+    // ResponseOrigin/BackendProvenance distinction between the two is
+    // resolved by `into_page_response` — see its own doc comment.
     if skip_browser {
-        if let Some(html) = cached_html {
-            return PageResponse {
-                content: Some(html.into_bytes()),
-                status_code: StatusCode::OK,
-                final_url: Some(target_url.to_string()),
-                ..Default::default()
-            };
+        if let Some(source) = cached_html {
+            return source.into_page_response(target_url);
         }
     }
 
     match fetch_page_html_chrome_base(
-        if let Some(cached) = &cached_html {
-            cached.as_bytes()
+        if let Some(source) = &cached_html {
+            source.as_str().as_bytes()
         } else {
             target_url.as_bytes()
         },
@@ -9396,8 +9477,15 @@ async fn _fetch_page_html_chrome<'h>(
     };
 
     let skip_browser = cache_skip_browser(&cache_options);
-    let mut cached_html = if resource.is_some() {
-        resource
+    // SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_DISAMBIGUATION_001:
+    // same source-identity capture as `fetch_page_html_base` — see that
+    // function's own comment. `resource` is taken as-is when present
+    // (this direct-API path has never applied `fetch_page_html_base`'s
+    // own empty-shell rejection to a seeded `resource`; preserved
+    // exactly, not harmonized, since that's a separate, unrelated
+    // behavioral question this frontier does not touch).
+    let mut cached_html: Option<SeededOrCachedHtml> = if let Some(resource) = resource {
+        Some(SeededOrCachedHtml::Seeded(resource))
     } else {
         get_cached_url(
             target_url,
@@ -9406,14 +9494,15 @@ async fn _fetch_page_html_chrome<'h>(
             cache_namespace,
         )
         .await
+        .map(SeededOrCachedHtml::Cached)
     };
 
     if skip_browser {
         // `take` rather than `as_deref` so the body is moved into the response
         // instead of copied. Safe for the code below: this arm returns whenever
         // the value was `Some`, so nothing downstream can observe the `None`.
-        if let Some(html) = cached_html.take() {
-            let mut page_response = build_cached_html_page_response(target_url, html);
+        if let Some(source) = cached_html.take() {
+            let mut page_response = source.into_page_response(target_url);
             set_page_response_duration(&mut page_response, duration);
             return page_response;
         }
@@ -9424,8 +9513,8 @@ async fn _fetch_page_html_chrome<'h>(
     let mut page_response = match &page {
         page => {
             match fetch_page_html_chrome_base(
-                if let Some(cached) = &cached_html {
-                    cached.as_bytes()
+                if let Some(source) = &cached_html {
+                    source.as_str().as_bytes()
                 } else {
                     target_url.as_bytes()
                 },

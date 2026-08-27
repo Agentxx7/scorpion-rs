@@ -41,6 +41,27 @@
 //!
 //!   cargo test -p spider --test chrome_cache_provenance_population --features chrome -- --test-threads=1
 //!   cargo test -p spider --test chrome_cache_provenance_population --features cache_chrome_hybrid -- --test-threads=1
+//!
+//! SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_DISAMBIGUATION_001
+//! closes the residual loss point this file's own header already flagged:
+//! `fetch_page_html_base`/`_fetch_page_html_chrome` used to collapse a
+//! genuine cache hit (`get_cached_url`) and a caller-supplied
+//! `Website::set_seeded_html` resource into one undifferentiated
+//! `Option<String>` before `PageResponse` construction, so their
+//! `skip_browser` early returns unconditionally called
+//! `build_cached_html_page_response` — mislabeling a seeded resource as
+//! `ReconstructedCache`/`CacheLayer`. Fixed by carrying a small
+//! `SeededOrCachedHtml { Seeded(String), Cached(String) }` alongside the
+//! content from the moment either source is first observed, so no
+//! source identity is ever discarded before the correct constructor is
+//! chosen. Model-sufficiency finding: `ResponseOrigin::Synthetic` (an
+//! existing variant, never before exercised by any production call
+//! site, but structurally reserved for exactly "not network, not
+//! reconstructed cache") truthfully represents a seeded resource;
+//! `BackendProvenance` has no variant that can truthfully claim any
+//! backend was involved when the caller supplied bytes directly, so
+//! `backend` correctly stays `None` for the seeded case — an
+//! intentionally asymmetric result, not an oversight.
 
 #![cfg(feature = "chrome")]
 #![recursion_limit = "512"]
@@ -282,6 +303,87 @@ fn real_round_trip_cache_hit_reports_truthful_reconstructed_cache_origin() {
             page.backend_provenance(),
             Some(spider_transport::BackendProvenance::CacheLayer),
             "a genuine cache hit must truthfully report CacheLayer, got {:?}",
+            page.backend_provenance()
+        );
+    });
+}
+
+// ---------------------------------------------------------------------
+// (New, SCORPION_CANONICAL_SEEDED_RESOURCE_CACHE_PROVENANCE_
+// DISAMBIGUATION_001) Caller-seeded resource: must NOT be mislabeled as
+// a cache hit, must carry the correct (asymmetric) provenance, and must
+// not fabricate an observed HTTP status -- exercised through the real
+// production path (`Website::set_seeded_html` -> `crawl_establish`'s
+// chrome variant -> `Page::new_seeded_streaming` ->
+// `fetch_page_html_seeded` -> `fetch_page_html_base`'s own
+// `skip_browser` early return, the exact function this frontier fixed).
+// Target is a genuinely refused connection so a real network response
+// could never be the source of the content -- proving the seeded bytes,
+// not a fallback fetch, are what the assertions below observe.
+// ---------------------------------------------------------------------
+#[cfg(feature = "cache_chrome_hybrid")]
+#[test]
+fn seeded_resource_is_not_falsely_labeled_reconstructed_cache() {
+    run_isolated(async move {
+        let url = refused_url();
+        let seeded_content =
+            "<html><body>seeded resource content, not from cache or network</body></html>";
+
+        let mut website = Website::new(&url);
+        website
+            .with_limit(1)
+            .with_caching(true)
+            .with_cache_skip_browser(true);
+        website.set_seeded_html(Some(seeded_content.to_string()));
+        bounded(website.scrape()).await;
+
+        let page = only_page(&website);
+
+        // (4) content unchanged -- the exact seeded bytes came through.
+        assert!(
+            page.get_html().contains("seeded resource content"),
+            "seeded content must be returned unmodified, got {:?}",
+            page.get_html()
+        );
+        assert_eq!(page.status_code, StatusCode::OK);
+
+        // (5) observed_status_code is not fabricated -- no real HTTP
+        // response was ever observed for caller-supplied content.
+        assert_eq!(
+            page.observed_status_code, None,
+            "no real HTTP response was ever observed for a seeded resource, got {:?}",
+            page.observed_status_code
+        );
+
+        // The actual defect this frontier fixes: must NOT be mislabeled
+        // as a cache hit merely because it took the same skip_browser
+        // early-return branch a genuine cache hit also uses.
+        assert_ne!(
+            page.response_origin(),
+            Some(spider_transport::ResponseOrigin::ReconstructedCache),
+            "a caller-seeded resource must never be mislabeled as a cache hit"
+        );
+        assert_ne!(
+            page.backend_provenance(),
+            Some(spider_transport::BackendProvenance::CacheLayer),
+            "a caller-seeded resource must never be mislabeled as having gone through \
+             Scorpion's own cache layer"
+        );
+
+        // The truthful, asymmetric answer per this frontier's own
+        // model-sufficiency finding.
+        assert_eq!(
+            page.response_origin(),
+            Some(spider_transport::ResponseOrigin::Synthetic),
+            "a caller-seeded resource has no network/cache backend; Synthetic is the \
+             truthful ResponseOrigin, got {:?}",
+            page.response_origin()
+        );
+        assert_eq!(
+            page.backend_provenance(),
+            None,
+            "no BackendProvenance variant can truthfully claim a backend for \
+             caller-supplied content -- None is correct, not a defect, got {:?}",
             page.backend_provenance()
         );
     });

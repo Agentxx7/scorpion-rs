@@ -216,25 +216,25 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against f20fb917 (SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_
-# ENFORCEMENT_001's failure-diagnostics wiring for the two new
-# spider_mcp behavioral-contract steps), which touched .github/
-# workflows/rust.yml — this capability's own CI_ENFORCED.ci_workflow_
-# file, an unconditional closure_relevant_file regardless of stage —
-# invalidating the prior reviewed_commit's (d5765a34) byte-identity
-# binding on it, exactly as SCORPION_CANONICAL_CLOSURE_HARNESS_
-# REVIEWED_COMMIT_SELF_REFERENCE_001's own drift check requires. Pure
-# attestation-only field update: no ADVERSARIALLY_VERIFIED evidence or
-# bypass-attempt entry below changed, and no behavior this capability
-# depends on changed at all. Confirmed directly: f20fb917's only change
-# is redirecting the same two `build`-job steps' output to a log file
-# and invoking the pre-existing .github/scripts/report-test-step-
-# failure.sh on failure (the same script the `spider_core` job's own
-# CAPTCHA CI step already uses) — the `spider_core` job's own CAPTCHA
-# CI step (test_targets/feature_set/positional_filters/exact/skip all
-# bound by [stages.CI_ENFORCED] below) is byte-for-byte untouched in
-# that diff, and no other file changed.
-reviewed_commit = "f20fb917825e8ed36c237f4598386052cde5aca7"
+# Re-attested against 6cf248be (SCORPION_CANONICAL_MCP_BEHAVIORAL_CI_
+# ENFORCEMENT_001's fix for real CI resource contention in the headless
+# Chrome behavioral suite), which touched .github/workflows/rust.yml —
+# this capability's own CI_ENFORCED.ci_workflow_file, an unconditional
+# closure_relevant_file regardless of stage — invalidating the prior
+# reviewed_commit's (f20fb917) byte-identity binding on it, exactly as
+# SCORPION_CANONICAL_CLOSURE_HARNESS_REVIEWED_COMMIT_SELF_REFERENCE_001's
+# own drift check requires. Pure attestation-only field update: no
+# ADVERSARIALLY_VERIFIED evidence or bypass-attempt entry below
+# changed, and no behavior this capability depends on changed at all.
+# Confirmed directly: 6cf248be's only change is splitting the existing
+# `Cargo test spider_mcp shipping behavioral contract` step's target
+# list and adding one new dedicated `build`-job step (`Cargo test
+# spider_mcp headless Chrome production stack`, run with
+# `--test-threads=1`) — the `spider_core` job's own CAPTCHA CI step
+# (test_targets/feature_set/positional_filters/exact/skip all bound by
+# [stages.CI_ENFORCED] below) is byte-for-byte untouched in that diff,
+# and no other file changed.
+reviewed_commit = "6cf248be36bacb022dbd6d35d3c853aff3895b5c"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -274,23 +274,23 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
 # present and independently satisfied — verified directly against
 # closed_requires_every_declared_proof_class_independently before this
-# table was written. closed_commit re-bound to f20fb917 for the exact
+# table was written. closed_commit re-bound to 6cf248be for the exact
 # same reason reviewed_commit above was: .github/workflows/rust.yml
 # (this capability's own CI_ENFORCED.ci_workflow_file) is an
 # unconditional closure_relevant_file, and the prior closed_commit
-# (d5765a34) no longer binds it byte-for-byte once SCORPION_CANONICAL_
-# MCP_BEHAVIORAL_CI_ENFORCEMENT_001's failure-diagnostics wiring
-# landed. Every other closure_relevant_file (spider/tests/
-# closure_harness*.rs, spider/Cargo.toml, every known shipping
+# (f20fb917) no longer binds it byte-for-byte once SCORPION_CANONICAL_
+# MCP_BEHAVIORAL_CI_ENFORCEMENT_001's headless-Chrome resource-
+# contention fix landed. Every other closure_relevant_file (spider/
+# tests/closure_harness*.rs, spider/Cargo.toml, every known shipping
 # artifact's Cargo.toml, every other IMPLEMENTED/VERIFIED/WIRED-cited
 # file, spider/src/website.rs, spider/src/page.rs) is untouched by
 # that commit — confirmed directly, its diff is .github/workflows/
-# rust.yml only, redirecting the same two `build`-job steps' output to
-# a log file and invoking the pre-existing .github/scripts/
-# report-test-step-failure.sh on failure; the `spider_core` job's own
-# CAPTCHA CI step this capability's [stages.CI_ENFORCED] binds is
-# byte-for-byte unchanged. No CAPTCHA detection, solving, provider
-# routing, frame/OOPIF handling, or CI evidence this capability cites
-# changed at all — the change is scoped entirely to spider_mcp's own
-# behavioral CI failure diagnostics, a different subsystem.
-closed_commit = "f20fb917825e8ed36c237f4598386052cde5aca7"
+# rust.yml only, splitting one existing step's target list and adding
+# one new dedicated step for the headless Chrome suite (run with
+# --test-threads=1); the `spider_core` job's own CAPTCHA CI step this
+# capability's [stages.CI_ENFORCED] binds is byte-for-byte unchanged.
+# No CAPTCHA detection, solving, provider routing, frame/OOPIF
+# handling, or CI evidence this capability cites changed at all — the
+# change is scoped entirely to spider_mcp's own behavioral CI test
+# isolation, a different subsystem.
+closed_commit = "6cf248be36bacb022dbd6d35d3c853aff3895b5c"

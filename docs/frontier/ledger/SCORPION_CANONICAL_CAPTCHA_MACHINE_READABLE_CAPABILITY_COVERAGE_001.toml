@@ -216,46 +216,46 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against 0019209c (SCORPION_CANONICAL_CHROME_CACHE_
-# PROVENANCE_POPULATION_001's fix: Scorpion's own canonical cache-hit
-# path now truthfully stamps ResponseOrigin::ReconstructedCache /
-# BackendProvenance::CacheLayer via build_cached_html_page_response,
-# the shared constructor try_cache_shortcircuit/fetch_page_html_raw_
-# cached/_fetch_page_html_chrome already used; real Chrome/CDP
-# navigation itself was independently audited and found
-# MODEL_INSUFFICIENT for the existing BackendProvenance enum -- left
-# unchanged, None/None remains the truthful answer there), which
-# touched spider/src/utils/mod.rs, spider/src/website.rs (two existing
-# cache-shortcircuit unit tests extended with provenance assertions),
-# and .github/workflows/rust.yml — spider/src/utils/mod.rs and
-# rust.yml are both already-established closure_relevant_files for
-# this capability — invalidating the prior reviewed_commit's
-# (cd92c758) byte-identity binding on both. Pure attestation-only field
-# update: no ADVERSARIALLY_VERIFIED evidence or bypass-attempt entry
-# below changed, and no CAPTCHA-relevant behavior changed at all.
-# Confirmed directly: 0019209c's utils/mod.rs diff is scoped to
-# build_cached_html_page_response (two new field stamps) and one
-# inline skip_browser early-return refactored to call it instead of
-# duplicating the PageResponse literal -- none of this capability's
-# own [stages.WIRED] chain (challenge detection/materialization/
-# routing/action symbols) were touched, confirmed empirically by
-# re-running this harness itself:
+# Re-attested against 12b5c4a8 (SCORPION_CANONICAL_SEEDED_RESOURCE_
+# CACHE_PROVENANCE_DISAMBIGUATION_001's fix: fetch_page_html_base /
+# _fetch_page_html_chrome no longer collapse a genuine cache hit and a
+# caller-seeded Website::set_seeded_html resource into one
+# undifferentiated Option<String> before PageResponse construction --
+# a new SeededOrCachedHtml enum carries the source identity alongside
+# the content; seeded resources now truthfully get ResponseOrigin::
+# Synthetic / backend: None, established as MODEL_SUFFICIENT for
+# ResponseOrigin and MODEL_INSUFFICIENT for BackendProvenance by
+# tracing every real BackendProvenance constructor site in the
+# codebase), which touched spider/src/utils/mod.rs and
+# .github/workflows/rust.yml — both already-established
+# closure_relevant_files for this capability — invalidating the prior
+# reviewed_commit's (0019209c) byte-identity binding on both. Pure
+# attestation-only field update: no ADVERSARIALLY_VERIFIED evidence or
+# bypass-attempt entry below changed, and no CAPTCHA-relevant behavior
+# changed at all. Confirmed directly: 12b5c4a8's utils/mod.rs diff adds
+# one new private enum (SeededOrCachedHtml) + one new constructor
+# (build_seeded_html_page_response) and rewires the skip_browser early
+# returns in fetch_page_html_base/_fetch_page_html_chrome to route
+# through them instead of unconditionally calling the existing
+# build_cached_html_page_response -- none of this capability's own
+# [stages.WIRED] chain (challenge detection/materialization/routing/
+# action symbols) were touched, confirmed empirically by re-running
+# this harness itself:
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
-# shipping_manifests` both still passed unchanged against 0019209c's
+# shipping_manifests` both still passed unchanged against 12b5c4a8's
 # working tree; only the two commit-content-identity checks required
-# this re-bind. The rust.yml diff adds one new pre-build step and two
-# new, non-gated `cargo test -p spider --test chrome_cache_provenance_
-# population --features {chrome,cache_chrome_hybrid}` execution steps
-# to the `spider_core` job, all placed after (not replacing or
-# reordering) the existing smart_chrome_failure_status_truthfulness
-# steps — this capability's own CAPTCHA pre-build step and CI-enforced
-# step are both byte-for-byte untouched in that diff. Re-enumerated
-# every CLOSED capability binding rust.yml before this re-bind (grep
-# across every docs/frontier/ledger/*.toml for `ci_workflow_file`/
-# `[stages.CLOSED]`): CAPTCHA is the only one that exists in this
-# repository.
-reviewed_commit = "0019209cde703fadf09dca65c3865d79209085a8"
+# this re-bind. The rust.yml diff is a single-line threshold update (4
+# -> 5) on the existing, already-CAPTCHA-unrelated chrome_cache_
+# provenance_population (cache_chrome_hybrid) step's own nonzero-
+# passed-count guard, reflecting the one new test added to that
+# existing file -- this capability's own CAPTCHA pre-build step and
+# CI-enforced step are both byte-for-byte untouched in that diff.
+# Re-enumerated every CLOSED capability binding rust.yml before this
+# re-bind (grep across every docs/frontier/ledger/*.toml for
+# `ci_workflow_file`/`[stages.CLOSED]`): CAPTCHA is the only one that
+# exists in this repository.
+reviewed_commit = "12b5c4a835cec466d60e9c65dc54c4f4d0cfe4db"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -295,23 +295,24 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
 # present and independently satisfied — verified directly against
 # closed_requires_every_declared_proof_class_independently before this
-# table was written. closed_commit re-bound to 0019209c for the exact
+# table was written. closed_commit re-bound to 12b5c4a8 for the exact
 # same reason reviewed_commit above was: .github/workflows/rust.yml
 # (this capability's own CI_ENFORCED.ci_workflow_file) and
 # spider/src/utils/mod.rs (this capability's own WIRED-chain file) no
-# longer bind byte-for-byte once SCORPION_CANONICAL_CHROME_CACHE_
-# PROVENANCE_POPULATION_001's fix landed. Every other
+# longer bind byte-for-byte once SCORPION_CANONICAL_SEEDED_RESOURCE_
+# CACHE_PROVENANCE_DISAMBIGUATION_001's fix landed. Every other
 # closure_relevant_file (spider/tests/closure_harness*.rs,
 # spider/Cargo.toml, every known shipping artifact's Cargo.toml, every
-# other IMPLEMENTED/VERIFIED/WIRED-cited file, spider/src/page.rs) is
-# untouched by this commit — confirmed directly, its diff is
-# spider/src/utils/mod.rs (build_cached_html_page_response gaining two
-# field stamps, one inline early-return refactored to reuse it),
-# spider/src/website.rs (two existing cache-shortcircuit unit tests
-# extended with new assertions only), and .github/workflows/rust.yml
-# (one new pre-build step plus two new, non-gated execution steps in
-# the `spider_core` job; this capability's own CAPTCHA pre-build step
-# and CI-enforced step are both byte-for-byte unchanged). No CAPTCHA
-# detection, solving, provider routing, frame/OOPIF handling, or CI
-# evidence this capability cites changed at all.
-closed_commit = "0019209cde703fadf09dca65c3865d79209085a8"
+# other IMPLEMENTED/VERIFIED/WIRED-cited file, spider/src/website.rs,
+# spider/src/page.rs) is untouched by this commit — confirmed
+# directly, its diff is spider/src/utils/mod.rs (new SeededOrCachedHtml
+# enum + build_seeded_html_page_response constructor, and the
+# skip_browser early returns in fetch_page_html_base/
+# _fetch_page_html_chrome rewired to route through them) and
+# .github/workflows/rust.yml (a single-line threshold update on the
+# existing chrome_cache_provenance_population (cache_chrome_hybrid)
+# step; this capability's own CAPTCHA pre-build step and CI-enforced
+# step are both byte-for-byte unchanged). No CAPTCHA detection,
+# solving, provider routing, frame/OOPIF handling, or CI evidence this
+# capability cites changed at all.
+closed_commit = "12b5c4a835cec466d60e9c65dc54c4f4d0cfe4db"

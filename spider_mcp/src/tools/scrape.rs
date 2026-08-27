@@ -620,6 +620,61 @@ mod tests {
         pdf
     }
 
+    /// Builds a structurally valid PDF whose Catalog carries a
+    /// pathologically deeply nested array (`/X [[[...]]]`), reproducing the
+    /// exact structural condition behind RUSTSEC-2026-0187: lopdf < 0.42
+    /// recursed into its own object parser with no depth bound, and a deep
+    /// enough nesting exhausted the stack and aborted the whole process via
+    /// SIGABRT/SIGSEGV -- not a catchable panic, so `catch_unwind` around
+    /// the call site (see `extract_pdf_text`) could never contain it. Uses
+    /// the same offset-accurate object/xref/trailer construction as
+    /// `pdf_fixture` so the parser reaches real object parsing instead of
+    /// rejecting the file early on an unrelated xref-format error.
+    /// `depth` matches the advisory's own proof-of-concept (10,380) to
+    /// guarantee genuine stack exhaustion on the vulnerable parser, well
+    /// past a coincidental/accidental resource limit.
+    fn deeply_nested_array_pdf_fixture(depth: usize) -> Vec<u8> {
+        let mut catalog_extra = String::with_capacity(depth * 2 + 16);
+        catalog_extra.push_str("/X ");
+        catalog_extra.extend(std::iter::repeat_n('[', depth));
+        catalog_extra.extend(std::iter::repeat_n(']', depth));
+
+        let mut objects = Vec::<(usize, Vec<u8>)>::new();
+        objects.push((
+            1,
+            format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>").into_bytes(),
+        ));
+        objects.push((2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()));
+        objects.push((
+            3,
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> >>".to_vec(),
+        ));
+        objects.sort_by_key(|(id, _)| *id);
+
+        let mut pdf = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
+        let mut offsets = vec![0usize; objects.len() + 1];
+        for (id, body) in &objects {
+            offsets[*id] = pdf.len();
+            pdf.extend_from_slice(format!("{id} 0 obj\n").as_bytes());
+            pdf.extend_from_slice(body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
     fn text_page(text: &str) -> String {
         // Match pdf-extract's initial text cursor so fixture output contains
         // only the meaningful glyphs, without parser-generated leading space.
@@ -790,8 +845,10 @@ mod tests {
 
     #[tokio::test]
     async fn structurally_valid_parser_panic_is_contained() {
-        // `cm` requires six operands. The PDF structure and content stream are
-        // valid, but pdf-extract 0.9.0 asserts on this operator shape.
+        // `cm` requires six operands. The PDF structure and content stream
+        // are valid, but pdf-extract asserts on this operator shape (still
+        // true as of 0.12.0, confirmed by this test passing after the
+        // RUSTSEC-2026-0187 dependency upgrade).
         let pdf = pdf_fixture(&["0 0 cm"]);
         let error = extract_pdf_text(&pdf, None, Some("application/pdf"))
             .await
@@ -802,6 +859,86 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("parser panicked"));
+    }
+
+    /// The inner half of the RUSTSEC-2026-0187 regression. Deliberately
+    /// *not* run directly by the outer test process below -- deep
+    /// recursion in a vulnerable lopdf aborts the whole process via a
+    /// stack overflow (SIGABRT/SIGSEGV), which `catch_unwind` cannot
+    /// contain and which would take this entire test binary down with it.
+    /// Instead the outer test spawns exactly this one `#[tokio::test]` as
+    /// a real, isolated `cargo test` subprocess and inspects *its* exit
+    /// status, so a future dependency regression fails safely (a red test)
+    /// instead of crashing the harness that would otherwise report it.
+    /// Run in isolation, on a fixed dependency graph, this must behave
+    /// exactly like every other adversarial-content test in this module: a
+    /// contained `Result`, success or a typed `auto_extraction_unsupported`
+    /// error -- never a crash and never a silently-successful fake-empty
+    /// extraction standing in for a real failure.
+    #[tokio::test]
+    async fn deeply_nested_pdf_array_extraction_is_contained() {
+        let pdf = deeply_nested_array_pdf_fixture(10_380);
+        match extract_pdf_text(&pdf, Some("application/pdf"), Some("application/pdf")).await {
+            Ok(_) => {}
+            Err(error) => {
+                let error: serde_json::Value = serde_json::from_str(&error).unwrap();
+                assert_eq!(error["error"], "auto_extraction_unsupported");
+            }
+        }
+    }
+
+    /// Real, end-to-end proof that the canonical shipping scrape path
+    /// (spider_mcp's `extract_pdf_text`, reached from the public `scrape`
+    /// tool's auto-PDF route, and shared by the `scorpion` CLI's own
+    /// acquisition path) cannot be aborted by RUSTSEC-2026-0187's
+    /// advisory-class deeply nested PDF. This spawns the real
+    /// `deeply_nested_pdf_array_extraction_is_contained` test above as a
+    /// genuine `cargo test` subprocess -- not a mock, not a direct
+    /// in-process call -- and inspects the *subprocess's own* exit status,
+    /// mirroring `spider/tests/closure_harness_behavioral_contract.rs`'s
+    /// established subprocess-isolation convention for exercising
+    /// dangerous behavior without risking the outer test runner. If lopdf
+    /// (or any future dependency swap) reintroduces unbounded recursion on
+    /// this input shape, the child process aborts with a signal and this
+    /// test fails loudly and safely; it can never take the rest of the
+    /// suite down with it.
+    #[test]
+    fn advisory_rustsec_2026_0187_deeply_nested_pdf_cannot_abort_shipping_process() {
+        let output = std::process::Command::new(env!("CARGO"))
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .arg("test")
+            .arg("--lib")
+            .arg("tools::scrape::tests::deeply_nested_pdf_array_extraction_is_contained")
+            .arg("--")
+            .arg("--exact")
+            .output()
+            .expect("failed to spawn cargo test subprocess");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(
+                output.status.signal(),
+                None,
+                "RUSTSEC-2026-0187 regression: the deeply nested PDF fixture \
+                 aborted the extraction subprocess with signal {:?} instead \
+                 of returning a contained Result -- a vulnerable lopdf has \
+                 re-entered the shipping dependency graph.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status.signal(),
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "inner containment test did not pass cleanly.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        );
+        assert!(
+            stdout.contains("1 passed") || stderr.contains("1 passed"),
+            "expected exactly the one filtered inner test to run and pass.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        );
     }
 
     #[tokio::test]

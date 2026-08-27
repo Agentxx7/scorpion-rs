@@ -26,7 +26,7 @@ dashmap = "6"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 infer = { version = "0.22", default-features = false, features = ["alloc"] }
-pdf-extract = "0.9"
+pdf-extract = "0.12"
 
 [dependencies.spider]
 version = "2"

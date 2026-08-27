@@ -30,6 +30,14 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Cargo check workspace
         run: cargo check --workspace
+      - name: Cargo test spider_mcp PDF parse safety boundary (RUSTSEC-2026-0187)
+        # Smallest CI enforcement of the RUSTSEC-2026-0187 safety boundary:
+        # runs with spider_mcp's actual default (shipping) features, so a
+        # future dependency change that reintroduces a vulnerable lopdf on
+        # this path fails CI instead of silently shipping. This is scoped
+        # to exactly the one security property, not the broader spider_mcp
+        # behavioral-contract CI coverage (a separate, tracked gap).
+        run: cargo test -p spider_mcp --lib tools::scrape::tests::advisory_rustsec_2026_0187_deeply_nested_pdf_cannot_abort_shipping_process -- --exact
       - name: Cargo test spider_agent (default)
         run: cargo test -p spider_agent
       - name: Cargo test spider_agent (openai + search_serper)

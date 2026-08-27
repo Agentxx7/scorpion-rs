@@ -7404,12 +7404,23 @@ pub(crate) async fn build_engine_error_page_response(
 /// copied. The cache path was previously `Vec<u8>` -> `String` -> `Vec<u8>` ->
 /// `Bytes`; `String::into_bytes` is O(1) and `Bytes::from(Vec)` is already a
 /// move, so this drops one full-body copy per cache hit.
+///
+/// Every caller of this function reaches it only after a genuine hit
+/// against Scorpion's own canonical `CACACHE_MANAGER`-backed disk/mem
+/// cache (`get_cached_url`/`get_cached_url_base`) — the identical cache
+/// system `cache_request.rs`'s own `reconstruct_response` already
+/// truthfully stamps `ResponseOrigin::ReconstructedCache` /
+/// `BackendProvenance::CacheLayer` for (SCORPION_CANONICAL_CHROME_CACHE_
+/// PROVENANCE_POPULATION_001: propagating the same already-known,
+/// already-modeled fact here rather than leaving it `None`).
 pub(crate) fn build_cached_html_page_response(target_url: &str, html: String) -> PageResponse {
     PageResponse {
         content: Some(html.into_bytes()),
         status_code: StatusCode::OK,
         final_url: Some(target_url.to_string()),
         origin: AcquisitionOrigin::NonNetwork,
+        response_origin: Some(spider_transport::ResponseOrigin::ReconstructedCache),
+        backend: Some(spider_transport::BackendProvenance::CacheLayer),
         ..Default::default()
     }
 }
@@ -8506,14 +8517,16 @@ pub async fn fetch_page_html<'h>(
     // `NonNetwork` default rather than needing an explicit reset.
     if skip_browser {
         if let Some(html) = cached_html {
-            return PageResponse {
-                content: Some(html.into_bytes()),
-                status_code: StatusCode::OK,
-                final_url: Some(target_url.to_string()),
-                #[cfg(feature = "time")]
-                duration,
-                ..Default::default()
-            };
+            // SCORPION_CANONICAL_CHROME_CACHE_PROVENANCE_POPULATION_001:
+            // reuse the same canonical-cache-hit constructor the plain-
+            // HTTP cache path already uses (`build_cached_html_page_
+            // response`), truthfully propagating ResponseOrigin::
+            // ReconstructedCache / BackendProvenance::CacheLayer instead
+            // of leaving them None.
+            let mut response = build_cached_html_page_response(target_url, html);
+            #[cfg(feature = "time")]
+            set_page_response_duration(&mut response, duration);
+            return response;
         }
     }
 

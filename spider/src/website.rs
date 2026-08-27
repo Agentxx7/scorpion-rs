@@ -16529,6 +16529,27 @@ async fn test_cache_shortcircuit_single_page() {
     assert_eq!(page.status_code, StatusCode::OK);
     assert_eq!(website.initial_status_code, StatusCode::OK);
     assert!(website.initial_html_length > 0);
+    // SCORPION_CANONICAL_CHROME_CACHE_PROVENANCE_POPULATION_001: this is
+    // the exact real-Scorpion-cache-hit path `build_cached_html_page_
+    // response` now truthfully stamps -- the identical semantic fact
+    // `cache_request.rs`'s own `reconstruct_response` already stamps for
+    // an http-cache-mediated hit. `observed_status_code` stays `None`:
+    // no real HTTP response was observed on this shortcircuit (bytes
+    // came from disk, not a live request) -- unaffected by this fix.
+    assert_eq!(
+        page.response_origin(),
+        Some(spider_transport::ResponseOrigin::ReconstructedCache),
+        "cache-shortcircuit page must truthfully report ReconstructedCache origin"
+    );
+    assert_eq!(
+        page.backend_provenance(),
+        Some(spider_transport::BackendProvenance::CacheLayer),
+        "cache-shortcircuit page must truthfully report CacheLayer backend"
+    );
+    assert_eq!(
+        page.observed_status_code, None,
+        "no real HTTP response was observed on a cache shortcircuit"
+    );
     // Must be fast (no browser launch — typically <100ms)
     assert!(
         elapsed.as_millis() < 2000,
@@ -18187,6 +18208,25 @@ async fn test_cache_shortcircuit_single_page_mem() {
     assert_eq!(page.status_code, StatusCode::OK);
     assert_eq!(website.initial_status_code, StatusCode::OK);
     assert!(website.initial_html_length > 0);
+    // SCORPION_CANONICAL_CHROME_CACHE_PROVENANCE_POPULATION_001: same
+    // truthful provenance stamp as the disk-cache shortcircuit test —
+    // `CacheLayer`/`ReconstructedCache` describe the cache class
+    // (Scorpion's own canonical cache), not the disk-vs-mem backend
+    // detail.
+    assert_eq!(
+        page.response_origin(),
+        Some(spider_transport::ResponseOrigin::ReconstructedCache),
+        "cache-shortcircuit (mem) page must truthfully report ReconstructedCache origin"
+    );
+    assert_eq!(
+        page.backend_provenance(),
+        Some(spider_transport::BackendProvenance::CacheLayer),
+        "cache-shortcircuit (mem) page must truthfully report CacheLayer backend"
+    );
+    assert_eq!(
+        page.observed_status_code, None,
+        "no real HTTP response was observed on a cache shortcircuit"
+    );
     // Must be fast (no browser launch — typically <100ms)
     assert!(
         elapsed.as_millis() < 2000,

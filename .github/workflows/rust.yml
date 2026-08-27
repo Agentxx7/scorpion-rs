@@ -457,6 +457,14 @@ jobs:
         run: |
           cargo test -p spider --test smart_chrome_failure_status_truthfulness --features chrome --no-run
           cargo test -p spider --test smart_chrome_failure_status_truthfulness --features smart --no-run
+      # SCORPION_CANONICAL_CHROME_CACHE_PROVENANCE_POPULATION_001: same
+      # defensive pattern as the two pre-build steps above. `cache_chrome_
+      # hybrid` is a distinct feature combination (cache + chrome
+      # together) never built anywhere else in this job.
+      - name: Pre-build spider chrome/cache provenance population regression binaries (network still open)
+        run: |
+          cargo test -p spider --test chrome_cache_provenance_population --features chrome --no-run
+          cargo test -p spider --test chrome_cache_provenance_population --features cache_chrome_hybrid --no-run
       # Runtime egress denial for the deterministic phase — the primary
       # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
       # alone. GitHub-hosted ubuntu-latest runners grant the runner user
@@ -985,6 +993,43 @@ jobs:
             exit 1
           fi
           echo "END: spider smart/chrome failure-status truthfulness regression (smart)"
+      # SCORPION_CANONICAL_CHROME_CACHE_PROVENANCE_POPULATION_001:
+      # mandatory ordinary CI evidence that Scorpion's own canonical
+      # cache-hit path truthfully reports ResponseOrigin::
+      # ReconstructedCache / BackendProvenance::CacheLayer, that a
+      # genuine cache miss is never mislabeled as a hit, and that real
+      # Chrome/CDP navigation (where the canonical provenance model is
+      # structurally insufficient) correctly stays None rather than
+      # fabricating a claim. Real headless Chrome, loopback fixtures
+      # only, no RUN_LIVE_TESTS.
+      - name: Cargo test spider chrome/cache provenance population regression (chrome)
+        run: |
+          echo "BEGIN: spider chrome/cache provenance population regression (chrome)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test chrome_cache_provenance_population --features chrome -- --test-threads=1 > /tmp/step19.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step19.log "spider chrome/cache provenance population regression (chrome)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step19.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider chrome/cache provenance population regression (chrome): ${passed} tests passed"
+          if [ "${passed}" -lt 2 ]; then
+            echo "::error::spider chrome/cache provenance population regression (chrome) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider chrome/cache provenance population regression (chrome)"
+      - name: Cargo test spider chrome/cache provenance population regression (cache_chrome_hybrid)
+        run: |
+          echo "BEGIN: spider chrome/cache provenance population regression (cache_chrome_hybrid)"
+          if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup cargo test -p spider --test chrome_cache_provenance_population --features cache_chrome_hybrid -- --test-threads=1 > /tmp/step20.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step20.log "spider chrome/cache provenance population regression (cache_chrome_hybrid)"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/step20.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider chrome/cache provenance population regression (cache_chrome_hybrid): ${passed} tests passed"
+          if [ "${passed}" -lt 4 ]; then
+            echo "::error::spider chrome/cache provenance population regression (cache_chrome_hybrid) executed too few tests (${passed})"
+            exit 1
+          fi
+          echo "END: spider chrome/cache provenance population regression (cache_chrome_hybrid)"
 
   # Current shipping-product deterministic proof. These commands exercise
   # durable research and the CLI fixture/reopen contracts; they are not live

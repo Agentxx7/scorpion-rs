@@ -178,6 +178,25 @@ jobs:
             echo "::error::spider_mcp spider_cloud_env_tor_conflict executed zero tests"
             exit 1
           fi
+
+          # stdio_protocol_purity (SCORPION_CANONICAL_MCP_STDIO_PROTOCOL_
+          # PURITY_001): the real spider-mcp process's entire stdout
+          # stream, across a full session (initialize, a successful
+          # request, a failed request, and post-shutdown drain) and again
+          # under --log-level debug, must contain only genuine JSON-RPC
+          # 2.0 envelopes -- never a startup banner, a log line, or
+          # garbage sharing a line with real JSON. Stderr is captured
+          # independently and never required to be empty.
+          if ! cargo test -p spider_mcp --test stdio_protocol_purity > /tmp/spider_mcp_stdio_purity.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/spider_mcp_stdio_purity.log "spider_mcp stdio_protocol_purity"
+            exit 1
+          fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/spider_mcp_stdio_purity.log | awk '{sum+=$1} END {print sum+0}')
+          echo "spider_mcp stdio_protocol_purity: ${passed} tests passed"
+          if [ "${passed}" -lt 2 ]; then
+            echo "::error::spider_mcp stdio_protocol_purity executed too few tests (${passed})"
+            exit 1
+          fi
       - name: Cargo test spider_mcp Tor-not-compiled fail-closed contract
         # A dedicated, deterministic suite that only compiles/runs without
         # the transport_tor feature -- entirely absent from the default

@@ -37,17 +37,40 @@ fn api_server(searxng: Option<String>) -> (Child, String) {
 }
 
 fn post(base: &str, body: &str) -> String {
+    post_path(base, "/api/search", body)
+}
+
+fn post_path(base: &str, path: &str, body: &str) -> String {
     let url = base.strip_prefix("http://").unwrap();
     let mut stream = TcpStream::connect(url).unwrap();
     write!(
         stream,
-        "POST /api/search HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     )
     .unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
+}
+
+#[test]
+fn research_routes_fail_closed_without_operator_configuration() {
+    let (mut child, base) = api_server(None);
+    let response = post_path(&base, "/api/research", r#"{"topic":"rust"}"#);
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/api/research/not-a-research-id");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
 }
 
 fn get(base: &str, path: &str) -> String {

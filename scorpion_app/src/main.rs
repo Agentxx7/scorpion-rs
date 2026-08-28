@@ -1,4 +1,7 @@
-use scorpion_app::{error_json, error_status, search, SearchError, SearchRequest};
+use scorpion_app::{
+    error_json, error_status, research_error_json, research_error_status, search, ResearchError,
+    ResearchRequest, ResearchService, SearchError, SearchRequest,
+};
 use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -9,18 +12,23 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = env::var("SCORPION_API_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
     let listener = TcpListener::bind(&bind).await?;
+    let research = ResearchService::default();
     eprintln!("scorpion-api listening on {bind}");
     loop {
         let (stream, _) = listener.accept().await?;
+        let research = research.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle(stream).await {
+            if let Err(error) = handle(stream, research).await {
                 eprintln!("scorpion-api request error: {error}");
             }
         });
     }
 }
 
-async fn handle(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn handle(
+    mut stream: TcpStream,
+    research: ResearchService,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
@@ -86,6 +94,51 @@ async fn handle(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error +
             .await
             .map_err(Into::into);
     }
+    if method == "GET" && path.starts_with("/api/research/") {
+        let raw_id = &path["/api/research/".len()..];
+        return match research.status(raw_id).await {
+            Ok(status) => write_json(&mut stream, 200, &serde_json::to_string(&status)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                research_error_status(&error),
+                &research_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
+    if method == "POST" && path == "/api/research" {
+        let body = bytes
+            .get(body_offset..body_offset + content_length)
+            .unwrap_or_default();
+        let input: ResearchRequest = match serde_json::from_slice(body) {
+            Ok(input) => input,
+            Err(_) => {
+                let error = ResearchError::InvalidRequest("invalid JSON body".into());
+                return write_json(
+                    &mut stream,
+                    research_error_status(&error),
+                    &research_error_json(&error),
+                )
+                .await
+                .map_err(Into::into);
+            }
+        };
+        return match research.submit(input).await {
+            Ok(accepted) => write_json(&mut stream, 202, &serde_json::to_string(&accepted)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                research_error_status(&error),
+                &research_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
     if method != "POST" || path != "/api/search" {
         return write_json(
             &mut stream,
@@ -121,6 +174,7 @@ async fn handle(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error +
 async fn write_json(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), std::io::Error> {
     let reason = match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",
         413 => "Payload Too Large",

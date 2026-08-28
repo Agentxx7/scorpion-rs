@@ -956,6 +956,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            extraction_diagnostics: Vec::new(),
             usage: TokenUsage {
                 prompt_tokens: 11,
                 completion_tokens: 7,

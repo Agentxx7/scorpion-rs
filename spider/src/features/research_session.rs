@@ -13,7 +13,8 @@ use crate::features::domain_persistence::{DomainPersistence, PersistenceError};
 use crate::features::identity::{EvidenceId, IdentityParseError, ResearchId};
 use crate::utils::evidence::{AcquisitionOptions, EvidenceLedgerError, EvidenceRef};
 use spider_agent::{
-    AgentBuilder, AgentError, FinishReason, ResearchExtraction, ResearchOptions, ResearchResult,
+    AgentBuilder, AgentError, ExtractionDiagnosticOutcome, FinishReason, ResearchExtraction,
+    ResearchOptions, ResearchResult,
 };
 use std::collections::HashSet;
 #[cfg(test)]
@@ -42,6 +43,27 @@ pub struct ResearchSessionSource {
     pub evidence: EvidenceRef,
     /// Truthful classification available from the current result contract.
     pub disposition: ResearchSourceDisposition,
+}
+
+/// Sanitized per-source extraction diagnostic, bound to canonical evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchExtractionDiagnostic {
+    /// Canonical evidence identity for the source.
+    pub evidence: EvidenceRef,
+    /// Whether extraction reached the LLM stage.
+    pub extraction_attempted: bool,
+    /// Sanitized extraction outcome.
+    pub outcome: ExtractionDiagnosticOutcome,
+    /// Provider finish reason, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<FinishReason>,
+    /// Bounded extraction input size in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_bytes: Option<usize>,
+    /// Bounded extraction input size in characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_chars: Option<usize>,
 }
 
 /// Presentation-local Source-N label bound to canonical durable evidence.
@@ -196,6 +218,9 @@ pub struct ResearchSession {
     pub sources: Vec<ResearchSessionSource>,
     /// Successful extraction order mapped explicitly to durable evidence.
     pub source_bindings: Vec<ResearchSourceBinding>,
+    /// Per-source sanitized extraction outcomes. Missing in legacy records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extraction_diagnostics: Vec<ResearchExtractionDiagnostic>,
     /// Minimal observable counts.
     pub counts: ResearchSessionCounts,
     /// Claimed or truthful terminal state.
@@ -625,6 +650,33 @@ fn validate_session_result(session: &ResearchSession) -> Result<(), ResearchSess
     Ok(())
 }
 
+fn build_extraction_diagnostics(
+    retained: &[ResearchAcquisitionEvidence],
+    result: &Result<ResearchResult, AgentError>,
+) -> Vec<ResearchExtractionDiagnostic> {
+    let diagnostics = match result {
+        Ok(result) => &result.extraction_diagnostics,
+        Err(_) => return Vec::new(),
+    };
+    retained
+        .iter()
+        .filter_map(|record| {
+            let id = record.acquisition_id.to_string();
+            diagnostics
+                .iter()
+                .find(|d| d.acquisition_id.as_deref() == Some(id.as_str()))
+                .map(|d| ResearchExtractionDiagnostic {
+                    evidence: EvidenceRef::new(record.acquisition_id),
+                    extraction_attempted: d.extraction_attempted,
+                    outcome: d.outcome,
+                    finish_reason: d.finish_reason.clone(),
+                    input_bytes: d.input_bytes,
+                    input_chars: d.input_chars,
+                })
+        })
+        .collect()
+}
+
 async fn bind_sources(
     store: &DomainPersistence,
     retained: &[ResearchAcquisitionEvidence],
@@ -718,6 +770,7 @@ where
         extraction_instructions: options.extraction_prompt.clone(),
         sources: Vec::new(),
         source_bindings: Vec::new(),
+        extraction_diagnostics: Vec::new(),
         counts: ResearchSessionCounts::default(),
         state: ResearchSessionState::Claimed,
         result: None,
@@ -756,6 +809,7 @@ async fn finalize_claimed(
     let (sources, source_bindings) = bind_sources(&store, &retained, &result).await?;
     session.sources = sources;
     session.source_bindings = source_bindings;
+    session.extraction_diagnostics = build_extraction_diagnostics(&retained, &result);
     if let Ok(result) = &result {
         session.counts.search_results = result.search_results.len();
         session.counts.acquisition_attempts = max_pages.min(result.search_results.results.len());
@@ -792,6 +846,7 @@ pub async fn claim_durable_research(
         extraction_instructions: options.extraction_prompt.clone(),
         sources: Vec::new(),
         source_bindings: Vec::new(),
+        extraction_diagnostics: Vec::new(),
         counts: ResearchSessionCounts::default(),
         state: ResearchSessionState::Claimed,
         result: None,

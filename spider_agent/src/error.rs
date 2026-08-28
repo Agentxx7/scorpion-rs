@@ -20,6 +20,8 @@ pub enum AgentError {
     IncompleteGeneration,
     /// Strict research extraction failed schema or semantic validation.
     InvalidExtraction(String),
+    /// Provider returned no primary completion content.
+    EmptyCompletion,
     /// Remote API error.
     Remote(String),
     /// Feature not enabled or configured.
@@ -56,6 +58,7 @@ impl fmt::Display for AgentError {
             Self::InvalidField(field) => write!(f, "Invalid field: {}", field),
             Self::IncompleteGeneration => write!(f, "Incomplete structured generation"),
             Self::InvalidExtraction(msg) => write!(f, "Invalid research extraction: {}", msg),
+            Self::EmptyCompletion => write!(f, "Empty completion"),
             Self::Remote(msg) => write!(f, "Remote error: {}", msg),
             Self::NotConfigured(what) => write!(f, "Not configured: {}", what),
             Self::Search(e) => write!(f, "Search error: {}", e),

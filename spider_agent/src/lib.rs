@@ -292,7 +292,7 @@ pub use automation::router::{
 };
 
 #[cfg(feature = "search")]
-pub use agent::ResearchResult;
+pub use agent::{ExtractionDiagnostic, ExtractionDiagnosticOutcome, ResearchResult};
 
 #[cfg(feature = "search")]
 pub use search::{SearchProvider, SearchResult, SearchResults};

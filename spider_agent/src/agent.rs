@@ -285,6 +285,9 @@ impl Agent {
             ),
         };
         let response = self.complete_with_options(messages, options).await?;
+        if response.content.trim().is_empty() {
+            return Err(AgentError::EmptyCompletion);
+        }
         if response.finish_reason == Some(FinishReason::Length) {
             return Err(AgentError::IncompleteGeneration);
         }
@@ -383,6 +386,7 @@ impl Agent {
                 summary: None,
                 synthesis_sufficient: None,
                 synthesis_source_ids: Vec::new(),
+                extraction_diagnostics: Vec::new(),
                 usage: TokenUsage::default(),
             });
         }
@@ -393,6 +397,7 @@ impl Agent {
         });
 
         let mut extractions = Vec::new();
+        let mut extraction_diagnostics = Vec::new();
         let mut total_usage = TokenUsage::default();
 
         let max_pages = options.max_pages.min(search_results.results.len());
@@ -420,6 +425,10 @@ impl Agent {
             match acquisition {
                 Ok(source) => {
                     if !(200..300).contains(&source.status) {
+                        extraction_diagnostics.push(ExtractionDiagnostic::pre(
+                            source.acquisition_id.clone(),
+                            ExtractionDiagnosticOutcome::PreExtractionRejectedStatus,
+                        ));
                         log::warn!(
                             "Skipping {}: HTTP status {} is not successful",
                             result.url,
@@ -428,6 +437,10 @@ impl Agent {
                         continue;
                     }
                     if !is_supported_research_content_type(&source.content_type) {
+                        extraction_diagnostics.push(ExtractionDiagnostic::pre(
+                            source.acquisition_id.clone(),
+                            ExtractionDiagnosticOutcome::PreExtractionUnsupportedContent,
+                        ));
                         log::warn!(
                             "Skipping {}: unsupported content type {:?}",
                             result.url,
@@ -436,6 +449,10 @@ impl Agent {
                         continue;
                     }
                     if is_obvious_block_document(&source.content) {
+                        extraction_diagnostics.push(ExtractionDiagnostic::pre(
+                            source.acquisition_id.clone(),
+                            ExtractionDiagnosticOutcome::PreExtractionChallengeOrBlock,
+                        ));
                         log::warn!(
                             "Skipping {}: response appears to be a block or challenge document",
                             result.url
@@ -449,6 +466,10 @@ impl Agent {
                     ) {
                         Ok(content) => content,
                         Err(error) => {
+                            extraction_diagnostics.push(ExtractionDiagnostic::pre(
+                                source.acquisition_id.clone(),
+                                ExtractionDiagnosticOutcome::PreExtractionMaterializationFailed,
+                            ));
                             log::warn!(
                                 "Skipping {}: unusable research content: {}",
                                 result.url,
@@ -468,6 +489,11 @@ impl Agent {
                         .await
                     {
                         Ok((extracted, finish_reason, extraction_input_bytes)) => {
+                            extraction_diagnostics.push(ExtractionDiagnostic::success(
+                                source.acquisition_id.clone(),
+                                finish_reason.clone(),
+                                extraction_input_bytes,
+                            ));
                             extractions.push(PageExtraction {
                                 url: source.final_url,
                                 title: result.title.clone(),
@@ -478,6 +504,11 @@ impl Agent {
                             });
                         }
                         Err(e) => {
+                            extraction_diagnostics.push(ExtractionDiagnostic::failure(
+                                source.acquisition_id.clone(),
+                                Some(research_content.len()),
+                                classify_extraction_error(&e),
+                            ));
                             log::warn!("Extraction failed for {}: {}", result.url, e);
                         }
                     }
@@ -515,6 +546,7 @@ impl Agent {
             summary,
             synthesis_sufficient,
             synthesis_source_ids,
+            extraction_diagnostics,
             usage: total_usage,
         })
     }
@@ -1688,6 +1720,120 @@ fn validate_research_synthesis(
     Ok(synthesis)
 }
 
+#[cfg(feature = "search")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// Provider-neutral, sanitized extraction outcome.
+pub enum ExtractionDiagnosticOutcome {
+    /// Response status rejected before extraction.
+    PreExtractionRejectedStatus,
+    /// Response content type rejected before extraction.
+    PreExtractionUnsupportedContent,
+    /// Challenge or block document rejected before extraction.
+    PreExtractionChallengeOrBlock,
+    /// Source could not be materialized for extraction.
+    PreExtractionMaterializationFailed,
+    /// LLM provider was not configured.
+    ProviderNotConfigured,
+    /// Provider request failed.
+    ProviderRequestFailed,
+    /// Provider request timed out.
+    ProviderTimeout,
+    /// Provider exhausted its generation budget.
+    IncompleteGeneration,
+    /// Provider returned no content.
+    EmptyCompletion,
+    /// Completion had no usable primary content.
+    UnusableCompletionContent,
+    /// Completion was not valid structured output.
+    MalformedStructuredOutput,
+    /// Completion violated the output schema.
+    SchemaValidationFailed,
+    /// Completion failed semantic validation.
+    SemanticValidationFailed,
+    /// Extraction succeeded.
+    Success,
+}
+
+#[cfg(feature = "search")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Per-source extraction diagnostic metadata.
+pub struct ExtractionDiagnostic {
+    /// Canonical acquisition identity, when available.
+    pub acquisition_id: Option<String>,
+    /// Whether the LLM extraction stage was entered.
+    pub extraction_attempted: bool,
+    /// Sanitized outcome category.
+    pub outcome: ExtractionDiagnosticOutcome,
+    /// Provider finish reason, when returned.
+    pub finish_reason: Option<FinishReason>,
+    /// Bounded input byte length.
+    pub input_bytes: Option<usize>,
+    /// Bounded input character length.
+    pub input_chars: Option<usize>,
+}
+
+#[cfg(feature = "search")]
+impl ExtractionDiagnostic {
+    fn pre(id: Option<String>, outcome: ExtractionDiagnosticOutcome) -> Self {
+        Self {
+            acquisition_id: id,
+            extraction_attempted: false,
+            outcome,
+            finish_reason: None,
+            input_bytes: None,
+            input_chars: None,
+        }
+    }
+    fn success(id: Option<String>, reason: Option<FinishReason>, bytes: usize) -> Self {
+        Self {
+            acquisition_id: id,
+            extraction_attempted: true,
+            outcome: ExtractionDiagnosticOutcome::Success,
+            finish_reason: reason,
+            input_bytes: Some(bytes),
+            input_chars: None,
+        }
+    }
+    fn failure(
+        id: Option<String>,
+        bytes: Option<usize>,
+        outcome: ExtractionDiagnosticOutcome,
+    ) -> Self {
+        Self {
+            acquisition_id: id,
+            extraction_attempted: true,
+            outcome,
+            finish_reason: (outcome == ExtractionDiagnosticOutcome::IncompleteGeneration)
+                .then_some(FinishReason::Length),
+            input_bytes: bytes,
+            input_chars: None,
+        }
+    }
+}
+
+#[cfg(feature = "search")]
+fn classify_extraction_error(error: &AgentError) -> ExtractionDiagnosticOutcome {
+    match error {
+        AgentError::IncompleteGeneration => ExtractionDiagnosticOutcome::IncompleteGeneration,
+        AgentError::EmptyCompletion => ExtractionDiagnosticOutcome::EmptyCompletion,
+        AgentError::Http(source) if source.is_timeout() => {
+            ExtractionDiagnosticOutcome::ProviderTimeout
+        }
+        AgentError::Timeout => ExtractionDiagnosticOutcome::ProviderTimeout,
+        AgentError::NotConfigured(_) => ExtractionDiagnosticOutcome::ProviderNotConfigured,
+        AgentError::Http(_) | AgentError::Llm(_) | AgentError::Remote(_) => {
+            ExtractionDiagnosticOutcome::ProviderRequestFailed
+        }
+        AgentError::Json(_) => ExtractionDiagnosticOutcome::MalformedStructuredOutput,
+        AgentError::InvalidExtraction(_) => ExtractionDiagnosticOutcome::UnusableCompletionContent,
+        AgentError::MissingField(_) | AgentError::InvalidField(_) => {
+            ExtractionDiagnosticOutcome::SchemaValidationFailed
+        }
+        _ => ExtractionDiagnosticOutcome::UnusableCompletionContent,
+    }
+}
+
 /// Result from research.
 #[cfg(feature = "search")]
 #[derive(Debug, Clone)]
@@ -1708,6 +1854,9 @@ pub struct ResearchResult {
     pub synthesis_sufficient: Option<bool>,
     /// Validated source identifiers used by the synthesis response.
     pub synthesis_source_ids: Vec<String>,
+    /// Sanitized per-source extraction outcomes, retained for durable diagnostics.
+    #[cfg(feature = "search")]
+    pub extraction_diagnostics: Vec<ExtractionDiagnostic>,
     /// Token usage.
     pub usage: TokenUsage,
 }
@@ -2215,6 +2364,31 @@ mod tests {
     fn focused_query_does_not_rewrite_short_keywords() {
         assert_eq!(Agent::focused_research_query("Rust async"), None);
         assert_eq!(Agent::focused_research_query(""), None);
+    }
+
+    #[cfg(feature = "search")]
+    #[test]
+    fn extraction_diagnostic_categories_are_typed_and_sanitized() {
+        assert_eq!(
+            classify_extraction_error(&AgentError::EmptyCompletion),
+            ExtractionDiagnosticOutcome::EmptyCompletion
+        );
+        assert_eq!(
+            classify_extraction_error(&AgentError::IncompleteGeneration),
+            ExtractionDiagnosticOutcome::IncompleteGeneration
+        );
+        assert_eq!(
+            classify_extraction_error(&AgentError::NotConfigured("LLM provider")),
+            ExtractionDiagnosticOutcome::ProviderNotConfigured
+        );
+        let diagnostic = ExtractionDiagnostic::failure(
+            Some("evid_test".to_string()),
+            Some(123),
+            ExtractionDiagnosticOutcome::ProviderRequestFailed,
+        );
+        let serialized = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("prompt"));
     }
 
     #[test]

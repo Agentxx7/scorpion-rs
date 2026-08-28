@@ -1,199 +1,255 @@
 # Scorpion
 
-Scorpion is an independent Rust crawling, web-research, evidence, and
-intelligence engine. It combines Spider's mature crawling foundation with a
-canonical evidence-first architecture, durable research sessions, and a
-shipping `scorpion` command-line interface.
+Scorpion is an evidence-first Rust web research, crawling, acquisition, and
+intelligence engine built on [Spider](https://github.com/spider-rs/spider).
+It discovers sources, acquires and renders pages, preserves evidence, retains
+provenance, and exposes the same canonical engine through a CLI, MCP, Rust
+consumers, and (later) a web interface.
 
-## Built on Spider
+Scorpion is a fork of `spider-rs/spider`. Inherited crawler code, crate names,
+imports, authorship, and MIT licensing remain attributed to Spider and its
+contributors. Scorpion adds its canonical evidence, provenance, identity, and
+research capabilities on top; it does not claim to have created the inherited
+crawler.
 
-Scorpion is a fork of [Spider](https://github.com/spider-rs/spider), not a
-replacement history for it. The inherited crawler, crate names, Rust import
-paths, authorship, and MIT licensing remain attributed to the Spider project
-and contributors. Existing Spider library and Spider Cloud integrations remain
-available where their corresponding features are enabled.
+## V1.0.0 status
 
-The fork adds Scorpion-owned canonical capabilities while keeping inherited
-Spider compatibility paths clearly separated from new product behavior.
+Scorpion V1 is production-ready for the bounded engine envelope below. The
+release is an engine and operator-facing toolkit, not a hosted search website.
 
-## Current capabilities
+| Surface | Status |
+| --- | --- |
+| Canonical HTTP acquisition, `Website::crawl`, `Website::scrape` | **PRODUCTION READY** |
+| CLI crawl, scrape, fetch, download, research, and research show | **PRODUCTION READY** |
+| MCP server (`spider-mcp` or `scorpion mcp`) | **PRODUCTION READY** |
+| Chrome/browser acquisition | **PRODUCTION READY** |
+| Evidence and provenance | **PRODUCTION READY** |
+| Durable `ResearchSession` / `ResearchId` results | **PRODUCTION READY WITH CONFIGURATION** |
+| Search and feed/sitemap/news/robots discovery | **SUPPORTED WITH CONFIGURATION** |
+| Tor transport and canonical cache | **OPTIONAL / OPERATOR-CONFIGURED** |
+| Challenge routing and local PaliGemma | **OPTIONAL** |
+| Watch identity, state, scheduling primitives, and change detection | **FOUNDATION IMPLEMENTED** |
+| Dedicated Scorpion Web/Search UI | **NOT IMPLEMENTED YET** |
 
-- High-concurrency crawling and scraping inherited from Spider
-- HTTP and browser-backed acquisition
-- One-shot fetch with canonical evidence and provenance
-- Feed, sitemap, news-sitemap, robots-sitemap, and web-search discovery
-- Fail-closed Tor transport when the Tor feature is enabled
-- Durable evidence records identified by `EvidenceId`
-- Durable research sessions and results identified by `ResearchId`
-- Reopening completed research in a later process
-- Canonical Source-N-to-evidence citation bindings
-- MCP access through the existing Spider MCP implementation
-- Canonical watch identity, state, scheduled execution, change detection, and
-  health/readiness primitives
+There is currently no Google-like Scorpion search page. The engine exists; the
+operator experience above it is the next implementation phase.
 
-The normal default build of `spider_cli` produces the `scorpion` binary and
-includes the durable research feature. Custom `--no-default-features` builds
-enable only the capabilities selected by the builder.
+## Can I use Scorpion today?
 
-## Command-line interface
-
-Build the shipping binary from this repository:
+Build the exact released V1 artifacts from source:
 
 ```sh
-cargo build -p spider_cli
+git clone https://github.com/Agentxx7/scorpion-rs.git
+cd scorpion-rs
+git checkout v1.0.0
+cargo build --locked -p spider_cli -p spider_mcp
 ```
 
-Inspect its commands with:
+The release currently distributes source archives rather than prebuilt
+executables. The resulting binaries are `target/debug/scorpion` and
+`target/debug/spider-mcp` (use `--release` for optimized local artifacts).
+
+Examples using the shipping `scorpion` binary:
 
 ```sh
-cargo run -p spider_cli -- --help
+scorpion --url https://example.com crawl --limit 1
+scorpion --url https://example.com scrape
+scorpion fetch https://example.com
+scorpion --url https://example.com download --target-destination ./downloads
+scorpion --url https://example.com --headless scrape
+scorpion search --provider searxng --base-url http://127.0.0.1:8080 "rust async"
+scorpion research "How do Tokio and async-std compare?" \
+  --database ./research.sqlite \
+  --searxng-url http://127.0.0.1:8080 \
+  --openai-base-url http://127.0.0.1:1234/v1 \
+  --model local-model
+scorpion research show <RESEARCH_ID> --database ./research.sqlite
+scorpion mcp
 ```
 
-The CLI exposes crawling, scraping, fetch/discovery, search, MCP, transport,
-authentication, and durable research surfaces according to the compiled
-features. See [the CLI guide](./spider_cli/README.md) for command details.
+Run `scorpion --help` and `scorpion <command> --help` for the complete
+shipping command surface.
 
-## Durable research
+## Search today
 
-Configure a durable database, SearXNG, and an OpenAI-compatible model endpoint,
-then run:
+Search is a real canonical capability, but Scorpion is not itself a public
+search-index provider. The flow is:
 
-```sh
-scorpion research "How do Tokio and async-std compare for Rust async programming?"
+```text
+user query → Scorpion search → operator-provided SearXNG → discovery candidates
 ```
 
-The command prints a durable `ResearchId`, the final synthesis, and ordered
-source bindings. Reopen that result later, without the search or model process:
+The search command returns candidates as JSON; it does **not** fetch those
+result pages. Acquisition is a separate canonical step (`fetch`, `crawl`, or
+`scrape`).
 
-```sh
-scorpion research show research_00112233445566778899aabbccddeeff \
-  --database /path/to/scorpion-research.sqlite
+## Research today
+
+Durable research requires a database, SearXNG, and an OpenAI-compatible model
+endpoint. A research question is searched, selected sources are acquired
+through the canonical evidence path, extracted, synthesized, and persisted.
+
+```text
+Research question → Search → candidates → acquisition → evidence
+                  → extraction → synthesis → durable result
 ```
 
 The durable lineage is:
 
 ```text
-ResearchId
-→ ResearchSession
-→ DurableResearchResult
-→ Source N + EvidenceRef
-→ EvidenceId
-→ EvidenceBundle
+ResearchId → ResearchSession → DurableResearchResult
+           → Source N + EvidenceRef → EvidenceId → EvidenceBundle
 ```
 
-- `ResearchId` identifies one persisted research invocation.
-- `EvidenceId` identifies one canonical durable source-evidence record.
-- `Source N` is a presentation-local binding to an `EvidenceRef`; it is not an
-  identity of its own.
+In plain terms, a `ResearchId` reopens one persisted invocation, while each
+`EvidenceId` identifies durable source evidence behind its citations. V1 does
+not claim deterministic replay or complete request snapshots.
 
-Durable results retain source-grounded facts, missing-evidence statements,
-extraction metadata, final synthesis, synthesis token usage, and citation
-bindings. They do not provide deterministic replay.
+## Architecture
 
-## Architecture and verification model
+The rule is **one canonical engine, multiple thin interfaces**. A future web
+console must call these same seams; it must not grow a second crawler, search
+engine, transport, research implementation, evidence store, or persistence
+system.
 
-Scorpion follows two connected principles: **one canonical engine with thin
-interfaces**, and **evidence-first, proof-gated development**.
+```mermaid
+flowchart TD
+  U[User / Operator] --> I[Interfaces]
+  I --> W[Future Web UI]
+  I --> C[CLI]
+  I --> M[MCP]
+  I --> R[Rust consumers]
+  W --> E[Canonical Scorpion Engine]
+  C --> E
+  M --> E
+  R --> E
+  E --> O[Research orchestration]
+  E --> D[Discovery / Search]
+  E --> A[Acquisition / Crawl / Scrape]
+  E --> B[Browser / Chrome]
+  E --> T[Transport]
+  E --> P[Evidence / Provenance]
+  E --> S[Identity / Persistence / State]
+  E --> X[Web / DNS / TLS]
+  E --> Q[SearXNG]
+  E --> L[OpenAI-compatible model endpoint]
+  E --> Z[Tor / SOCKS5h]
+```
+
+### Research flow
+
+```mermaid
+flowchart LR
+  Q[Research question] --> S[Search]
+  S --> C[Discovery candidates]
+  C --> A[Canonical acquisition]
+  A --> E[Evidence + provenance]
+  E --> X[Extraction]
+  X --> Y[Synthesis]
+  Y --> R[Durable result]
+  R --> RI[ResearchId / ResearchSession]
+  E --> EI[EvidenceId / EvidenceBundle]
+```
+
+## Proof-gated development
+
+AI may propose and implement changes, but AI is not the authority that a
+capability works. Scorpion narrows every claim to evidence:
 
 ```text
-CLI / MCP / library consumers
-            ↓
-    canonical capability seams
-            ↓
-research / discovery / acquisition / transport
-            ↓
-      evidence + provenance
-            ↓
- identity / persistence / state
+architecture contract → implementation → TDD → guardrails
+→ shipping-binary tests → adversarial failures → production reality
+→ exact-SHA CI → release gate
 ```
 
-Core modules own behavior and state; interfaces call the canonical seams. The
-CLI, for example, must not build its own research engine. An interface or test
-must not introduce a parallel transport, evidence, identity, or persistence
-implementation. Spider compatibility machinery may remain behind approved
-boundaries, while new Scorpion development uses canonical Scorpion paths.
+Green unit tests alone do not mean `CLOSED`. The project checks that code
+exists, the real shipping path reaches it, failures cannot become false
+success, provenance remains truthful, the exact commit passed CI, and required
+external behavior was observed. See [SCORPION_PROCESS.md](./SCORPION_PROCESS.md),
+[SCORPION_ARCHITECTURE.md](./SCORPION_ARCHITECTURE.md), and
+[docs/INTELLIGENT_FAILURE.md](./docs/INTELLIGENT_FAILURE.md).
 
-Durable research follows the single lineage shown above:
+## V1 production reality
 
-```text
-ResearchId
-→ ResearchSession
-→ DurableResearchResult
-→ Source N + EvidenceRef
-→ EvidenceId
-→ EvidenceBundle
-```
+The exact released SHA is `6c7253b8c3f7a4073975dc5cdc25a6572e2113e7`.
+Production Reality run [33144608097](https://github.com/Agentxx7/scorpion-rs/actions/runs/33144608097)
+executed **17/17 required cases with zero skips**. It proved public DNS,
+valid TLS, invalid-certificate rejection, redirects, remote 404/500, NXDOMAIN,
+Website crawl and scrape, CLI crawl/scrape/download/fetch, external MCP HTTPS
+and failure behavior, real external Chrome with JavaScript rendering, truthful
+evidence/provenance, and false-success protection. Release workflow run
+[33146075800](https://github.com/Agentxx7/scorpion-rs/actions/runs/33146075800)
+created tag `v1.0.0` only after the exact build and security gates passed.
 
-Development proceeds by narrowing claims to the proof actually obtained:
+## Known limitations
 
-```text
-AUDIT REALITY
-      ↓
-DEFINE ONE FRONTIER
-      ↓
-TRACE CANONICAL PRODUCT PATH
-      ↓
-MINIMAL IMPLEMENTATION
-      ↓
-CODE_PROVEN
-      ↓
-CI_PROVEN
-      ↓
-OPERATOR_OBSERVED
-      ↓
-CLOSED
-```
+- There is no dedicated Scorpion Web/Search UI yet.
+- Search requires an operator-provided SearXNG endpoint.
+- Durable research requires a configured database, SearXNG, and
+  OpenAI-compatible model endpoint.
+- HTTP/2 is not a V1 protocol guarantee.
+- Real Chrome/CDP acquisitions may truthfully expose `BackendProvenance = None`
+  and `ResponseOrigin = None` when the model cannot identify an HTTP backend.
+- Tor requires operator-provided SOCKS5h/Tor infrastructure.
+- Local PaliGemma is optional and bounded by its pinned model, hardware, and
+  supported challenge-family contract. Scorpion does not promise general
+  third-party CAPTCHA bypass.
+- Canonical cache is optional.
+- `wreq`, decentralized, memvid/full-agent, `spider_worker`, experimental
+  backend combinations, and direct/internal Chrome APIs are excluded from the
+  V1 production-ready declaration.
+- V1 currently distributes source/build instructions rather than prebuilt
+  binaries.
 
-`OPERATOR_OBSERVED` is required only when meaningful and feasible and when the
-capability declares it. The canonical proof classes are `CODE_PROVEN`
-(source/static evidence and deterministic tests), `CI_PROVEN` (an identified
-real CI execution), `OPERATOR_OBSERVED` (a concrete product-path observation),
-`LIVE_ENVIRONMENT_DEPENDENT` (a declared external-environment dependency, not
-an observation), and `UNPROVEN` (required proof does not yet exist).
+## Public roadmap
 
-Consequently, green tests do not mean `CLOSED`; a configured workflow is not
-`CI_PROVEN`; successful CI is not `OPERATOR_OBSERVED`; and
-`LIVE_ENVIRONMENT_DEPENDENT` does not mean live execution was observed.
+### Phase 1 — Released now
 
-## Architecture and process
+V1.0.0 provides crawl, scrape, fetch, download, CLI, MCP, Chrome, SearXNG
+search, durable research, evidence/provenance, challenge routing, cache and
+Tor boundaries, plus release/security/production-reality assurance.
 
-- [Product contract](./SCORPION.md)
-- [Canonical architecture and guardrails](./SCORPION_ARCHITECTURE.md)
-- [Software design specification](./SCORPION_SDD.md)
-- [Frontier process](./SCORPION_PROCESS.md)
-- [Intelligent failure: AI, TDD, and false product confidence](./docs/INTELLIGENT_FAILURE.md)
-- [Canonical closure and production-reality harness](./docs/frontier/CANONICAL_CLOSURE_AND_PRODUCTION_REALITY_HARNESS_SDD.md)
+### Phase 2 — Next priority: visible operator experience
 
-These documents distinguish canonical Scorpion ownership from inherited
-Spider compatibility code and future roadmap work.
+Build a thin Scorpion Web Console / Search UI where a person can type a
+question and see discovery, source selection, live acquisition progress,
+research synthesis, evidence/provenance inspection, `ResearchId` reopening,
+and failures. Pair it with a minimal SearXNG/database/model quick start and a
+stable public JSON research CLI contract. The console will remain an interface
+over the canonical engine.
 
-## Current limitations and roadmap
+### Phase 3 — Research depth
 
-The following remain separate work rather than completed product claims:
+Deterministic replay and complete search/model request snapshots, adaptive
+focused crawling, richer browser/DOM/network traces, first-class non-HTML
+evidence, and richer research/discovery lineage.
 
-- Deterministic research replay and complete model/search request snapshots
-- Background watch scheduler daemon operation
-- Watch notifications
-- Unified mixed clearweb/`.onion` research orchestration
-- A stable public JSON contract for research CLI output
+### Phase 4 — Monitoring
 
-Some provider, browser, model, CAPTCHA, and transport paths are feature-gated
-or require separate operator qualification. Consult the architecture inventory
-before treating an internal seam as a shipping product capability.
+Watch identity, state, scheduled execution primitives, change detection, and
+health/readiness exist today. A background scheduler daemon, notifications,
+and operator UI remain future work.
 
-## Upstream libraries and services
+### Phase 5 — Network and distribution expansion
 
-For the inherited Spider Rust API, packages, examples, and managed service:
+Potential future directions include mixed clearweb/`.onion` orchestration and
+packaging improvements, including prebuilt release artifacts where appropriate.
+No dates or uncommitted version promises are made.
 
-- [Spider repository](https://github.com/spider-rs/spider)
-- [Spider crate](https://crates.io/crates/spider)
-- [Spider API documentation](https://docs.rs/spider)
-- [Spider Cloud](https://spider.cloud)
+## Documentation hierarchy
 
-Scorpion core remains independently self-hostable; Spider Cloud is an optional
-inherited integration, not a requirement for canonical local research.
+- [SCORPION.md](./SCORPION.md) — public product contract
+- [SCORPION_ARCHITECTURE.md](./SCORPION_ARCHITECTURE.md) — canonical ownership and architecture truth
+- [SCORPION_SDD.md](./SCORPION_SDD.md) — design specification
+- [SCORPION_PROCESS.md](./SCORPION_PROCESS.md) — frontier and verification process
+- [docs/INTELLIGENT_FAILURE.md](./docs/INTELLIGENT_FAILURE.md) — AI/TDD/product-confidence lessons
+- [CLI guide](./spider_cli/README.md)
 
-## License
+## Upstream and license
 
-This repository retains Spider's [MIT license](./LICENSE) and attribution.
-Scorpion-specific additions are distributed under the same repository license.
+For inherited Spider APIs, packages, and managed service, see the
+[Spider repository](https://github.com/spider-rs/spider),
+[Spider crate](https://crates.io/crates/spider), [docs.rs](https://docs.rs/spider),
+and [Spider Cloud](https://spider.cloud). Spider Cloud is optional; Scorpion
+core remains self-hostable. The repository retains Spider's MIT license and
+attribution.

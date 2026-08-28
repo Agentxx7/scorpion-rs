@@ -212,6 +212,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     button:disabled { opacity: .6; cursor: wait; }
     #status { min-height: 1.5rem; margin: 1rem 0; color: #536170; }
     #status.error { color: #b42318; }
+    section { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #d6dce3; }
+    #research-status.error { color: #b42318; }
+    #research-result { white-space: pre-wrap; }
     ol { padding-left: 1.4rem; }
     li { margin: 0 0 1.4rem; }
     a { color: #165dff; font-size: 1.1rem; }
@@ -232,6 +235,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
     </form>
     <div id="status" role="status" aria-live="polite"></div>
     <ol id="results"></ol>
+    <section aria-labelledby="research-heading">
+      <h2 id="research-heading">Research</h2>
+      <p class="tagline">Run durable research with canonical evidence and synthesis.</p>
+      <form id="research-form">
+        <label for="research-topic" hidden>Research topic</label>
+        <input id="research-topic" name="topic" type="text" placeholder="Research a topic" autocomplete="off" required>
+        <button id="research-button" type="submit">Start Research</button>
+      </form>
+      <div id="research-status" role="status" aria-live="polite"></div>
+      <div id="research-result"></div>
+    </section>
   </main>
   <script>
     const form = document.getElementById('search-form');
@@ -239,6 +253,13 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const button = document.getElementById('search-button');
     const status = document.getElementById('status');
     const results = document.getElementById('results');
+    const researchForm = document.getElementById('research-form');
+    const researchTopic = document.getElementById('research-topic');
+    const researchButton = document.getElementById('research-button');
+    const researchStatus = document.getElementById('research-status');
+    const researchResult = document.getElementById('research-result');
+    let researchGeneration = 0;
+    let researchTimer = null;
     const text = (value) => document.createTextNode(value ?? '');
     function showError(message) {
       status.className = 'error';
@@ -282,6 +303,81 @@ const INDEX_HTML: &str = r#"<!doctype html>
         }
       } catch (_) { showError('Search is unavailable.'); }
       finally { button.disabled = false; }
+    });
+    const terminalResearchStates = new Set([
+      'search_failed', 'completed_no_search_results', 'completed_no_observed_acquisitions',
+      'completed_no_extractions', 'completed_without_synthesis_requested',
+      'completed_synthesis_insufficient', 'completed_synthesis_failed', 'completed_successfully'
+    ]);
+    const researchStateLabel = (state) => state.replaceAll('_', ' ');
+    function renderResearchError(message) {
+      researchStatus.className = 'error';
+      researchStatus.replaceChildren(text(message));
+      researchResult.replaceChildren();
+    }
+    function renderResearch(payload) {
+      researchStatus.className = '';
+      researchStatus.replaceChildren(text(`Research ${researchStateLabel(payload.state)}`));
+      const counts = payload.counts || {};
+      const lines = [
+        `ResearchId: ${payload.research_id}`,
+        `Topic: ${payload.topic}`,
+        `State: ${researchStateLabel(payload.state)}`,
+        `Search results: ${counts.search_results ?? 0}`,
+        `Acquisition attempts: ${counts.acquisition_attempts ?? 0}`,
+        `Durable sources: ${counts.durable_sources ?? 0}`,
+        `Observed acquisitions: ${counts.observed_acquisitions ?? 0}`,
+        `Successful extractions: ${counts.successful_extractions ?? 0}`,
+        `Created: ${payload.created_at_unix_ms}`
+      ];
+      if (payload.completed_at_unix_ms != null) lines.push(`Completed: ${payload.completed_at_unix_ms}`);
+      if (payload.synthesis_summary) lines.push(`\nSynthesis:\n${payload.synthesis_summary}`);
+      if (payload.evidence_ids?.length) lines.push(`\nEvidenceIds:\n${payload.evidence_ids.join('\n')}`);
+      researchResult.replaceChildren(text(lines.join('\n')));
+    }
+    async function pollResearch(id, generation) {
+      if (generation !== researchGeneration) return;
+      try {
+        const response = await fetch(`/api/research/${encodeURIComponent(id)}`);
+        const payload = await response.json();
+        if (generation !== researchGeneration) return;
+        if (!response.ok) { renderResearchError(payload?.error?.message || 'Research status is unavailable.'); researchButton.disabled = false; return; }
+        renderResearch(payload);
+        if (!terminalResearchStates.has(payload.state)) {
+          researchTimer = window.setTimeout(() => pollResearch(id, generation), 1000);
+        } else {
+          researchButton.disabled = false;
+        }
+      } catch (_) {
+        if (generation === researchGeneration) renderResearchError('Research status is temporarily unavailable.');
+        researchButton.disabled = false;
+      }
+    }
+    researchForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const topic = researchTopic.value.trim();
+      if (!topic) { renderResearchError('Enter a research topic.'); return; }
+      researchGeneration += 1;
+      const generation = researchGeneration;
+      if (researchTimer !== null) { window.clearTimeout(researchTimer); researchTimer = null; }
+      researchButton.disabled = true;
+      researchStatus.className = '';
+      researchStatus.replaceChildren(text('Submitting research…'));
+      researchResult.replaceChildren();
+      try {
+        const response = await fetch('/api/research', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ topic })
+        });
+        const payload = await response.json();
+        if (generation !== researchGeneration) return;
+        if (!response.ok) { renderResearchError(payload?.error?.message || 'Research is unavailable.'); researchButton.disabled = false; return; }
+        renderResearch({ research_id: payload.research_id, topic, state: payload.state, counts: {} });
+        await pollResearch(payload.research_id, generation);
+      } catch (_) {
+        if (generation === researchGeneration) renderResearchError('Research is unavailable.');
+        researchButton.disabled = false;
+      }
     });
   </script>
 </body>

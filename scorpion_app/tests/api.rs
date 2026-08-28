@@ -96,8 +96,13 @@ fn real_server_serves_search_only_console_from_same_origin() {
     assert!(response.contains("fetch('/api/search'"));
     assert!(response.contains("Searching…"));
     assert!(response.contains("No results found."));
+    assert!(response.contains("id=\"research-form\""));
+    assert!(response.contains("fetch('/api/research'"));
+    assert!(response.contains("terminalResearchStates"));
+    assert!(response.contains("completed_synthesis_insufficient"));
+    assert!(response.contains("EvidenceIds:"));
     assert!(!response.contains("SEARXNG_BASE_URL"));
-    assert!(!response.contains("ResearchId"));
+    assert!(!response.contains("OPENAI_COMPAT_API_KEY"));
 }
 
 #[test]

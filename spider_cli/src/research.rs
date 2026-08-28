@@ -465,6 +465,7 @@ mod tests {
                 source_number: 1,
                 evidence: reference,
             }],
+            extraction_diagnostics: Vec::new(),
             counts: ResearchSessionCounts {
                 search_results: 1,
                 acquisition_attempts: 1,
@@ -512,6 +513,7 @@ mod tests {
             extraction_instructions: None,
             sources: Vec::new(),
             source_bindings: Vec::new(),
+            extraction_diagnostics: Vec::new(),
             counts: Default::default(),
             state: ResearchSessionState::CompletedSuccessfully,
             result: None,
@@ -531,6 +533,7 @@ mod tests {
             extraction_instructions: None,
             sources: Vec::new(),
             source_bindings: Vec::new(),
+            extraction_diagnostics: Vec::new(),
             counts: Default::default(),
             state,
             result: None,

@@ -16,6 +16,7 @@ use spider_agent::{
     AgentBuilder, AgentError, FinishReason, ResearchExtraction, ResearchOptions, ResearchResult,
 };
 use std::collections::HashSet;
+#[cfg(test)]
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -218,6 +219,46 @@ pub struct DurableResearchRun {
     pub session: ResearchSession,
     /// Provider-neutral research result or its original execution error.
     pub result: Result<ResearchResult, AgentError>,
+}
+
+/// A durably claimed canonical research invocation whose execution has not
+/// yet been consumed. The identity and claim are created by Spider; callers
+/// may only inspect the id and consume this value to continue the same run.
+pub struct ClaimedDurableResearch {
+    store: Arc<DomainPersistence>,
+    acquirer: CanonicalPageAcquirer,
+    agent: spider_agent::Agent,
+    session: ResearchSession,
+    claim_revision: u64,
+    options: ResearchOptions,
+}
+
+impl ClaimedDurableResearch {
+    /// The canonical identity allocated and durably claimed for this run.
+    pub fn id(&self) -> ResearchId {
+        self.session.id
+    }
+
+    /// Consume the claim and execute the canonical research path exactly once
+    /// through this capability.
+    pub async fn execute(self) -> Result<DurableResearchRun, ResearchSessionError> {
+        let execution_topic = self.session.topic.clone();
+        let execution_options = self.options.clone();
+        let result = self
+            .agent
+            .research(&execution_topic, execution_options)
+            .await;
+        finalize_claimed(
+            self.store,
+            self.acquirer,
+            self.session,
+            self.claim_revision,
+            result,
+            self.options.max_pages,
+            self.options.synthesize,
+        )
+        .await
+    }
 }
 
 /// Failure of durable session ownership or persistence.
@@ -658,6 +699,7 @@ async fn bind_sources(
     Ok((sources, bindings))
 }
 
+#[cfg(test)]
 async fn run_with_id<F, Fut>(
     store: Arc<DomainPersistence>,
     acquirer: CanonicalPageAcquirer,
@@ -670,7 +712,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<ResearchResult, AgentError>>,
 {
-    let mut session = ResearchSession {
+    let session = ResearchSession {
         id,
         topic,
         extraction_instructions: options.extraction_prompt.clone(),
@@ -685,6 +727,27 @@ where
     let claim_revision = persist_claim(&store, &session).await?;
 
     let result = execute().await;
+    finalize_claimed(
+        store,
+        acquirer,
+        session,
+        claim_revision,
+        result,
+        options.max_pages,
+        options.synthesize,
+    )
+    .await
+}
+
+async fn finalize_claimed(
+    store: Arc<DomainPersistence>,
+    acquirer: CanonicalPageAcquirer,
+    mut session: ResearchSession,
+    claim_revision: u64,
+    result: Result<ResearchResult, AgentError>,
+    max_pages: usize,
+    synthesize: bool,
+) -> Result<DurableResearchRun, ResearchSessionError> {
     let retained = acquirer.retained_evidence();
     let observed_acquisitions = retained
         .iter()
@@ -695,18 +758,55 @@ where
     session.source_bindings = source_bindings;
     if let Ok(result) = &result {
         session.counts.search_results = result.search_results.len();
-        session.counts.acquisition_attempts =
-            options.max_pages.min(result.search_results.results.len());
+        session.counts.acquisition_attempts = max_pages.min(result.search_results.results.len());
         session.counts.successful_extractions = result.extractions.len();
     }
     session.counts.durable_sources = retained.len();
     session.counts.observed_acquisitions = observed_acquisitions;
-    session.state = terminal_state(&result, options.synthesize, observed_acquisitions);
+    session.state = terminal_state(&result, synthesize, observed_acquisitions);
     session.result = build_durable_result(&result, &session.state, &session.source_bindings)?;
     session.completed_at_unix_ms = Some(unix_time_ms());
     persist_terminal(&store, &session, claim_revision).await?;
 
     Ok(DurableResearchRun { session, result })
+}
+
+/// Claim one canonical durable research invocation and persist its `Claimed`
+/// record before returning. No search, acquisition, model, or evidence side
+/// effect is performed by this operation.
+pub async fn claim_durable_research(
+    store: Arc<DomainPersistence>,
+    builder: AgentBuilder,
+    topic: impl Into<String>,
+    options: ResearchOptions,
+) -> Result<ClaimedDurableResearch, ResearchSessionError> {
+    let acquirer =
+        CanonicalPageAcquirer::new_durable(AcquisitionOptions::default(), Arc::clone(&store));
+    let agent = builder
+        .with_page_acquirer(Box::new(acquirer.clone()))
+        .build()
+        .map_err(ResearchSessionError::AgentSetup)?;
+    let session = ResearchSession {
+        id: ResearchId::new(),
+        topic: topic.into(),
+        extraction_instructions: options.extraction_prompt.clone(),
+        sources: Vec::new(),
+        source_bindings: Vec::new(),
+        counts: ResearchSessionCounts::default(),
+        state: ResearchSessionState::Claimed,
+        result: None,
+        created_at_unix_ms: unix_time_ms(),
+        completed_at_unix_ms: None,
+    };
+    let claim_revision = persist_claim(&store, &session).await?;
+    Ok(ClaimedDurableResearch {
+        store,
+        acquirer,
+        agent,
+        session,
+        claim_revision,
+        options,
+    })
 }
 
 /// Execute one explicitly durable canonical research session.
@@ -720,24 +820,8 @@ pub async fn run_durable_research(
     topic: impl Into<String>,
     options: ResearchOptions,
 ) -> Result<DurableResearchRun, ResearchSessionError> {
-    let acquirer =
-        CanonicalPageAcquirer::new_durable(AcquisitionOptions::default(), Arc::clone(&store));
-    let agent = builder
-        .with_page_acquirer(Box::new(acquirer.clone()))
-        .build()
-        .map_err(ResearchSessionError::AgentSetup)?;
-    let topic = topic.into();
-    let execution_topic = topic.clone();
-    let execution_options = options.clone();
-    run_with_id(
-        store,
-        acquirer,
-        ResearchId::new(),
-        topic,
-        options,
-        move || async move { agent.research(&execution_topic, execution_options).await },
-    )
-    .await
+    let claimed = claim_durable_research(store, builder, topic, options).await?;
+    claimed.execute().await
 }
 
 #[cfg(test)]
@@ -898,6 +982,48 @@ mod tests {
             first.session.state,
             ResearchSessionState::CompletedNoSearchResults
         );
+    }
+
+    #[tokio::test]
+    async fn public_claim_is_durable_before_execution_is_consumed() {
+        let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+        let claimed = claim_durable_research(
+            Arc::clone(&store),
+            AgentBuilder::new(),
+            "claimed topic",
+            ResearchOptions::new(),
+        )
+        .await
+        .unwrap();
+
+        let id = claimed.id();
+        let (_, session) = read_research_session(&store, id).await.unwrap().unwrap();
+        assert_eq!(session.id, id);
+        assert_eq!(session.topic, "claimed topic");
+        assert_eq!(session.state, ResearchSessionState::Claimed);
+        assert!(session.completed_at_unix_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn consumed_claim_keeps_identity_and_publishes_terminal_state() {
+        let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+        let claimed = claim_durable_research(
+            Arc::clone(&store),
+            AgentBuilder::new(),
+            "same identity",
+            ResearchOptions::new(),
+        )
+        .await
+        .unwrap();
+        let id = claimed.id();
+
+        let run = claimed.execute().await.unwrap();
+        assert_eq!(run.session.id, id);
+        assert_eq!(run.session.state, ResearchSessionState::SearchFailed);
+        let (_, persisted) = read_research_session(&store, id).await.unwrap().unwrap();
+        assert_eq!(persisted.id, id);
+        assert_eq!(persisted.state, ResearchSessionState::SearchFailed);
+        assert!(persisted.completed_at_unix_ms.is_some());
     }
 
     #[tokio::test]

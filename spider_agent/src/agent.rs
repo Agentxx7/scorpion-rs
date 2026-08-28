@@ -645,8 +645,17 @@ impl Agent {
         ];
 
         let input_bytes = context.len();
+        let options = CompletionOptions {
+            temperature: self.config.temperature,
+            max_tokens: self.config.max_tokens,
+            json_mode: self.config.json_mode,
+            response_format: Some(
+                StructuredOutputConfig::strict(research_synthesis_schema())
+                    .with_name("research_synthesis"),
+            ),
+        };
         let response = self
-            .complete(messages)
+            .complete_with_options(messages, options)
             .await
             .map_err(|error| SynthesisFailure {
                 error,
@@ -1786,6 +1795,23 @@ fn research_extraction_schema() -> serde_json::Value {
             }
         },
         "required": ["facts", "missing_evidence"],
+        "additionalProperties": false
+    })
+}
+
+#[cfg(feature = "search")]
+fn research_synthesis_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "sufficient": { "type": "boolean" },
+            "summary": { "type": "string" },
+            "source_ids": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["sufficient", "summary", "source_ids"],
         "additionalProperties": false
     })
 }
@@ -3299,6 +3325,49 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn synthesis_uses_provider_neutral_strict_schema_options() {
+            struct StrictCheckLlm;
+            #[async_trait]
+            impl LLMProvider for StrictCheckLlm {
+                async fn complete(
+                    &self,
+                    _messages: Vec<Message>,
+                    options: &CompletionOptions,
+                    _client: &reqwest::Client,
+                ) -> AgentResult<CompletionResponse> {
+                    assert!(matches!(
+                        options.response_format,
+                        Some(StructuredOutputConfig {
+                            ref schema_name,
+                            strict: true,
+                            enabled: true,
+                            schema: Some(_),
+                        }) if schema_name == "research_synthesis"
+                    ));
+                    Ok(CompletionResponse {
+                        content: r#"{"sufficient":false,"summary":"Insufficient evidence: limited source.","source_ids":[]}"#.into(),
+                        usage: TokenUsage::default(),
+                        finish_reason: Some(FinishReason::Stop),
+                    })
+                }
+                fn provider_name(&self) -> &'static str {
+                    "strict-check"
+                }
+                fn is_configured(&self) -> bool {
+                    true
+                }
+            }
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(StrictCheckLlm));
+            let agent = builder.build().unwrap();
+            let result = agent
+                .synthesize_research("topic", &[extraction("https://one.test", Some("evid_one"))])
+                .await
+                .unwrap();
+            assert!(!result.0.sufficient);
+        }
+
+        #[tokio::test]
         async fn synthesis_can_find_collective_evidence_sufficient_from_partial_sources() {
             let (llm, captured) = ScriptedLlm::new(&[
                 r#"{"sufficient":true,"summary":"Combined support [Source 1] [Source 2]","source_ids":["Source 1","Source 2"]}"#,
@@ -3749,6 +3818,23 @@ mod tests {
             assert_eq!(
                 schema["required"],
                 serde_json::json!(["facts", "missing_evidence"])
+            );
+            assert_eq!(schema["additionalProperties"], false);
+        }
+
+        #[test]
+        fn exact_research_synthesis_schema_is_strict_and_closed() {
+            let schema = research_synthesis_schema();
+            assert_eq!(schema["properties"]["sufficient"]["type"], "boolean");
+            assert_eq!(schema["properties"]["summary"]["type"], "string");
+            assert_eq!(schema["properties"]["source_ids"]["type"], "array");
+            assert_eq!(
+                schema["properties"]["source_ids"]["items"]["type"],
+                "string"
+            );
+            assert_eq!(
+                schema["required"],
+                serde_json::json!(["sufficient", "summary", "source_ids"])
             );
             assert_eq!(schema["additionalProperties"], false);
         }

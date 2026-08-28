@@ -10,6 +10,7 @@ members = [
     "spider_mcp",
     "spider_transport",
     "spider_search",
+    "scorpion_app",
     # internal
     "examples",
     "benches"]

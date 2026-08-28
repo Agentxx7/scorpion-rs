@@ -70,6 +70,24 @@ scorpion mcp
 Run `scorpion --help` and `scorpion <command> --help` for the complete
 shipping command surface.
 
+## Local application API foundation
+
+The post-V1 `scorpion-api` binary is a small server-side boundary for a future
+Web Console. It currently exposes only `POST /api/search` and delegates search
+to the same canonical SearXNG provider used by Scorpion; provider metadata,
+credentials, and local paths are not part of the public response. It binds to
+`127.0.0.1:8787` by default and reads the operator-owned `SEARXNG_BASE_URL`.
+
+```sh
+SEARXNG_BASE_URL=http://127.0.0.1:8080 target/debug/scorpion-api
+curl -sS -X POST http://127.0.0.1:8787/api/search \
+  -H 'content-type: application/json' \
+  -d '{"query":"rust async","limit":5}'
+```
+
+This is an application boundary, not a Web UI. Research, accounts,
+authentication, and progress streaming are not implemented by this endpoint.
+
 ## Search today
 
 Search is a real canonical capability, but Scorpion is not itself a public

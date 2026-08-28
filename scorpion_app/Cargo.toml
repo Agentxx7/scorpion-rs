@@ -1,0 +1,16 @@
+[package]
+name = "scorpion_app"
+version = "2.53.4"
+edition = "2021"
+description = "Small server-side application boundary over Scorpion's canonical capabilities."
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spider = { path = "../spider", default-features = false, features = ["search_searxng"] }
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-thread"] }
+
+[[bin]]
+name = "scorpion-api"
+path = "src/main.rs"

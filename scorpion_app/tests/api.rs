@@ -50,6 +50,33 @@ fn post(base: &str, body: &str) -> String {
     response
 }
 
+fn get(base: &str, path: &str) -> String {
+    let url = base.strip_prefix("http://").unwrap();
+    let mut stream = TcpStream::connect(url).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn real_server_serves_search_only_console_from_same_origin() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("<h1>Scorpion</h1>"));
+    assert!(response.contains("fetch('/api/search'"));
+    assert!(response.contains("Searching…"));
+    assert!(response.contains("No results found."));
+    assert!(!response.contains("SEARXNG_BASE_URL"));
+    assert!(!response.contains("ResearchId"));
+}
+
 #[test]
 fn real_server_delegates_to_canonical_search_and_filters_metadata() {
     let provider = fake_searxng(

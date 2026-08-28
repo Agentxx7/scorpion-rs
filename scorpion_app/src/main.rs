@@ -60,12 +60,26 @@ async fn handle(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error +
         })
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
+    if content_length > MAX_BODY_BYTES {
+        return write_json(
+            &mut stream,
+            413,
+            r#"{"error":{"code":"request_too_large","message":"request body too large"}}"#,
+        )
+        .await
+        .map_err(Into::into);
+    }
     while bytes.len() < body_offset + content_length {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
             break;
         }
         bytes.extend_from_slice(&chunk[..read]);
+    }
+    if method == "GET" && path == "/" {
+        return write_html(&mut stream, INDEX_HTML)
+            .await
+            .map_err(Into::into);
     }
     if method == "GET" && path == "/health" {
         return write_json(&mut stream, 200, r#"{"status":"ok"}"#)
@@ -117,3 +131,104 @@ async fn write_json(stream: &mut TcpStream, status: u16, body: &str) -> Result<(
     let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     stream.write_all(response.as_bytes()).await
 }
+
+async fn write_html(stream: &mut TcpStream, body: &str) -> Result<(), std::io::Error> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await
+}
+
+const INDEX_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scorpion Search</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #f7f8fa; color: #18202a; }
+    main { width: min(780px, calc(100% - 2rem)); margin: 12vh auto; }
+    h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin: 0 0 .35rem; }
+    .tagline { color: #536170; margin: 0 0 2rem; }
+    form { display: flex; gap: .6rem; }
+    input { flex: 1; min-width: 0; padding: .85rem 1rem; border: 1px solid #aeb8c4; border-radius: .55rem; font-size: 1rem; background: white; color: #18202a; }
+    button { padding: .85rem 1.2rem; border: 0; border-radius: .55rem; background: #165dff; color: white; font-weight: 650; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #status { min-height: 1.5rem; margin: 1rem 0; color: #536170; }
+    #status.error { color: #b42318; }
+    ol { padding-left: 1.4rem; }
+    li { margin: 0 0 1.4rem; }
+    a { color: #165dff; font-size: 1.1rem; }
+    .url { color: #536170; font-size: .85rem; overflow-wrap: anywhere; }
+    .snippet { margin: .3rem 0; }
+    .meta { color: #536170; font-size: .85rem; }
+    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Scorpion</h1>
+    <p class="tagline">Evidence-first web search and acquisition engine</p>
+    <form id="search-form">
+      <label for="query" hidden>Search query</label>
+      <input id="query" name="query" type="search" placeholder="Search the web" autocomplete="off" required>
+      <button id="search-button" type="submit">Search</button>
+    </form>
+    <div id="status" role="status" aria-live="polite"></div>
+    <ol id="results"></ol>
+  </main>
+  <script>
+    const form = document.getElementById('search-form');
+    const input = document.getElementById('query');
+    const button = document.getElementById('search-button');
+    const status = document.getElementById('status');
+    const results = document.getElementById('results');
+    const text = (value) => document.createTextNode(value ?? '');
+    function showError(message) {
+      status.className = 'error';
+      status.replaceChildren(text(message));
+      results.replaceChildren();
+    }
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const query = input.value.trim();
+      if (!query) { showError('Enter a search query.'); return; }
+      button.disabled = true;
+      status.className = '';
+      status.replaceChildren(text('Searching…'));
+      results.replaceChildren();
+      try {
+        const response = await fetch('/api/search', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ query, limit: 10 })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          showError(payload?.error?.message || 'Search is unavailable.');
+          return;
+        }
+        status.className = '';
+        status.replaceChildren(text(payload.result_count ? `${payload.result_count} results` : 'No results found.'));
+        for (const result of payload.results || []) {
+          const item = document.createElement('li');
+          const link = document.createElement('a');
+          link.href = result.url;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          link.appendChild(text(result.title || result.url));
+          const url = document.createElement('div'); url.className = 'url'; url.appendChild(text(result.url));
+          const snippet = document.createElement('div'); snippet.className = 'snippet'; snippet.appendChild(text(result.snippet));
+          const meta = document.createElement('div'); meta.className = 'meta';
+          if (result.date) meta.appendChild(text(result.date));
+          if (result.score != null) { if (result.date) meta.appendChild(text(' · ')); meta.appendChild(text(`score ${result.score}`)); }
+          item.append(link, url, snippet, meta); results.appendChild(item);
+        }
+      } catch (_) { showError('Search is unavailable.'); }
+      finally { button.disabled = false; }
+    });
+  </script>
+</body>
+</html>"#;

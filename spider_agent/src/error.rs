@@ -18,6 +18,8 @@ pub enum AgentError {
     InvalidField(&'static str),
     /// Strict structured generation exhausted its output budget.
     IncompleteGeneration,
+    /// Synthesis generation exhausted its output budget.
+    SynthesisIncompleteGeneration,
     /// Strict research extraction failed schema or semantic validation.
     InvalidExtraction(String),
     /// Provider returned no primary completion content.
@@ -57,6 +59,7 @@ impl fmt::Display for AgentError {
             Self::MissingField(field) => write!(f, "Missing field: {}", field),
             Self::InvalidField(field) => write!(f, "Invalid field: {}", field),
             Self::IncompleteGeneration => write!(f, "Incomplete structured generation"),
+            Self::SynthesisIncompleteGeneration => write!(f, "Incomplete synthesis generation"),
             Self::InvalidExtraction(msg) => write!(f, "Invalid research extraction: {}", msg),
             Self::EmptyCompletion => write!(f, "Empty completion"),
             Self::Remote(msg) => write!(f, "Remote error: {}", msg),

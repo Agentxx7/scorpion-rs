@@ -289,7 +289,7 @@ impl Agent {
             return Err(AgentError::EmptyCompletion);
         }
         if response.finish_reason == Some(FinishReason::Length) {
-            return Err(AgentError::IncompleteGeneration);
+            return Err(AgentError::SynthesisIncompleteGeneration);
         }
         let extraction = parse_strict_research_extraction(&response.content)?;
         Ok((extraction, response.finish_reason, selected_bytes))
@@ -386,6 +386,7 @@ impl Agent {
                 summary: None,
                 synthesis_sufficient: None,
                 synthesis_source_ids: Vec::new(),
+                synthesis_diagnostic: Some(SynthesisDiagnostic::not_attempted()),
                 extraction_diagnostics: Vec::new(),
                 usage: TokenUsage::default(),
             });
@@ -522,16 +523,22 @@ impl Agent {
         // Synthesize if requested
         let mut synthesis_sufficient = None;
         let mut synthesis_source_ids = Vec::new();
+        let mut synthesis_diagnostic = Some(SynthesisDiagnostic::not_attempted());
         let summary = if options.synthesize && !extractions.is_empty() {
             match self.synthesize_research(topic, &extractions).await {
-                Ok((synthesis, usage)) => {
+                Ok((synthesis, usage, diagnostic)) => {
                     total_usage.accumulate(&usage);
                     synthesis_sufficient = Some(synthesis.sufficient);
                     synthesis_source_ids = synthesis.source_ids;
+                    synthesis_diagnostic = Some(diagnostic);
                     Some(synthesis.summary)
                 }
                 Err(e) => {
                     log::warn!("Synthesis failed: {}", e);
+                    synthesis_diagnostic = Some(SynthesisDiagnostic::failure(
+                        classify_synthesis_error(&e),
+                        extractions.len(),
+                    ));
                     None
                 }
             }
@@ -546,6 +553,7 @@ impl Agent {
             summary,
             synthesis_sufficient,
             synthesis_source_ids,
+            synthesis_diagnostic,
             extraction_diagnostics,
             usage: total_usage,
         })
@@ -610,7 +618,7 @@ impl Agent {
         &self,
         topic: &str,
         extractions: &[PageExtraction],
-    ) -> AgentResult<(ValidatedResearchSynthesis, TokenUsage)> {
+    ) -> AgentResult<(ValidatedResearchSynthesis, TokenUsage, SynthesisDiagnostic)> {
         let mut context = String::new();
         for (i, extraction) in extractions.iter().enumerate() {
             let source_id = format!("Source {}", i + 1);
@@ -633,10 +641,32 @@ impl Agent {
             )),
         ];
 
+        let input_bytes = context.len();
         let response = self.complete(messages).await?;
+        if response.finish_reason == Some(FinishReason::Length) {
+            return Err(AgentError::IncompleteGeneration);
+        }
+        if response.content.trim().is_empty() {
+            return Err(AgentError::EmptyCompletion);
+        }
         let synthesis = validate_research_synthesis(&response.content, extractions.len())?;
+        let outcome = if synthesis.sufficient {
+            SynthesisDiagnosticOutcome::Success
+        } else {
+            SynthesisDiagnosticOutcome::Insufficient
+        };
 
-        Ok((synthesis, response.usage))
+        Ok((
+            synthesis,
+            response.usage,
+            SynthesisDiagnostic {
+                synthesis_attempted: true,
+                outcome,
+                finish_reason: response.finish_reason,
+                input_bytes: Some(input_bytes),
+                source_count: extractions.len(),
+            },
+        ))
     }
 
     // ==================== Memory Methods ====================
@@ -1375,6 +1405,102 @@ struct ValidatedResearchSynthesis {
 }
 
 #[cfg(feature = "search")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+/// Provider-neutral, sanitized synthesis outcome.
+pub enum SynthesisDiagnosticOutcome {
+    /// Synthesis was not eligible to run.
+    NotAttempted,
+    /// No LLM provider was configured.
+    ProviderNotConfigured,
+    /// The provider request failed.
+    ProviderRequestFailed,
+    /// The provider request timed out.
+    ProviderTimeout,
+    /// Generation ended at its configured length limit.
+    IncompleteGeneration,
+    /// The provider returned no content.
+    EmptyCompletion,
+    /// Content was present but unusable.
+    UnusableCompletionContent,
+    /// The completion was not valid JSON.
+    MalformedStructuredOutput,
+    /// JSON did not satisfy the structured schema.
+    SchemaValidationFailed,
+    /// Output failed semantic validation.
+    SemanticValidationFailed,
+    /// Synthesis completed with insufficient evidence.
+    Insufficient,
+    /// Synthesis completed successfully.
+    Success,
+}
+
+#[cfg(feature = "search")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Sanitized durable metadata describing one synthesis attempt.
+pub struct SynthesisDiagnostic {
+    /// Whether synthesis was invoked.
+    pub synthesis_attempted: bool,
+    /// Normalized synthesis outcome.
+    pub outcome: SynthesisDiagnosticOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Provider finish reason, when available.
+    pub finish_reason: Option<FinishReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Bounded synthesis input size in bytes.
+    pub input_bytes: Option<usize>,
+    /// Number of successful source extractions supplied.
+    pub source_count: usize,
+}
+
+#[cfg(feature = "search")]
+impl SynthesisDiagnostic {
+    fn not_attempted() -> Self {
+        Self {
+            synthesis_attempted: false,
+            outcome: SynthesisDiagnosticOutcome::NotAttempted,
+            finish_reason: None,
+            input_bytes: None,
+            source_count: 0,
+        }
+    }
+    fn failure(outcome: SynthesisDiagnosticOutcome, source_count: usize) -> Self {
+        Self {
+            synthesis_attempted: true,
+            outcome,
+            finish_reason: (outcome == SynthesisDiagnosticOutcome::IncompleteGeneration)
+                .then_some(FinishReason::Length),
+            input_bytes: None,
+            source_count,
+        }
+    }
+}
+
+#[cfg(feature = "search")]
+fn classify_synthesis_error(error: &AgentError) -> SynthesisDiagnosticOutcome {
+    match error {
+        AgentError::IncompleteGeneration => SynthesisDiagnosticOutcome::IncompleteGeneration,
+        AgentError::SynthesisIncompleteGeneration => {
+            SynthesisDiagnosticOutcome::IncompleteGeneration
+        }
+        AgentError::EmptyCompletion => SynthesisDiagnosticOutcome::EmptyCompletion,
+        AgentError::Timeout => SynthesisDiagnosticOutcome::ProviderTimeout,
+        AgentError::Http(source) if source.is_timeout() => {
+            SynthesisDiagnosticOutcome::ProviderTimeout
+        }
+        AgentError::NotConfigured(_) => SynthesisDiagnosticOutcome::ProviderNotConfigured,
+        AgentError::Json(_) => SynthesisDiagnosticOutcome::MalformedStructuredOutput,
+        AgentError::InvalidField(_) | AgentError::MissingField(_) => {
+            SynthesisDiagnosticOutcome::SchemaValidationFailed
+        }
+        AgentError::Http(_) | AgentError::Llm(_) | AgentError::Remote(_) => {
+            SynthesisDiagnosticOutcome::ProviderRequestFailed
+        }
+        _ => SynthesisDiagnosticOutcome::UnusableCompletionContent,
+    }
+}
+
+#[cfg(feature = "search")]
 const RESEARCH_SOURCE_OMISSION: &str = "\n[SCORPION_RESEARCH_SOURCE_OMISSION]\n";
 
 #[cfg(feature = "search")]
@@ -1854,6 +1980,8 @@ pub struct ResearchResult {
     pub synthesis_sufficient: Option<bool>,
     /// Validated source identifiers used by the synthesis response.
     pub synthesis_source_ids: Vec<String>,
+    /// Sanitized synthesis outcome retained for durable diagnostics.
+    pub synthesis_diagnostic: Option<SynthesisDiagnostic>,
     /// Sanitized per-source extraction outcomes, retained for durable diagnostics.
     #[cfg(feature = "search")]
     pub extraction_diagnostics: Vec<ExtractionDiagnostic>,
@@ -3111,7 +3239,7 @@ mod tests {
             let agent = builder.build().unwrap();
             let sources = vec![extraction("https://example.test/final", Some("evid_test"))];
 
-            let (synthesis, _) = agent.synthesize_research("topic", &sources).await.unwrap();
+            let (synthesis, _, _) = agent.synthesize_research("topic", &sources).await.unwrap();
 
             assert!(synthesis.sufficient);
             let calls = captured.lock().unwrap();
@@ -3146,7 +3274,7 @@ mod tests {
                 extraction("https://two.test", Some("evid_two")),
             ];
 
-            let (synthesis, _) = agent.synthesize_research("topic", &sources).await.unwrap();
+            let (synthesis, _, _) = agent.synthesize_research("topic", &sources).await.unwrap();
 
             assert!(synthesis.sufficient);
             assert_eq!(synthesis.source_ids, ["Source 1", "Source 2"]);
@@ -3187,6 +3315,10 @@ mod tests {
                 .summary
                 .unwrap()
                 .starts_with("Insufficient evidence:"));
+            assert_eq!(
+                result.synthesis_diagnostic.as_ref().unwrap().outcome,
+                SynthesisDiagnosticOutcome::Insufficient
+            );
         }
 
         #[tokio::test]
@@ -3215,6 +3347,10 @@ mod tests {
             assert!(result.summary.is_none());
             assert_eq!(result.synthesis_sufficient, None);
             assert!(result.synthesis_source_ids.is_empty());
+            assert_eq!(
+                result.synthesis_diagnostic.as_ref().unwrap().outcome,
+                SynthesisDiagnosticOutcome::MalformedStructuredOutput
+            );
         }
 
         #[test]

@@ -14,7 +14,7 @@ use crate::features::identity::{EvidenceId, IdentityParseError, ResearchId};
 use crate::utils::evidence::{AcquisitionOptions, EvidenceLedgerError, EvidenceRef};
 use spider_agent::{
     AgentBuilder, AgentError, ExtractionDiagnosticOutcome, FinishReason, ResearchExtraction,
-    ResearchOptions, ResearchResult,
+    ResearchOptions, ResearchResult, SynthesisDiagnostic,
 };
 use std::collections::HashSet;
 #[cfg(test)]
@@ -221,6 +221,9 @@ pub struct ResearchSession {
     /// Per-source sanitized extraction outcomes. Missing in legacy records.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extraction_diagnostics: Vec<ResearchExtractionDiagnostic>,
+    /// Sanitized synthesis outcome; absent in legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_diagnostic: Option<SynthesisDiagnostic>,
     /// Minimal observable counts.
     pub counts: ResearchSessionCounts,
     /// Claimed or truthful terminal state.
@@ -771,6 +774,7 @@ where
         sources: Vec::new(),
         source_bindings: Vec::new(),
         extraction_diagnostics: Vec::new(),
+        synthesis_diagnostic: None,
         counts: ResearchSessionCounts::default(),
         state: ResearchSessionState::Claimed,
         result: None,
@@ -810,6 +814,10 @@ async fn finalize_claimed(
     session.sources = sources;
     session.source_bindings = source_bindings;
     session.extraction_diagnostics = build_extraction_diagnostics(&retained, &result);
+    session.synthesis_diagnostic = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.synthesis_diagnostic.clone());
     if let Ok(result) = &result {
         session.counts.search_results = result.search_results.len();
         session.counts.acquisition_attempts = max_pages.min(result.search_results.results.len());
@@ -847,6 +855,7 @@ pub async fn claim_durable_research(
         sources: Vec::new(),
         source_bindings: Vec::new(),
         extraction_diagnostics: Vec::new(),
+        synthesis_diagnostic: None,
         counts: ResearchSessionCounts::default(),
         state: ResearchSessionState::Claimed,
         result: None,
@@ -956,6 +965,17 @@ mod tests {
             } else {
                 Vec::new()
             },
+            synthesis_diagnostic: Some(spider_agent::SynthesisDiagnostic {
+                synthesis_attempted: synthesis_sufficient.is_some(),
+                outcome: match synthesis_sufficient {
+                    Some(true) => spider_agent::SynthesisDiagnosticOutcome::Success,
+                    Some(false) => spider_agent::SynthesisDiagnosticOutcome::Insufficient,
+                    None => spider_agent::SynthesisDiagnosticOutcome::NotAttempted,
+                },
+                finish_reason: None,
+                input_bytes: None,
+                source_count: acquisition_ids.len(),
+            }),
             extraction_diagnostics: Vec::new(),
             usage: TokenUsage {
                 prompt_tokens: 11,

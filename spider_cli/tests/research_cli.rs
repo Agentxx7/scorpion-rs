@@ -187,6 +187,7 @@ fn show_reopens_and_formats_canonical_result_without_provider_config_or_secret_p
                 evidence: evidence_ref,
             }],
             extraction_diagnostics: Vec::new(),
+            synthesis_diagnostic: None,
             counts: ResearchSessionCounts {
                 search_results: 1,
                 acquisition_attempts: 1,

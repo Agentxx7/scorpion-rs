@@ -1,0 +1,31 @@
+name: V1 Production Reality
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/production-reality.yml
+      - spider_mcp/tests/v1_production_reality.rs
+
+jobs:
+  external-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify exact source identity
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Build exact locked V1 artifacts
+        run: cargo build --locked -p spider_cli -p spider_mcp
+      - name: Run bounded V1 production-reality acceptance
+        env:
+          RUST_MIN_STACK: "67108864"
+          SCORPION_V1_PRODUCTION_REALITY: "1"
+          SCORPION_V1_BIN: target/debug/scorpion
+        run: |
+          set -euo pipefail
+          cargo test --locked -p spider_mcp --test v1_production_reality \
+            v1_production_reality_acceptance -- --exact --ignored --nocapture \
+            | tee /tmp/v1-production-reality.log
+          grep -Fx 'V1_PRODUCTION_REALITY_CASES=17' /tmp/v1-production-reality.log

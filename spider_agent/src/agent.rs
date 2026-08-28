@@ -534,10 +534,12 @@ impl Agent {
                     Some(synthesis.summary)
                 }
                 Err(e) => {
-                    log::warn!("Synthesis failed: {}", e);
-                    synthesis_diagnostic = Some(SynthesisDiagnostic::failure(
-                        classify_synthesis_error(&e),
+                    log::warn!("Synthesis failed: {}", e.error);
+                    synthesis_diagnostic = Some(SynthesisDiagnostic::failure_with_metadata(
+                        classify_synthesis_error(&e.error),
                         extractions.len(),
+                        e.input_bytes,
+                        e.finish_reason,
                     ));
                     None
                 }
@@ -618,7 +620,8 @@ impl Agent {
         &self,
         topic: &str,
         extractions: &[PageExtraction],
-    ) -> AgentResult<(ValidatedResearchSynthesis, TokenUsage, SynthesisDiagnostic)> {
+    ) -> Result<(ValidatedResearchSynthesis, TokenUsage, SynthesisDiagnostic), SynthesisFailure>
+    {
         let mut context = String::new();
         for (i, extraction) in extractions.iter().enumerate() {
             let source_id = format!("Source {}", i + 1);
@@ -642,14 +645,36 @@ impl Agent {
         ];
 
         let input_bytes = context.len();
-        let response = self.complete(messages).await?;
+        let response = self
+            .complete(messages)
+            .await
+            .map_err(|error| SynthesisFailure {
+                error,
+                input_bytes: Some(input_bytes),
+                finish_reason: None,
+            })?;
         if response.finish_reason == Some(FinishReason::Length) {
-            return Err(AgentError::SynthesisIncompleteGeneration);
+            return Err(SynthesisFailure {
+                error: AgentError::SynthesisIncompleteGeneration,
+                input_bytes: Some(input_bytes),
+                finish_reason: response.finish_reason,
+            });
         }
         if response.content.trim().is_empty() {
-            return Err(AgentError::EmptyCompletion);
+            return Err(SynthesisFailure {
+                error: AgentError::EmptyCompletion,
+                input_bytes: Some(input_bytes),
+                finish_reason: response.finish_reason,
+            });
         }
-        let synthesis = validate_research_synthesis(&response.content, extractions.len())?;
+        let synthesis =
+            validate_research_synthesis(&response.content, extractions.len()).map_err(|error| {
+                SynthesisFailure {
+                    error,
+                    input_bytes: Some(input_bytes),
+                    finish_reason: response.finish_reason.clone(),
+                }
+            })?;
         let outcome = if synthesis.sufficient {
             SynthesisDiagnosticOutcome::Success
         } else {
@@ -1303,6 +1328,14 @@ impl Agent {
     }
 }
 
+#[cfg(feature = "search")]
+#[derive(Debug)]
+struct SynthesisFailure {
+    error: AgentError,
+    input_bytes: Option<usize>,
+    finish_reason: Option<FinishReason>,
+}
+
 fn is_supported_research_content_type(content_type: &str) -> bool {
     let media_type = content_type
         .split(';')
@@ -1464,13 +1497,17 @@ impl SynthesisDiagnostic {
             source_count: 0,
         }
     }
-    fn failure(outcome: SynthesisDiagnosticOutcome, source_count: usize) -> Self {
+    fn failure_with_metadata(
+        outcome: SynthesisDiagnosticOutcome,
+        source_count: usize,
+        input_bytes: Option<usize>,
+        finish_reason: Option<FinishReason>,
+    ) -> Self {
         Self {
             synthesis_attempted: true,
             outcome,
-            finish_reason: (outcome == SynthesisDiagnosticOutcome::IncompleteGeneration)
-                .then_some(FinishReason::Length),
-            input_bytes: None,
+            finish_reason,
+            input_bytes,
             source_count,
         }
     }
@@ -3351,6 +3388,42 @@ mod tests {
                 result.synthesis_diagnostic.as_ref().unwrap().outcome,
                 SynthesisDiagnosticOutcome::MalformedStructuredOutput
             );
+        }
+
+        #[test]
+        fn synthesis_failure_diagnostic_retains_bounded_metadata_only() {
+            let diagnostic = SynthesisDiagnostic::failure_with_metadata(
+                SynthesisDiagnosticOutcome::SchemaValidationFailed,
+                2,
+                Some(4096),
+                Some(FinishReason::Stop),
+            );
+            assert!(diagnostic.synthesis_attempted);
+            assert_eq!(diagnostic.source_count, 2);
+            assert_eq!(diagnostic.input_bytes, Some(4096));
+            assert_eq!(diagnostic.finish_reason, Some(FinishReason::Stop));
+            let encoded = serde_json::to_string(&diagnostic).unwrap();
+            assert!(!encoded.contains("api-key-sentinel"));
+            assert!(!encoded.contains("prompt-sentinel"));
+        }
+
+        #[test]
+        fn synthesis_length_failure_uses_synthesis_error_variant() {
+            let failure = SynthesisFailure {
+                error: AgentError::SynthesisIncompleteGeneration,
+                input_bytes: Some(128),
+                finish_reason: Some(FinishReason::Length),
+            };
+            assert!(matches!(
+                failure.error,
+                AgentError::SynthesisIncompleteGeneration
+            ));
+            assert_eq!(failure.input_bytes, Some(128));
+            assert_eq!(failure.finish_reason, Some(FinishReason::Length));
+            assert!(matches!(
+                AgentError::IncompleteGeneration,
+                AgentError::IncompleteGeneration
+            ));
         }
 
         #[test]

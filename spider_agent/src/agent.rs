@@ -363,7 +363,17 @@ impl Agent {
             .clone()
             .unwrap_or_else(|| SearchOptions::new().with_limit(options.max_pages.max(5)));
 
-        let search_results = self.search_with_options(topic, search_opts).await?;
+        let mut search_results = self.search_with_options(topic, search_opts.clone()).await?;
+
+        // A natural-language research topic is the canonical first query. If
+        // it yields no usable candidates, make one bounded, deterministic
+        // retrieval-only fallback attempt. The topic itself remains the
+        // input to extraction and synthesis below.
+        if search_results.is_empty() {
+            if let Some(fallback) = Self::focused_research_query(topic) {
+                search_results = self.search_with_options(&fallback, search_opts).await?;
+            }
+        }
 
         if search_results.is_empty() {
             return Ok(ResearchResult {
@@ -507,6 +517,59 @@ impl Agent {
             synthesis_source_ids,
             usage: total_usage,
         })
+    }
+
+    /// Derive one conservative retrieval query from a natural-language topic.
+    ///
+    /// This is intentionally a small, provider-neutral heuristic rather than
+    /// query planning: punctuation is removed, a bounded set of common
+    /// question/function words is omitted, and the first salient terms are
+    /// retained. The original topic remains canonical everywhere else.
+    #[cfg(feature = "search")]
+    fn focused_research_query(topic: &str) -> Option<String> {
+        const MAX_TERMS: usize = 8;
+        const STOP_WORDS: &[&str] = &[
+            "a", "an", "and", "are", "att", "be", "det", "do", "does", "for", "finns", "för",
+            "har", "how", "is", "it", "och", "of", "on", "på", "the", "what", "vilka", "vilken",
+            "vilket", "will", "with", "in", "to", "this", "that", "som", "kommer", "säljas",
+            "solve", "problems", "finnas", "bevis", "dessa",
+        ];
+
+        let words: Vec<&str> = topic
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect();
+        if words.len() <= 2 {
+            return None;
+        }
+
+        let mut selected = Vec::new();
+        for word in words {
+            let normalized = word.to_lowercase();
+            if normalized.chars().count() < 3 || STOP_WORDS.contains(&normalized.as_str()) {
+                continue;
+            }
+            selected.push(word);
+            if selected.len() == MAX_TERMS {
+                break;
+            }
+        }
+
+        if selected.len() < 3 {
+            return None;
+        }
+        let fallback = selected.join(" ");
+        let normalized_topic = topic
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if fallback.to_lowercase() == normalized_topic {
+            None
+        } else {
+            Some(fallback)
+        }
     }
 
     /// Synthesize research findings into a summary.
@@ -2116,6 +2179,44 @@ impl Default for AgentBuilder {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "search")]
+    #[test]
+    fn focused_query_is_bounded_deterministic_and_unicode_safe() {
+        let topic = "Kommer Dune geckos, Stenodactylus petrii, att säljas på Malmö Tropikmässa och vilka bevis finns för det?";
+        let first = Agent::focused_research_query(topic).expect("fallback should be derivable");
+        assert_eq!(first, Agent::focused_research_query(topic).unwrap());
+        assert!(first.len() < topic.len());
+        for term in [
+            "Dune",
+            "geckos",
+            "Stenodactylus",
+            "petrii",
+            "Malmö",
+            "Tropikmässa",
+        ] {
+            assert!(
+                first.contains(term),
+                "missing salient term {term:?}: {first}"
+            );
+        }
+        assert!(!first.contains('?'));
+        assert_ne!(first, topic);
+        assert!(first.split_whitespace().count() <= 8);
+
+        let english = Agent::focused_research_query(
+            "What is Rust async programming and what problems does it solve?",
+        )
+        .expect("natural-language question should have a focused form");
+        assert_eq!(english, "Rust async programming");
+    }
+
+    #[cfg(feature = "search")]
+    #[test]
+    fn focused_query_does_not_rewrite_short_keywords() {
+        assert_eq!(Agent::focused_research_query("Rust async"), None);
+        assert_eq!(Agent::focused_research_query(""), None);
+    }
+
     #[test]
     fn test_builder_registers_spider_cloud_default_routes() {
         let agent = Agent::builder()
@@ -2324,6 +2425,38 @@ mod tests {
             urls: Vec<String>,
         }
 
+        struct RecordingFallbackSearch {
+            calls: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl SearchProvider for RecordingFallbackSearch {
+            async fn search(
+                &self,
+                query: &str,
+                _options: &SearchOptions,
+            ) -> Result<SearchResults, crate::error::SearchError> {
+                self.calls.lock().unwrap().push(query.to_string());
+                let mut results = SearchResults::new(query);
+                if query != "What is natural research question?" {
+                    results.push(SearchResult::new(
+                        "Fallback source",
+                        "https://fallback.example",
+                        1,
+                    ));
+                }
+                Ok(results)
+            }
+
+            fn provider_name(&self) -> &'static str {
+                "recording-fallback"
+            }
+
+            fn is_configured(&self) -> bool {
+                true
+            }
+        }
+
         #[async_trait]
         impl SearchProvider for StaticSearch {
             async fn search(
@@ -2499,6 +2632,27 @@ mod tests {
             ResearchOptions::new()
                 .with_max_pages(max_pages)
                 .with_synthesize(false)
+        }
+
+        #[tokio::test]
+        async fn research_uses_one_bounded_fallback_after_zero_results() {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let mut builder = Agent::builder();
+            builder.search_provider = Some(Box::new(RecordingFallbackSearch {
+                calls: calls.clone(),
+            }));
+            let agent = builder.build().unwrap();
+
+            let result = agent
+                .research("What is natural research question?", options(1))
+                .await
+                .unwrap();
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(calls[0], "What is natural research question?");
+            assert_ne!(calls[1], calls[0]);
+            assert_eq!(result.topic, "What is natural research question?");
+            assert_eq!(result.search_results.results.len(), 1);
         }
 
         fn prompt_contract_agent() -> (Agent, Arc<Mutex<Vec<Vec<Message>>>>) {

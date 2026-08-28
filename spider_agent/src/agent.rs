@@ -289,7 +289,7 @@ impl Agent {
             return Err(AgentError::EmptyCompletion);
         }
         if response.finish_reason == Some(FinishReason::Length) {
-            return Err(AgentError::SynthesisIncompleteGeneration);
+            return Err(AgentError::IncompleteGeneration);
         }
         let extraction = parse_strict_research_extraction(&response.content)?;
         Ok((extraction, response.finish_reason, selected_bytes))
@@ -644,7 +644,7 @@ impl Agent {
         let input_bytes = context.len();
         let response = self.complete(messages).await?;
         if response.finish_reason == Some(FinishReason::Length) {
-            return Err(AgentError::IncompleteGeneration);
+            return Err(AgentError::SynthesisIncompleteGeneration);
         }
         if response.content.trim().is_empty() {
             return Err(AgentError::EmptyCompletion);

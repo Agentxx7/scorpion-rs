@@ -120,6 +120,10 @@ pub struct SearchResults {
     /// Provider-specific metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Whether the provider reported one or more failed upstream engines.
+    /// This is distinct from an ordinary successful zero-result response.
+    #[serde(default)]
+    pub backend_failure: bool,
 }
 
 impl SearchResults {
@@ -130,6 +134,7 @@ impl SearchResults {
             results: Vec::new(),
             total_results: None,
             metadata: None,
+            backend_failure: false,
         }
     }
 
@@ -275,6 +280,9 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert!(!results.is_empty());
+        let legacy = serde_json::json!({"query":"legacy","results":[],"total_results":null});
+        let decoded: SearchResults = serde_json::from_value(legacy).unwrap();
+        assert!(!decoded.backend_failure);
         assert_eq!(
             results.urls(),
             vec!["https://example1.com", "https://example2.com"]

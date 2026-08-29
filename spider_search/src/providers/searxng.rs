@@ -136,6 +136,15 @@ impl SearxngProvider {
     fn map_results(query: &str, json: serde_json::Value, limit: Option<usize>) -> SearchResults {
         let mut results = SearchResults::new(query);
 
+        // SearXNG reports upstream engine failures in the machine-readable
+        // `unresponsive_engines` array. Preserve only the provider-neutral
+        // availability signal; raw failure details remain in the existing
+        // transient metadata field and are not used for terminal semantics.
+        results.backend_failure = json
+            .get("unresponsive_engines")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|engines| !engines.is_empty());
+
         if let Some(items) = json.get("results").and_then(|v| v.as_array()) {
             for (i, item) in items.iter().enumerate() {
                 let title = item
@@ -681,6 +690,64 @@ mod tests {
         );
         assert_eq!(results.results[0].date.as_deref(), Some("2024-01-01"));
         assert_eq!(results.results[0].score, Some(1.5));
+        assert!(!results.backend_failure);
+    }
+
+    #[test]
+    fn test_map_results_preserves_backend_failure_signal() {
+        let body = json!({
+            "results": [],
+            "unresponsive_engines": [["duckduckgo", "CAPTCHA"]]
+        });
+        let results = SearxngProvider::map_results("rust", body, None);
+        assert!(results.is_empty());
+        assert!(results.backend_failure);
+    }
+
+    #[test]
+    fn test_map_results_keeps_partial_results_usable_when_engine_fails() {
+        let body = json!({
+            "results": [{"title": "Rust", "url": "https://rust-lang.org/"}],
+            "unresponsive_engines": [["brave", "TooManyRequests"]]
+        });
+        let results = SearxngProvider::map_results("rust", body, None);
+        assert_eq!(results.len(), 1);
+        assert!(results.backend_failure);
+    }
+
+    #[test]
+    fn test_backend_failure_contract_matrix() {
+        // Exercise a bounded matrix of empty/non-empty results and absent,
+        // empty, single, and multiple failure metadata representations.
+        let failure_shapes = [
+            None,
+            Some(json!([])),
+            Some(json!([["engine", "timeout"]])),
+            Some(json!([["a", "captcha"], ["b", "rate_limit"]])),
+            Some(json!("not-an-array")),
+        ];
+        for has_result in [false, true] {
+            for (index, failures) in failure_shapes.iter().enumerate() {
+                let mut body = json!({
+                    "results": if has_result {
+                        json!([{"title": "Result", "url": "https://example.test"}])
+                    } else {
+                        json!([])
+                    }
+                });
+                if let Some(value) = failures {
+                    body["unresponsive_engines"] = value.clone();
+                }
+                let mapped = SearxngProvider::map_results(
+                    &format!("matrix-{has_result}-{index}"),
+                    body,
+                    None,
+                );
+                let expected_failure = matches!(index, 2 | 3);
+                assert_eq!(mapped.backend_failure, expected_failure);
+                assert_eq!(mapped.is_empty(), !has_result);
+            }
+        }
     }
 
     /// 2. Multiple results preserve deterministic ordering.

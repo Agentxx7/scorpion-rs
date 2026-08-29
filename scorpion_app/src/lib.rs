@@ -98,6 +98,12 @@ pub async fn search(
         .await
         .map_err(|error| SearchError::Provider(error.to_string()))?;
 
+    if results.results.is_empty() && results.backend_failure {
+        return Err(SearchError::Provider(
+            "search backend reported upstream failure".into(),
+        ));
+    }
+
     Ok(SearchResponse {
         query: results.query,
         result_count: results.results.len(),

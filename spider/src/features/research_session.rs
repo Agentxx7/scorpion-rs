@@ -416,7 +416,9 @@ fn terminal_state(
     let Ok(result) = result else {
         return ResearchSessionState::SearchFailed;
     };
-    if result.search_results.is_empty() {
+    if result.search_results.is_empty() && result.search_results.backend_failure {
+        ResearchSessionState::SearchFailed
+    } else if result.search_results.is_empty() {
         ResearchSessionState::CompletedNoSearchResults
     } else if result.extractions.is_empty() {
         if observed_acquisitions == 0 {
@@ -1285,6 +1287,37 @@ mod tests {
         assert_eq!(
             run_case(1, true, true, Some(true)).await.state,
             ResearchSessionState::CompletedSuccessfully
+        );
+
+        let store = Arc::new(DomainPersistence::open_in_memory().await.unwrap());
+        let failed_backend = run_with_id(
+            Arc::clone(&store),
+            adapter(&store).await,
+            ResearchId::new(),
+            "backend failure".to_string(),
+            ResearchOptions::new(),
+            || async {
+                let mut result = result(0, &[], None);
+                result.search_results.backend_failure = true;
+                Ok(result)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            failed_backend.session.state,
+            ResearchSessionState::SearchFailed
+        );
+        let (_, reread) = read_research_session(&store, failed_backend.session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reread.state, ResearchSessionState::SearchFailed);
+
+        let genuine_empty = run_case(0, false, true, None).await;
+        assert_eq!(
+            genuine_empty.state,
+            ResearchSessionState::CompletedNoSearchResults
         );
     }
 

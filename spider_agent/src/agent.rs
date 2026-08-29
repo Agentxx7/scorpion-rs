@@ -367,6 +367,7 @@ impl Agent {
             .unwrap_or_else(|| SearchOptions::new().with_limit(options.max_pages.max(5)));
 
         let mut search_results = self.search_with_options(topic, search_opts.clone()).await?;
+        let backend_failure = search_results.backend_failure;
 
         // A natural-language research topic is the canonical first query. If
         // it yields no usable candidates, make one bounded, deterministic
@@ -375,6 +376,7 @@ impl Agent {
         if search_results.is_empty() {
             if let Some(fallback) = Self::focused_research_query(topic) {
                 search_results = self.search_with_options(&fallback, search_opts).await?;
+                search_results.backend_failure |= backend_failure;
             }
         }
 

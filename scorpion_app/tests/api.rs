@@ -121,6 +121,32 @@ fn real_server_delegates_to_canonical_search_and_filters_metadata() {
 }
 
 #[test]
+fn backend_failure_with_empty_results_is_not_reported_as_success() {
+    let provider = fake_searxng(
+        r#"{"query":"rust","results":[],"unresponsive_engines":[["duckduckgo","CAPTCHA"]]}"#,
+        "200 OK",
+    );
+    let (mut child, base) = api_server(Some(provider));
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 502 Bad Gateway"),
+        "{response}"
+    );
+    assert!(response.contains("provider_unavailable"));
+}
+
+#[test]
+fn genuine_empty_results_remain_successful() {
+    let provider = fake_searxng(r#"{"query":"rust","results":[]}"#, "200 OK");
+    let (mut child, base) = api_server(Some(provider));
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"result_count\":0"));
+}
+
+#[test]
 fn malformed_request_and_missing_provider_fail_without_200() {
     let (mut child, base) = api_server(None);
     let response = post(&base, "not-json");

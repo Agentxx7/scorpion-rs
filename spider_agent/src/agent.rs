@@ -1909,6 +1909,13 @@ fn validate_research_synthesis(
         return Err(AgentError::InvalidField("summary"));
     }
 
+    if synthesis.sufficient && synthesis.summary.starts_with("Insufficient evidence:") {
+        log::warn!(
+            "LLM synthesis JSON failed semantic validation: sufficient=true cannot use the insufficiency prefix"
+        );
+        return Err(AgentError::InvalidField("summary"));
+    }
+
     Ok(synthesis)
 }
 
@@ -3599,6 +3606,67 @@ mod tests {
                 1,
             )
             .is_err());
+        }
+
+        #[test]
+        fn sufficient_summary_cannot_use_insufficient_evidence_prefix() {
+            assert!(validate_research_synthesis(
+                r#"{"sufficient":true,"summary":"Insufficient evidence: details are missing.","source_ids":["Source 1"]}"#,
+                1,
+            )
+            .is_err());
+            assert!(validate_research_synthesis(
+                r#"{"sufficient":true,"summary":"Insufficient evidence: details are missing.","source_ids":["Source 1","Source 2"]}"#,
+                2,
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn synthesis_sufficiency_consistency_preserves_valid_boundaries() {
+            assert!(validate_research_synthesis(
+                r#"{"sufficient":true,"summary":"Supported claim [Source 1].","source_ids":["Source 1"]}"#,
+                1,
+            )
+            .is_ok());
+            assert!(validate_research_synthesis(
+                r#"{"sufficient":false,"summary":"Insufficient evidence: the supplied source is limited.","source_ids":[]}"#,
+                1,
+            )
+            .is_ok());
+            assert!(validate_research_synthesis(
+                r#"{"sufficient":true,"summary":"The evidence is limited but supports this claim [Source 1].","source_ids":["Source 1"]}"#,
+                1,
+            )
+            .is_ok());
+            assert!(validate_research_synthesis(
+                r#"{"sufficient":true,"summary":"The report quotes \"Insufficient evidence:\" before presenting the supported claim [Source 1].","source_ids":["Source 1"]}"#,
+                1,
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn adversarial_sufficiency_consistency_never_accepts_false_success() {
+            let mut false_successes = 0;
+            for sufficient in [true, false] {
+                for summary in [
+                    "Supported claim [Source 1].",
+                    "Insufficient evidence: details are missing.",
+                    "There was not enough detail.",
+                ] {
+                    for source_ids in ["[]", "[\"Source 1\"]", "[\"Source 2\"]"] {
+                        let content = format!(
+                            "{{\"sufficient\":{sufficient},\"summary\":{summary:?},\"source_ids\":{source_ids}}}"
+                        );
+                        let accepted = validate_research_synthesis(&content, 1).is_ok();
+                        if sufficient && summary.starts_with("Insufficient evidence:") && accepted {
+                            false_successes += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(false_successes, 0);
         }
 
         fn valid_research_extraction_json() -> String {

@@ -650,7 +650,7 @@ impl Agent {
             max_tokens: self.config.max_tokens,
             json_mode: self.config.json_mode,
             response_format: Some(
-                StructuredOutputConfig::strict(research_synthesis_schema())
+                StructuredOutputConfig::strict(research_synthesis_schema(extractions.len()))
                     .with_name("research_synthesis"),
             ),
         };
@@ -1800,7 +1800,10 @@ fn research_extraction_schema() -> serde_json::Value {
 }
 
 #[cfg(feature = "search")]
-fn research_synthesis_schema() -> serde_json::Value {
+fn research_synthesis_schema(source_count: usize) -> serde_json::Value {
+    let source_ids: Vec<String> = (1..=source_count)
+        .map(|index| format!("Source {index}"))
+        .collect();
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -1808,7 +1811,7 @@ fn research_synthesis_schema() -> serde_json::Value {
             "summary": { "type": "string" },
             "source_ids": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": { "type": "string", "enum": source_ids }
             }
         },
         "required": ["sufficient", "summary", "source_ids"],
@@ -3824,7 +3827,17 @@ mod tests {
 
         #[test]
         fn exact_research_synthesis_schema_is_strict_and_closed() {
-            let schema = research_synthesis_schema();
+            for (count, expected) in [
+                (1, serde_json::json!(["Source 1"])),
+                (2, serde_json::json!(["Source 1", "Source 2"])),
+                (3, serde_json::json!(["Source 1", "Source 2", "Source 3"])),
+            ] {
+                assert_eq!(
+                    research_synthesis_schema(count)["properties"]["source_ids"]["items"]["enum"],
+                    expected
+                );
+            }
+            let schema = research_synthesis_schema(3);
             assert_eq!(schema["properties"]["sufficient"]["type"], "boolean");
             assert_eq!(schema["properties"]["summary"]["type"], "string");
             assert_eq!(schema["properties"]["source_ids"]["type"], "array");
@@ -3837,6 +3850,11 @@ mod tests {
                 serde_json::json!(["sufficient", "summary", "source_ids"])
             );
             assert_eq!(schema["additionalProperties"], false);
+            assert!(!schema["properties"]["source_ids"]["items"]
+                .get("uniqueItems")
+                .is_some());
+            assert!(!schema["properties"]["source_ids"].get("minItems").is_some());
+            assert!(!schema["properties"]["source_ids"].get("maxItems").is_some());
         }
 
         #[test]

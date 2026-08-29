@@ -70,6 +70,7 @@ search_searxng = ["spider/search_searxng"]
 # Shipping durable canonical research. Custom no-default-feature builds remain
 # unaffected unless they explicitly select this feature.
 research = [
+    "spider/search",
     "spider/agent_acquisition",
     "spider/agent_openai",
     "spider/agent_search_searxng",

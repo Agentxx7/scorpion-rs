@@ -90,13 +90,21 @@ fn resolve_run_config(
     params: &RunParams,
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<RunConfig, String> {
+    let database = configured_database(params.database.clone(), lookup)?;
+    let selector = lookup(SEARCH_PROVIDER_ENV).and_then(nonempty);
+    let searxng_url = params
+        .searxng_url
+        .clone()
+        .and_then(nonempty)
+        .or_else(|| lookup(SEARXNG_ENV).and_then(nonempty));
+    if selector.is_none() && searxng_url.is_none() {
+        return Err(format!(
+            "missing required research configuration: {SEARXNG_ENV}"
+        ));
+    }
     Ok(RunConfig {
-        database: configured_database(params.database.clone(), lookup)?,
-        searxng_url: params
-            .searxng_url
-            .clone()
-            .and_then(nonempty)
-            .or_else(|| lookup(SEARXNG_ENV).and_then(nonempty)),
+        database,
+        searxng_url,
         openai_base_url: configured_string(
             params.openai_base_url.clone(),
             OPENAI_BASE_ENV,
@@ -424,7 +432,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(config.database, PathBuf::from("cli.sqlite"));
-        assert_eq!(config.searxng_url, "https://cli-search");
+        assert_eq!(config.searxng_url.as_deref(), Some("https://cli-search"));
         assert_eq!(config.openai_base_url, "https://cli-model/v1");
         assert_eq!(config.model, "cli-model");
         assert_eq!(config.api_key, "secret");

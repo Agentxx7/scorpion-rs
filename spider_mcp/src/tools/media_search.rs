@@ -119,7 +119,7 @@ fn render_image_results(
 /// discovered URL — this tool returns candidates only (SCORPION.md §9.9).
 #[cfg(feature = "search_searxng")]
 pub async fn run(params: MediaSearchParams) -> Result<String, String> {
-    use spider::features::search_providers::SearxngProvider;
+    use spider::features::search::resolve_searxng_provider;
 
     if params.provider != "searxng" {
         return Err(format!(
@@ -140,7 +140,7 @@ pub async fn run(params: MediaSearchParams) -> Result<String, String> {
         })?;
 
     let options = build_search_options(&params);
-    let provider = SearxngProvider::new(base_url);
+    let provider = resolve_searxng_provider(Some(base_url)).map_err(|e| e.to_string())?;
 
     let output = match params.media_type.as_str() {
         "video" => {

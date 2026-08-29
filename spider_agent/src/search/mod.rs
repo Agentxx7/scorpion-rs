@@ -1,6 +1,11 @@
 //! Thin compatibility façade over the canonical `spider_search` capability.
 
-pub use spider_search::{SearchProvider, SearchResult, SearchResults};
+#[cfg(feature = "search_searxng")]
+pub use spider_search::resolve_searxng_provider;
+pub use spider_search::{
+    resolve_search_provider, SearchProvider, SearchProviderConfigError, SearchProviderKind,
+    SearchResult, SearchResults,
+};
 
 #[cfg(feature = "search_bing")]
 pub use spider_search::BingProvider;

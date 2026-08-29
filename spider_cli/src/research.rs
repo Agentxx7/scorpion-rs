@@ -10,11 +10,16 @@ use spider::features::identity::ResearchId;
 use spider::features::research_session::{
     read_research_session, run_durable_research, ResearchSession, ResearchSessionState,
 };
+use spider::features::search::resolve_search_provider;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 const DATABASE_ENV: &str = "RESEARCH_EVIDENCE_DB";
 const SEARXNG_ENV: &str = "SEARXNG_BASE_URL";
+const SEARCH_PROVIDER_ENV: &str = "SEARCH_PROVIDER";
+const BRAVE_ENV: &str = "BRAVE_API_KEY";
+const SERPER_ENV: &str = "SERPER_API_KEY";
+const TAVILY_ENV: &str = "TAVILY_API_KEY";
 const OPENAI_BASE_ENV: &str = "OPENAI_COMPAT_BASE_URL";
 const MODEL_ENV: &str = "OPENAI_COMPAT_MODEL";
 const API_KEY_ENV: &str = "OPENAI_COMPAT_API_KEY";
@@ -52,7 +57,7 @@ pub struct CommandOutput {
 #[derive(Debug)]
 struct RunConfig {
     database: PathBuf,
-    searxng_url: String,
+    searxng_url: Option<String>,
     openai_base_url: String,
     model: String,
     api_key: String,
@@ -87,7 +92,11 @@ fn resolve_run_config(
 ) -> Result<RunConfig, String> {
     Ok(RunConfig {
         database: configured_database(params.database.clone(), lookup)?,
-        searxng_url: configured_string(params.searxng_url.clone(), SEARXNG_ENV, lookup)?,
+        searxng_url: params
+            .searxng_url
+            .clone()
+            .and_then(nonempty)
+            .or_else(|| lookup(SEARXNG_ENV).and_then(nonempty)),
         openai_base_url: configured_string(
             params.openai_base_url.clone(),
             OPENAI_BASE_ENV,
@@ -307,9 +316,18 @@ async fn execute_with_environment(
                     .await
                     .map_err(|error| error.to_string())?,
             );
+            let provider = resolve_search_provider(
+                lookup(SEARCH_PROVIDER_ENV).as_deref(),
+                config.searxng_url.as_deref(),
+                lookup(BRAVE_ENV).as_deref(),
+                lookup(SERPER_ENV).as_deref(),
+                lookup(TAVILY_ENV).as_deref(),
+            )
+            .map_err(|error| error.to_string())?
+            .1;
             let builder = Agent::builder()
                 .with_openai_compatible(config.openai_base_url, config.api_key, config.model)
-                .with_search_searxng(config.searxng_url);
+                .with_search_provider(provider);
             let mut options = ResearchOptions::new().with_synthesize(true);
             if let Some(max_pages) = params.max_pages {
                 options = options.with_max_pages(max_pages);

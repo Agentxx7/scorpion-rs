@@ -87,36 +87,23 @@ fn render_results(
 /// crawler's `Website` type.
 #[cfg(feature = "search_searxng")]
 pub async fn run(params: SearchParams) -> Result<String, String> {
-    use spider::features::search::SearchProvider;
-    use spider::features::search_providers::SearxngProvider;
+    use spider::features::search::resolve_search_provider;
 
     let options = build_search_options(&params);
 
-    let results = match params.provider.as_str() {
-        "searxng" => {
-            let base_url = params
-                .base_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    "provider=\"searxng\" requires a non-empty base_url pointing at a \
-                     self-hosted SearXNG instance — no public instance is assumed."
-                        .to_string()
-                })?;
-
-            let provider = SearxngProvider::new(base_url);
-            provider
-                .search(&params.query, &options)
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        other => {
-            return Err(format!(
-                "Unknown or unsupported search provider \"{other}\". Currently supported: \"searxng\"."
-            ));
-        }
-    };
+    let provider = resolve_search_provider(
+        Some(&params.provider),
+        params.base_url.as_deref(),
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?
+    .1;
+    let results = provider
+        .search(&params.query, &options)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let output = render_results(&params.provider, &results);
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())

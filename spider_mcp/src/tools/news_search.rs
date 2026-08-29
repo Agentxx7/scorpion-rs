@@ -65,7 +65,7 @@ fn render_results(
 
 #[cfg(feature = "search_searxng")]
 pub async fn run(params: NewsSearchParams) -> Result<String, String> {
-    use spider::features::search_providers::SearxngProvider;
+    use spider::features::search::resolve_searxng_provider;
 
     if params.provider != "searxng" {
         return Err(format!(
@@ -83,7 +83,7 @@ pub async fn run(params: NewsSearchParams) -> Result<String, String> {
              SearXNG instance — no public instance is assumed."
                 .to_string()
         })?;
-    let provider = SearxngProvider::new(base_url);
+    let provider = resolve_searxng_provider(Some(base_url)).map_err(|e| e.to_string())?;
     let results = provider
         .search_news(&params.query, &build_search_options(&params))
         .await

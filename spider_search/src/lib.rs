@@ -5,11 +5,19 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "search")]
+mod provider_selection;
 mod search;
 
 #[cfg(feature = "search")]
 pub mod providers;
 
+#[cfg(feature = "search_searxng")]
+pub use provider_selection::resolve_searxng_provider;
+#[cfg(feature = "search")]
+pub use provider_selection::{
+    resolve_search_provider, SearchProviderConfigError, SearchProviderKind,
+};
 pub use search::{
     SearchError, SearchOptions, SearchProvider, SearchResult, SearchResults, TimeRange,
 };

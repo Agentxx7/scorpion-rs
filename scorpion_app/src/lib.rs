@@ -11,8 +11,8 @@ use spider::features::identity::ResearchId;
 use spider::features::research_session::{
     claim_durable_research, read_research_session, ResearchSession, ResearchSessionState,
 };
-use spider::features::search::{SearchOptions, SearchProvider};
-use spider::features::search_providers::SearxngProvider;
+use spider::features::search::resolve_search_provider;
+use spider::features::search::SearchOptions;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -68,7 +68,7 @@ impl std::fmt::Display for SearchError {
     }
 }
 
-/// Execute one canonical SearXNG search using server-owned configuration.
+/// Execute one canonical search using server-owned configuration.
 pub async fn search(
     request: SearchRequest,
     searxng_base_url: Option<&str>,
@@ -84,12 +84,19 @@ pub async fn search(
             "limit must be greater than zero".into(),
         ));
     }
-    let base_url = searxng_base_url
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or(SearchError::ProviderNotConfigured)?;
-
-    let provider = SearxngProvider::new(base_url);
+    let selector = std::env::var("SEARCH_PROVIDER").ok();
+    let brave = std::env::var("BRAVE_API_KEY").ok();
+    let serper = std::env::var("SERPER_API_KEY").ok();
+    let tavily = std::env::var("TAVILY_API_KEY").ok();
+    let provider = resolve_search_provider(
+        selector.as_deref(),
+        searxng_base_url,
+        brave.as_deref(),
+        serper.as_deref(),
+        tavily.as_deref(),
+    )
+    .map_err(|_| SearchError::ProviderNotConfigured)?
+    .1;
     let options = request.limit.map_or_else(SearchOptions::new, |limit| {
         SearchOptions::new().with_limit(limit)
     });
@@ -256,7 +263,7 @@ impl ResearchService {
             .try_acquire_owned()
             .map_err(|_| ResearchError::CapacityExhausted)?;
         let database = PathBuf::from(required_env("RESEARCH_EVIDENCE_DB")?);
-        let searxng = required_env("SEARXNG_BASE_URL")?;
+        let searxng = std::env::var("SEARXNG_BASE_URL").ok();
         let openai = required_env("OPENAI_COMPAT_BASE_URL")?;
         let model = required_env("OPENAI_COMPAT_MODEL")?;
         let api_key = required_env("OPENAI_COMPAT_API_KEY")?;
@@ -265,9 +272,21 @@ impl ResearchService {
                 .await
                 .map_err(|_| ResearchError::Unavailable)?,
         );
+        let brave = std::env::var("BRAVE_API_KEY").ok();
+        let serper = std::env::var("SERPER_API_KEY").ok();
+        let tavily = std::env::var("TAVILY_API_KEY").ok();
+        let provider = resolve_search_provider(
+            std::env::var("SEARCH_PROVIDER").ok().as_deref(),
+            searxng.as_deref(),
+            brave.as_deref(),
+            serper.as_deref(),
+            tavily.as_deref(),
+        )
+        .map_err(|_| ResearchError::Unavailable)?
+        .1;
         let builder = AgentBuilder::new()
             .with_openai_compatible(openai, api_key, model)
-            .with_search_searxng(searxng);
+            .with_search_provider(provider);
         let claimed = claim_durable_research(
             Arc::clone(&store),
             builder,

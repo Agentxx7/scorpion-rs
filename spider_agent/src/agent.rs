@@ -2166,6 +2166,12 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
+    /// Configure an already-resolved canonical search provider.
+    #[cfg(feature = "search")]
+    pub fn with_search_provider(mut self, provider: Box<dyn SearchProvider>) -> Self {
+        self.search_provider = Some(provider);
+        self
+    }
     /// Create a new builder with defaults.
     pub fn new() -> Self {
         Self {

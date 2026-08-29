@@ -5,8 +5,7 @@
 //! result URL.
 
 use crate::options::sub_command::SearchCategory;
-use spider::features::search::{SearchOptions, SearchProvider};
-use spider::features::search_providers::SearxngProvider;
+use spider::features::search::{resolve_search_provider, resolve_searxng_provider, SearchOptions};
 
 #[derive(Clone, Debug)]
 pub struct SearchParams {
@@ -50,7 +49,45 @@ fn base_url(params: &SearchParams) -> Result<&str, String> {
 }
 
 pub async fn run(params: SearchParams) -> Result<String, String> {
-    let provider = SearxngProvider::new(base_url(&params)?);
+    if !matches!(params.category, SearchCategory::Web) {
+        let provider =
+            resolve_searxng_provider(Some(base_url(&params)?)).map_err(|e| e.to_string())?;
+        let options = build_search_options(&params);
+        let output = match params.category {
+            SearchCategory::News => {
+                let results = provider
+                    .search_news(&params.query, &options)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::json!({"query": params.query, "category": "news", "provider": params.provider, "result_count": results.len(), "results": results})
+            }
+            SearchCategory::Image => {
+                let results = provider
+                    .search_images(&params.query, &options)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::json!({"query": params.query, "category": "image", "provider": params.provider, "result_count": results.len(), "results": results})
+            }
+            SearchCategory::Video => {
+                let results = provider
+                    .search_videos(&params.query, &options)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                serde_json::json!({"query": params.query, "category": "video", "provider": params.provider, "result_count": results.len(), "results": results})
+            }
+            SearchCategory::Web => unreachable!(),
+        };
+        return serde_json::to_string_pretty(&output).map_err(|e| e.to_string());
+    }
+    let provider = resolve_search_provider(
+        Some(&params.provider),
+        Some(base_url(&params)?),
+        None,
+        None,
+        None,
+    )
+    .map_err(|error| error.to_string())?
+    .1;
     let options = build_search_options(&params);
 
     let output = match params.category {
@@ -83,45 +120,7 @@ pub async fn run(params: SearchParams) -> Result<String, String> {
                 "metadata": results.metadata,
             })
         }
-        SearchCategory::News => {
-            let results = provider
-                .search_news(&params.query, &options)
-                .await
-                .map_err(|error| error.to_string())?;
-            serde_json::json!({
-                "query": params.query,
-                "category": "news",
-                "provider": params.provider,
-                "result_count": results.len(),
-                "results": results,
-            })
-        }
-        SearchCategory::Image => {
-            let results = provider
-                .search_images(&params.query, &options)
-                .await
-                .map_err(|error| error.to_string())?;
-            serde_json::json!({
-                "query": params.query,
-                "category": "image",
-                "provider": params.provider,
-                "result_count": results.len(),
-                "results": results,
-            })
-        }
-        SearchCategory::Video => {
-            let results = provider
-                .search_videos(&params.query, &options)
-                .await
-                .map_err(|error| error.to_string())?;
-            serde_json::json!({
-                "query": params.query,
-                "category": "video",
-                "provider": params.provider,
-                "result_count": results.len(),
-                "results": results,
-            })
-        }
+        SearchCategory::News | SearchCategory::Image | SearchCategory::Video => unreachable!(),
     };
 
     serde_json::to_string_pretty(&output).map_err(|error| error.to_string())

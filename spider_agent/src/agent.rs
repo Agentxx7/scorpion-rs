@@ -628,8 +628,7 @@ impl Agent {
         for (i, extraction) in extractions.iter().enumerate() {
             let source_id = format!("Source {}", i + 1);
             context.push_str(&format!(
-                "\n\n{source_id}\nTitle: {}\nFinal URL: {}\nAcquisition ID: {}\nExtracted JSON:\n{}",
-                extraction.title,
+                "\n\n{source_id}\nFinal URL: {}\nAcquisition ID: {}\nExtracted JSON:\n{}",
                 extraction.url,
                 extraction.acquisition_id.as_deref().unwrap_or("none"),
                 serde_json::to_string_pretty(&extraction.extracted).unwrap_or_default()
@@ -2069,7 +2068,12 @@ pub struct ResearchResult {
 pub struct PageExtraction {
     /// Page URL.
     pub url: String,
-    /// Page title.
+    /// Title as reported by the search/discovery provider. This is
+    /// unverified discovery metadata: it was never observed on, extracted
+    /// from, or validated against the acquired page, and must not be
+    /// treated as acquired/observed/evidenced source content (e.g. it must
+    /// not be injected into factual synthesis context). Retained here only
+    /// for navigation/display/debugging use by `PageExtraction` consumers.
     pub title: String,
     /// Strict, bounded data extracted from the source.
     pub extracted: ResearchExtraction,
@@ -3333,13 +3337,77 @@ mod tests {
             assert!(system.contains("No individual source is required to answer the whole topic"));
             assert!(system.contains("not itself a global insufficiency verdict"));
             assert!(user.contains("Source 1"));
-            assert!(user.contains("Title: Test source"));
             assert!(user.contains("Final URL: https://example.test/final"));
             assert!(user.contains("Acquisition ID: evid_test"));
             assert!(user.contains("Extracted JSON:"));
             assert!(user.contains(r#""finding": "Supported""#));
             assert!(user.contains(r#""missing_evidence""#));
             assert!(!user.contains(r#""status""#));
+
+            // Unverified discovery title must never enter factual synthesis
+            // context: no `Title:` field, and the fixture's discovery title
+            // itself must not leak into the prompt some other way.
+            assert!(!user.contains("Title:"));
+            assert!(!user.contains("Test source"));
+        }
+
+        /// Adversarial regression guard for the discovery→synthesis
+        /// boundary: a search-provider-supplied title can assert a
+        /// materially different (even contradictory) claim than what was
+        /// actually acquired and extracted from the page. That unverified
+        /// discovery title must never reach the synthesis model, while the
+        /// acquired/extracted, evidence-grounded content must still flow
+        /// through unaffected.
+        #[tokio::test]
+        async fn discovery_title_never_enters_synthesis_context() {
+            let (llm, captured) = ScriptedLlm::new(&[
+                r#"{"sufficient":true,"summary":"Supported [Source 1]","source_ids":["Source 1"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+
+            let adversarial_title = "Discovery-only adversarial title";
+            let acquired_extraction = PageExtraction {
+                url: "https://adversarial.test/final".to_string(),
+                title: adversarial_title.to_string(),
+                extracted: ResearchExtraction {
+                    facts: vec![ResearchExtractionFact {
+                        topic: "Outcome".to_string(),
+                        finding: "Company X won an industry award".to_string(),
+                    }],
+                    missing_evidence: vec![],
+                },
+                acquisition_id: Some("evid_adversarial".to_string()),
+                finish_reason: Some(FinishReason::Stop),
+                extraction_input_bytes: 0,
+            };
+
+            // 1. The discovery title is still retained on PageExtraction
+            //    itself, outside synthesis (navigation/display/debugging).
+            assert_eq!(acquired_extraction.title, adversarial_title);
+
+            let sources = vec![acquired_extraction];
+            let (synthesis, _, _) = agent.synthesize_research("topic", &sources).await.unwrap();
+
+            // 5. Removal does not break synthesis execution.
+            assert!(synthesis.sufficient);
+
+            let calls = captured.lock().unwrap();
+            let user = message_text(&calls[0][1]);
+
+            // 2. The captured synthesis user message does not contain the
+            //    discovery title anywhere.
+            assert!(!user.contains(adversarial_title));
+            assert!(!user.contains("Title:"));
+
+            // 3. The acquired/extracted source content is present.
+            assert!(user.contains("Company X won an industry award"));
+
+            // 4. Source/evidence identifiers remain present.
+            assert!(user.contains("Source 1"));
+            assert!(user.contains("Final URL: https://adversarial.test/final"));
+            assert!(user.contains("Acquisition ID: evid_adversarial"));
         }
 
         #[tokio::test]

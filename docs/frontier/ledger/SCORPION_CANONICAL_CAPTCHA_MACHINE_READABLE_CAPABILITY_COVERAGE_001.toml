@@ -216,27 +216,39 @@ verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
-# Re-attested against 8d8173f2 after release-gate verification exposed
-# one parallel-execution failure in spider_cli's deterministic
-# transport_cli suite. The fix changed only that suite's rust.yml
-# invocation to pass `-- --test-threads=1`; because rust.yml is this
-# capability's CI_ENFORCED workflow, the prior reviewed_commit's
-# byte-identity binding became stale. Pure
-# attestation-only field update: no ADVERSARIALLY_VERIFIED evidence or
-# bypass-attempt entry below changed, and no CAPTCHA-relevant behavior
-# changed at all. No production file or this capability's own CAPTCHA
-# pre-build / execution step changed. Confirmed empirically by
-# re-running this harness itself:
+# Originally re-attested against 8d8173f2 after release-gate
+# verification exposed one parallel-execution failure in spider_cli's
+# deterministic transport_cli suite. That fix changed only that
+# suite's rust.yml invocation to pass `-- --test-threads=1`; because
+# rust.yml is this capability's CI_ENFORCED workflow, the byte-identity
+# binding held at that time became stale. Pure attestation-only field
+# update: no ADVERSARIALLY_VERIFIED evidence or bypass-attempt entry
+# below changed, and no CAPTCHA-relevant behavior changed at all. The
+# rust.yml diff was a single-line serialization argument on the
+# already-CAPTCHA-unrelated spider_cli transport suite; this
+# capability's own CAPTCHA pre-build step and CI-enforced step were
+# both byte-for-byte untouched in that diff.
+# Later re-bound again, to the current 5223110f (commit a5685007):
+# commit 5223110f ("fix: enable canonical search resolver for
+# research") added one line to spider_cli/Cargo.toml's `research`
+# feature list (`"spider/search"`) — unrelated to CAPTCHA/chrome, but
+# spider_cli/Cargo.toml is itself one of this capability's own
+# closure_relevant_files (`known_shipping_artifacts`, the same file
+# [stages.PRODUCTION_REACHABLE].verdict_evidence cites), so that byte
+# change alone invalidated 8d8173f2's binding here too. Pure
+# attestation-only field update again: no ADVERSARIALLY_VERIFIED
+# evidence or bypass-attempt entry below changed, no WIRED chain or
+# PRODUCTION_REACHABLE verdict changed, and no CAPTCHA-relevant
+# behavior changed at all — confirmed empirically by re-running this
+# harness itself:
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
-# shipping_manifests` both still passed unchanged against 8d8173f2's
-# working tree; only the two commit-content-identity checks required
-# this re-bind. The rust.yml diff is a single-line serialization
-# argument on the already-CAPTCHA-unrelated spider_cli transport suite;
-# this capability's own CAPTCHA pre-build step and CI-enforced step are
-# both byte-for-byte untouched in that diff.
-# Re-enumerated every CLOSED capability binding rust.yml before this
-# re-bind (grep across every docs/frontier/ledger/*.toml for
+# shipping_manifests` both still pass unchanged.
+# reviewed_commit below is the current, authoritative binding
+# (5223110f); 8d8173f2 remains accurate as the prior attestation point
+# in this history, not as the present claim.
+# Re-enumerated every CLOSED capability binding rust.yml before the
+# 8d8173f2 re-bind (grep across every docs/frontier/ledger/*.toml for
 # `ci_workflow_file`/`[stages.CLOSED]`): CAPTCHA is the only one that
 # exists in this repository.
 reviewed_commit = "5223110fcbb54fc46089e8092c74c5ee5d4f2eca"
@@ -279,18 +291,28 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # [stages.ADVERSARIALLY_VERIFIED]'s own comment on why) are all
 # present and independently satisfied — verified directly against
 # closed_requires_every_declared_proof_class_independently before this
-# table was written. closed_commit re-bound to 8d8173f2 for the exact
-# same reason reviewed_commit above was: .github/workflows/rust.yml
-# (this capability's own CI_ENFORCED.ci_workflow_file) no longer binds
-# byte-for-byte after the transport_cli suite was serialized. Every other
-# closure_relevant_file (spider/tests/closure_harness*.rs,
-# spider/Cargo.toml, every known shipping artifact's Cargo.toml, every
-# other IMPLEMENTED/VERIFIED/WIRED-cited file, spider/src/website.rs,
-# spider/src/page.rs) is untouched by this commit — confirmed
-# directly: the diff is one argument added to the existing spider_cli
-# transport_cli test command in .github/workflows/rust.yml; this
-# capability's own CAPTCHA pre-build step and CI-enforced step are both
-# byte-for-byte unchanged. No CAPTCHA detection,
-# solving, provider routing, frame/OOPIF handling, or CI evidence this
-# capability cites changed at all.
+# table was written. closed_commit was originally re-bound to 8d8173f2
+# for the exact same reason reviewed_commit above was at that time:
+# .github/workflows/rust.yml (this capability's own
+# CI_ENFORCED.ci_workflow_file) no longer bound byte-for-byte after the
+# transport_cli suite was serialized — one argument added to the
+# existing spider_cli transport_cli test command in
+# .github/workflows/rust.yml; this capability's own CAPTCHA pre-build
+# step and CI-enforced step were both byte-for-byte unchanged in that
+# diff.
+# Later re-bound again, to the current 5223110f, for the same reason
+# reviewed_commit above was: commit 5223110f added one line to
+# spider_cli/Cargo.toml's `research` feature list (`"spider/search"`)
+# — unrelated to CAPTCHA/chrome, but spider_cli/Cargo.toml is itself
+# one of this capability's own closure_relevant_files, so that byte
+# change alone invalidated 8d8173f2's binding here too (commit
+# a5685007). Every other closure_relevant_file (spider/tests/
+# closure_harness*.rs, spider/Cargo.toml, every other known shipping
+# artifact's Cargo.toml, every other IMPLEMENTED/VERIFIED/WIRED-cited
+# file, spider/src/website.rs, spider/src/page.rs) remained untouched
+# across both re-binds. No CAPTCHA detection, solving, provider
+# routing, frame/OOPIF handling, or CI evidence this capability cites
+# changed at all. closed_commit below is the current, authoritative
+# binding (5223110f); 8d8173f2 remains accurate as the prior
+# attestation point in this history, not as the present claim.
 closed_commit = "5223110fcbb54fc46089e8092c74c5ee5d4f2eca"

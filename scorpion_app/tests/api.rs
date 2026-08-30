@@ -505,3 +505,66 @@ fn valid_research_configuration_remains_enabled() {
         "{index}"
     );
 }
+
+// ---------------------------------------------------------------------
+// F-5: raw internal provider/runtime error strings must never cross the
+// public application boundary. `SEARXNG_BASE_URL` below is a real
+// operator-configuration value carrying credentials, a hostname, a path,
+// and a query token — the canonical SearxngProvider embeds this exact
+// string verbatim in its internal `ProviderError` for an unsupported
+// scheme (`spider_search/src/providers/searxng.rs:search_endpoint`),
+// which previously reached the public API/UI via
+// `SearchError::Provider(error.to_string())`. The invalid `ftp://` scheme
+// makes this fail deterministically and instantly, with no real network
+// I/O — no external service health required.
+// ---------------------------------------------------------------------
+const SENTINEL_OPERATOR_URL: &str = "ftp://apikey_API_KEY_SENTINEL_91CA:secret@\
+    OPERATOR_URL_SENTINEL_8B16.example.invalid:9443\
+    /PATH_SENTINEL_F043?token=QUERY_SENTINEL_77E2";
+
+#[test]
+fn provider_runtime_failure_never_leaks_operator_configuration_sentinels() {
+    let (mut child, base) = api_server(Some(SENTINEL_OPERATOR_URL.to_string()));
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+
+    // Truthful, stable classification preserved: a runtime provider
+    // failure remains 502/provider_unavailable — unchanged by this
+    // correction, and distinct from every F-4 static configuration class.
+    assert!(
+        response.starts_with("HTTP/1.1 502 Bad Gateway"),
+        "{response}"
+    );
+    assert!(
+        response.contains("\"code\":\"provider_unavailable\""),
+        "{response}"
+    );
+    assert!(!response.contains("provider_not_configured"), "{response}");
+    assert!(!response.contains("provider_unsupported"), "{response}");
+
+    // None of the sentinels embedded in the operator-configured URL —
+    // API key/userinfo, hostname, path, or query token — may appear
+    // anywhere in the public response the Web Console also renders
+    // verbatim (payload.error.message).
+    for sentinel in [
+        "API_KEY_SENTINEL_91CA",
+        "apikey_API_KEY_SENTINEL_91CA:secret",
+        "OPERATOR_URL_SENTINEL_8B16",
+        "PATH_SENTINEL_F043",
+        "QUERY_SENTINEL_77E2",
+        "9443",
+        "ftp://",
+    ] {
+        assert!(
+            !response.contains(sentinel),
+            "leaked `{sentinel}` in: {response}"
+        );
+    }
+
+    // The public message is the fixed, sanitized, deterministic string —
+    // the same one the Web Console will display unmodified.
+    assert!(
+        response.contains("\"message\":\"search provider failed: search provider is unavailable\""),
+        "{response}"
+    );
+}

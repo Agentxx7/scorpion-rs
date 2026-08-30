@@ -12,7 +12,8 @@ use spider::features::research_session::{
     claim_durable_research, read_research_session, ResearchSession, ResearchSessionState,
 };
 use spider::features::search::{
-    resolve_search_provider, SearchOptions, SearchProvider, SearchProviderConfigError,
+    resolve_search_provider, SearchError as CanonicalSearchError, SearchOptions, SearchProvider,
+    SearchProviderConfigError,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -87,6 +88,31 @@ fn map_search_provider_config_error(error: SearchProviderConfigError) -> SearchE
     }
 }
 
+/// Stable, sanitized public message for any provider *runtime* failure
+/// (as opposed to the static configuration failures above). Deliberately
+/// identical regardless of the internal cause — network failure,
+/// authentication failure, rate limiting, a malformed operator-configured
+/// endpoint, an unparsable transport response, or any other
+/// `spider_search::SearchError` variant. None of those internal variants
+/// may carry operator-configured URLs (a SearXNG `ProviderError` embeds
+/// the raw configured base URL verbatim), credentials, query strings, or
+/// transport/reqwest error detail (which conventionally includes the
+/// request URL) through the public boundary. See
+/// `sanitize_provider_runtime_error`.
+const PROVIDER_RUNTIME_FAILURE_MESSAGE: &str = "search provider is unavailable";
+
+/// Discard the canonical `spider_search::SearchError`'s raw `Display` text
+/// and log it for operator troubleshooting only — the public boundary
+/// never depends on internal `Display` output. The public
+/// `SearchError::Provider` always carries the same fixed, sanitized
+/// message; the HTTP status (502) and JSON code (`provider_unavailable`)
+/// this capability already used remain unchanged (this is a message-only
+/// correction, not a reclassification).
+fn sanitize_provider_runtime_error(error: CanonicalSearchError) -> SearchError {
+    eprintln!("scorpion-api search provider runtime failure: {error}");
+    SearchError::Provider(PROVIDER_RUNTIME_FAILURE_MESSAGE.to_string())
+}
+
 impl std::fmt::Display for SearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -139,7 +165,7 @@ pub async fn search(
     let results = provider
         .search(query, &options)
         .await
-        .map_err(|error| SearchError::Provider(error.to_string()))?;
+        .map_err(sanitize_provider_runtime_error)?;
 
     if results.results.is_empty() && results.backend_failure {
         return Err(SearchError::Provider(
@@ -842,6 +868,59 @@ mod tests {
             assert!(!message.contains("operator-key"));
             assert!(!message.contains("http://"));
             assert!(!message.contains("/tmp/"));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // F-5: every canonical `spider_search::SearchError` runtime-failure
+    // variant must sanitize to the same fixed public message — none of
+    // them may carry operator-configured URLs, credentials, query
+    // strings, or transport/reqwest error detail across the public
+    // boundary. This is a message-only correction: HTTP 502 and the
+    // `provider_unavailable` code (F-4's established runtime-failure
+    // classification) are unchanged.
+    // ---------------------------------------------------------------------
+    #[test]
+    fn every_canonical_provider_runtime_error_variant_sanitizes_to_the_same_safe_message() {
+        // A single synthetic detail string standing in for everything a
+        // real internal error could carry: an operator hostname, a
+        // filesystem-shaped path fragment, and a query-string token.
+        let leaky_detail = "OPERATOR_URL_SENTINEL_8B16 https://internal.example.invalid:9443\
+            /PATH_SENTINEL_F043?token=QUERY_SENTINEL_77E2";
+
+        for variant in [
+            CanonicalSearchError::RequestFailed(leaky_detail.to_string()),
+            CanonicalSearchError::AuthenticationFailed,
+            CanonicalSearchError::RateLimited,
+            CanonicalSearchError::InvalidQuery(leaky_detail.to_string()),
+            CanonicalSearchError::ProviderError(leaky_detail.to_string()),
+            CanonicalSearchError::NoProvider,
+        ] {
+            let projected = sanitize_provider_runtime_error(variant);
+
+            // Every variant collapses to the exact same fixed message —
+            // never a per-variant reproduction of internal detail.
+            assert_eq!(
+                projected,
+                SearchError::Provider(PROVIDER_RUNTIME_FAILURE_MESSAGE.to_string())
+            );
+
+            // Truthful, stable classification preserved (F-4 discipline):
+            // a runtime failure remains 502/provider_unavailable, never
+            // reclassified as a static configuration failure.
+            assert_eq!(error_status(&projected), 502);
+            let json = error_json(&projected);
+            assert!(json.contains("\"code\":\"provider_unavailable\""));
+
+            for sentinel in [
+                "OPERATOR_URL_SENTINEL_8B16",
+                "PATH_SENTINEL_F043",
+                "QUERY_SENTINEL_77E2",
+                "internal.example.invalid",
+                "9443",
+            ] {
+                assert!(!json.contains(sentinel), "leaked `{sentinel}` in: {json}");
+            }
         }
     }
 

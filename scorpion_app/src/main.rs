@@ -1,6 +1,7 @@
 use scorpion_app::{
-    error_json, error_status, research_error_json, research_error_status, search, ResearchError,
-    ResearchRequest, ResearchService, SearchError, SearchRequest,
+    error_json, error_status, research_availability, research_error_json, research_error_status,
+    search, ResearchAvailability, ResearchError, ResearchRequest, ResearchService, SearchError,
+    SearchRequest,
 };
 use std::env;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -85,9 +86,8 @@ async fn handle(
         bytes.extend_from_slice(&chunk[..read]);
     }
     if method == "GET" && path == "/" {
-        return write_html(&mut stream, INDEX_HTML)
-            .await
-            .map_err(Into::into);
+        let page = render_index(research_availability());
+        return write_html(&mut stream, &page).await.map_err(Into::into);
     }
     if method == "GET" && path == "/health" {
         return write_json(&mut stream, 200, r#"{"status":"ok"}"#)
@@ -194,6 +194,16 @@ async fn write_html(stream: &mut TcpStream, body: &str) -> Result<(), std::io::E
     stream.write_all(response.as_bytes()).await
 }
 
+fn render_index(availability: ResearchAvailability) -> String {
+    let (disabled, message) = match availability {
+        ResearchAvailability::Available => ("", "Research is configured."),
+        ResearchAvailability::NotConfigured => (" disabled", "Research is not configured."),
+    };
+    INDEX_HTML
+        .replace("{{RESEARCH_DISABLED}}", disabled)
+        .replace("{{RESEARCH_AVAILABILITY}}", message)
+}
+
 const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -210,6 +220,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     input { flex: 1; min-width: 0; padding: .85rem 1rem; border: 1px solid #aeb8c4; border-radius: .55rem; font-size: 1rem; background: white; color: #18202a; }
     button { padding: .85rem 1.2rem; border: 0; border-radius: .55rem; background: #165dff; color: white; font-weight: 650; cursor: pointer; }
     button:disabled { opacity: .6; cursor: wait; }
+    #research-button:disabled { cursor: not-allowed; }
     #status { min-height: 1.5rem; margin: 1rem 0; color: #536170; }
     #status.error { color: #b42318; }
     section { margin-top: 3rem; padding-top: 2rem; border-top: 1px solid #d6dce3; }
@@ -238,10 +249,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <section aria-labelledby="research-heading">
       <h2 id="research-heading">Research</h2>
       <p class="tagline">Run durable research with canonical evidence and synthesis.</p>
+      <p id="research-availability">{{RESEARCH_AVAILABILITY}}</p>
       <form id="research-form">
         <label for="research-topic" hidden>Research topic</label>
         <input id="research-topic" name="topic" type="text" placeholder="Research a topic" autocomplete="off" required>
-        <button id="research-button" type="submit">Start Research</button>
+        <button id="research-button" type="submit"{{RESEARCH_DISABLED}}>Start Research</button>
       </form>
       <div id="research-status" role="status" aria-live="polite"></div>
       <div id="research-result"></div>

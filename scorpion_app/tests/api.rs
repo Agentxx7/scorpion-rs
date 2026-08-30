@@ -21,15 +21,39 @@ fn fake_searxng(body: &'static str, status: &'static str) -> String {
 }
 
 fn api_server(searxng: Option<String>) -> (Child, String) {
+    api_server_with_research(searxng, false)
+}
+
+fn api_server_with_research(searxng: Option<String>, research_configured: bool) -> (Child, String) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
     let mut command = Command::new(env!("CARGO_BIN_EXE_scorpion-api"));
     command.env("SCORPION_API_BIND", address.to_string());
+    for name in [
+        "RESEARCH_EVIDENCE_DB",
+        "SEARCH_PROVIDER",
+        "BRAVE_API_KEY",
+        "SERPER_API_KEY",
+        "TAVILY_API_KEY",
+        "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_COMPAT_MODEL",
+        "OPENAI_COMPAT_API_KEY",
+    ] {
+        command.env_remove(name);
+    }
     if let Some(url) = searxng {
         command.env("SEARXNG_BASE_URL", url);
     } else {
         command.env_remove("SEARXNG_BASE_URL");
+    }
+    if research_configured {
+        command
+            .env("RESEARCH_EVIDENCE_DB", "/tmp/scorpion-web-research.sqlite")
+            .env("SEARXNG_BASE_URL", "http://127.0.0.1:8080")
+            .env("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:11434/v1")
+            .env("OPENAI_COMPAT_MODEL", "operator-model")
+            .env("OPENAI_COMPAT_API_KEY", "never-render-this-secret");
     }
     let child = command.spawn().unwrap();
     thread::sleep(Duration::from_millis(100));
@@ -63,6 +87,8 @@ fn research_routes_fail_closed_without_operator_configuration() {
         response.starts_with("HTTP/1.1 503 Service Unavailable"),
         "{response}"
     );
+    assert!(response.contains("\"code\":\"research_not_configured\""));
+    assert!(response.contains("\"message\":\"research is not configured\""));
 
     let (mut child, base) = api_server(None);
     let response = get(&base, "/api/research/not-a-research-id");
@@ -97,12 +123,29 @@ fn real_server_serves_search_only_console_from_same_origin() {
     assert!(response.contains("Searching…"));
     assert!(response.contains("No results found."));
     assert!(response.contains("id=\"research-form\""));
+    assert!(response.contains(">Research is not configured.</p>"));
+    assert!(response.contains("id=\"research-button\" type=\"submit\" disabled"));
     assert!(response.contains("fetch('/api/research'"));
     assert!(response.contains("terminalResearchStates"));
     assert!(response.contains("completed_synthesis_insufficient"));
     assert!(response.contains("EvidenceIds:"));
     assert!(!response.contains("SEARXNG_BASE_URL"));
     assert!(!response.contains("OPENAI_COMPAT_API_KEY"));
+}
+
+#[test]
+fn configured_research_is_actionable_without_rendering_configuration() {
+    let (mut child, base) = api_server_with_research(None, true);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains(">Research is configured.</p>"));
+    assert!(response.contains("id=\"research-button\" type=\"submit\">"));
+    assert!(!response.contains("id=\"research-button\" type=\"submit\" disabled"));
+    assert!(!response.contains("never-render-this-secret"));
+    assert!(!response.contains("/tmp/scorpion-web-research.sqlite"));
+    assert!(!response.contains("127.0.0.1:11434"));
+    assert!(!response.contains("operator-model"));
 }
 
 #[test]

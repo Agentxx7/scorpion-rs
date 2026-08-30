@@ -11,8 +11,7 @@ use spider::features::identity::ResearchId;
 use spider::features::research_session::{
     claim_durable_research, read_research_session, ResearchSession, ResearchSessionState,
 };
-use spider::features::search::resolve_search_provider;
-use spider::features::search::SearchOptions;
+use spider::features::search::{resolve_search_provider, SearchOptions, SearchProvider};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -198,6 +197,24 @@ pub enum ResearchError {
     Internal,
 }
 
+/// Static operator-configuration availability for the Research product.
+///
+/// This deliberately says nothing about external service health. Execution
+/// still performs every canonical runtime check and remains fail-closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResearchAvailability {
+    Available,
+    NotConfigured,
+}
+
+struct ResearchRuntimeConfig {
+    database: PathBuf,
+    provider: Box<dyn SearchProvider>,
+    openai_base_url: String,
+    model: String,
+    api_key: String,
+}
+
 impl std::fmt::Display for ResearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -262,31 +279,15 @@ impl ResearchService {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ResearchError::CapacityExhausted)?;
-        let database = PathBuf::from(required_env("RESEARCH_EVIDENCE_DB")?);
-        let searxng = std::env::var("SEARXNG_BASE_URL").ok();
-        let openai = required_env("OPENAI_COMPAT_BASE_URL")?;
-        let model = required_env("OPENAI_COMPAT_MODEL")?;
-        let api_key = required_env("OPENAI_COMPAT_API_KEY")?;
+        let config = resolve_research_config()?;
         let store = Arc::new(
-            DomainPersistence::open(&database)
+            DomainPersistence::open(&config.database)
                 .await
                 .map_err(|_| ResearchError::Unavailable)?,
         );
-        let brave = std::env::var("BRAVE_API_KEY").ok();
-        let serper = std::env::var("SERPER_API_KEY").ok();
-        let tavily = std::env::var("TAVILY_API_KEY").ok();
-        let provider = resolve_search_provider(
-            std::env::var("SEARCH_PROVIDER").ok().as_deref(),
-            searxng.as_deref(),
-            brave.as_deref(),
-            serper.as_deref(),
-            tavily.as_deref(),
-        )
-        .map_err(|_| ResearchError::Unavailable)?
-        .1;
         let builder = AgentBuilder::new()
-            .with_openai_compatible(openai, api_key, model)
-            .with_search_provider(provider);
+            .with_openai_compatible(config.openai_base_url, config.api_key, config.model)
+            .with_search_provider(config.provider);
         let claimed = claim_durable_research(
             Arc::clone(&store),
             builder,
@@ -325,11 +326,64 @@ impl ResearchService {
     }
 }
 
-fn required_env(name: &str) -> Result<String, ResearchError> {
-    std::env::var(name)
-        .ok()
+fn required_config(
+    name: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<String, ResearchError> {
+    lookup(name)
         .filter(|v| !v.trim().is_empty())
         .ok_or(ResearchError::NotConfigured)
+}
+
+fn required_env(name: &str) -> Result<String, ResearchError> {
+    required_config(name, &|name| std::env::var(name).ok())
+}
+
+fn resolve_research_config_with(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<ResearchRuntimeConfig, ResearchError> {
+    let database = PathBuf::from(required_config("RESEARCH_EVIDENCE_DB", lookup)?);
+    let openai_base_url = required_config("OPENAI_COMPAT_BASE_URL", lookup)?;
+    let model = required_config("OPENAI_COMPAT_MODEL", lookup)?;
+    let api_key = required_config("OPENAI_COMPAT_API_KEY", lookup)?;
+    let selector = lookup("SEARCH_PROVIDER");
+    let searxng = lookup("SEARXNG_BASE_URL");
+    let brave = lookup("BRAVE_API_KEY");
+    let serper = lookup("SERPER_API_KEY");
+    let tavily = lookup("TAVILY_API_KEY");
+    let provider = resolve_search_provider(
+        selector.as_deref(),
+        searxng.as_deref(),
+        brave.as_deref(),
+        serper.as_deref(),
+        tavily.as_deref(),
+    )
+    .map_err(|_| ResearchError::Unavailable)?
+    .1;
+    Ok(ResearchRuntimeConfig {
+        database,
+        provider,
+        openai_base_url,
+        model,
+        api_key,
+    })
+}
+
+fn resolve_research_config() -> Result<ResearchRuntimeConfig, ResearchError> {
+    resolve_research_config_with(&|name| std::env::var(name).ok())
+}
+
+/// Project whether all static operator configuration required by Research is
+/// present. This does not probe or claim health for configured dependencies.
+pub fn research_availability() -> ResearchAvailability {
+    research_availability_with(&|name| std::env::var(name).ok())
+}
+
+fn research_availability_with(lookup: &impl Fn(&str) -> Option<String>) -> ResearchAvailability {
+    match resolve_research_config_with(lookup) {
+        Ok(_) => ResearchAvailability::Available,
+        Err(_) => ResearchAvailability::NotConfigured,
+    }
 }
 
 fn project_session(session: ResearchSession) -> ResearchStatus {
@@ -433,6 +487,45 @@ mod tests {
             r#"{"topic":"rust","api_key":"secret","database":"/tmp/db"}"#,
         );
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn research_availability_reuses_runtime_configuration_resolution() {
+        let configured = |name: &str| match name {
+            "RESEARCH_EVIDENCE_DB" => Some("/tmp/research.sqlite".to_string()),
+            "SEARXNG_BASE_URL" => Some("http://127.0.0.1:8080".to_string()),
+            "OPENAI_COMPAT_BASE_URL" => Some("http://127.0.0.1:11434/v1".to_string()),
+            "OPENAI_COMPAT_MODEL" => Some("operator-model".to_string()),
+            "OPENAI_COMPAT_API_KEY" => Some("operator-key".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            research_availability_with(&configured),
+            ResearchAvailability::Available
+        );
+        assert!(resolve_research_config_with(&configured).is_ok());
+
+        for missing in [
+            "RESEARCH_EVIDENCE_DB",
+            "SEARXNG_BASE_URL",
+            "OPENAI_COMPAT_BASE_URL",
+            "OPENAI_COMPAT_MODEL",
+            "OPENAI_COMPAT_API_KEY",
+        ] {
+            let incomplete = |name: &str| {
+                if name == missing {
+                    None
+                } else {
+                    configured(name)
+                }
+            };
+            assert_eq!(
+                research_availability_with(&incomplete),
+                ResearchAvailability::NotConfigured,
+                "{missing} must be part of the shared Research configuration contract"
+            );
+            assert!(resolve_research_config_with(&incomplete).is_err());
+        }
     }
 
     #[tokio::test]

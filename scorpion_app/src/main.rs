@@ -195,9 +195,17 @@ async fn write_html(stream: &mut TcpStream, body: &str) -> Result<(), std::io::E
 }
 
 fn render_index(availability: ResearchAvailability) -> String {
-    let (disabled, message) = match availability {
+    let (disabled, message): (&str, &str) = match availability {
         ResearchAvailability::Available => ("", "Research is configured."),
         ResearchAvailability::NotConfigured => (" disabled", "Research is not configured."),
+        ResearchAvailability::UnsupportedProvider(_) => (
+            " disabled",
+            "Research is not available: the configured search provider is not supported by this build.",
+        ),
+        ResearchAvailability::InvalidConfiguration(_) => (
+            " disabled",
+            "Research is not available: the configured search provider selection is invalid.",
+        ),
     };
     INDEX_HTML
         .replace("{{RESEARCH_DISABLED}}", disabled)

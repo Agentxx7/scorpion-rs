@@ -60,6 +60,39 @@ fn api_server_with_research(searxng: Option<String>, research_configured: bool) 
     (child, format!("http://{address}"))
 }
 
+/// Spawn `scorpion-api` with an exact, explicit environment — every
+/// provider/research-relevant variable is cleared first, then only the
+/// given overrides are applied. Used to reproduce configuration classes
+/// `api_server`/`api_server_with_research` cannot express (an operator
+/// selecting a real-but-not-compiled-in provider, or an unrecognized
+/// selector) without depending on process-global env var mutation.
+fn api_server_with_env(env: &[(&str, &str)]) -> (Child, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_scorpion-api"));
+    command.env("SCORPION_API_BIND", address.to_string());
+    for name in [
+        "RESEARCH_EVIDENCE_DB",
+        "SEARCH_PROVIDER",
+        "SEARXNG_BASE_URL",
+        "BRAVE_API_KEY",
+        "SERPER_API_KEY",
+        "TAVILY_API_KEY",
+        "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_COMPAT_MODEL",
+        "OPENAI_COMPAT_API_KEY",
+    ] {
+        command.env_remove(name);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let child = command.spawn().unwrap();
+    thread::sleep(Duration::from_millis(100));
+    (child, format!("http://{address}"))
+}
+
 fn post(base: &str, body: &str) -> String {
     post_path(base, "/api/search", body)
 }
@@ -269,5 +302,206 @@ fn malformed_request_and_missing_provider_fail_without_200() {
     assert!(
         response.starts_with("HTTP/1.1 503 Service Unavailable"),
         "{response}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// F-4: canonical provider-configuration error distinctions must survive
+// the scorpion_app boundary — this shipping build compiles only
+// `search_searxng` (scorpion_app/Cargo.toml), so selecting Brave/Serper/
+// Tavily or an unrecognized provider name is a real, distinct
+// configuration class, never a "not configured" or "upstream failure"
+// misclassification.
+// ---------------------------------------------------------------------
+
+const UNSUPPORTED_KEY: &str = "sk-should-never-appear-in-any-response";
+const UNSUPPORTED_OPENAI_KEY: &str = "never-render-this-secret-either";
+const UNSUPPORTED_DB_PATH: &str = "/tmp/scorpion-web-research-unsupported-provider.sqlite";
+const UNSUPPORTED_OPENAI_URL: &str = "http://127.0.0.1:11434/v1";
+
+#[test]
+fn unsupported_search_provider_is_neither_not_configured_nor_upstream_failure() {
+    let (mut child, base) = api_server_with_env(&[
+        ("SEARCH_PROVIDER", "brave"),
+        ("BRAVE_API_KEY", UNSUPPORTED_KEY),
+    ]);
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+
+    // Static configuration/build failure: 503, never 502 (upstream failure
+    // — the provider was never executable in this build) and never a bare
+    // "provider_not_configured" (the key IS present; the build just does
+    // not compile Brave).
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(
+        response.contains("\"code\":\"provider_unsupported\""),
+        "{response}"
+    );
+    assert!(!response.contains("provider_not_configured"), "{response}");
+    assert!(!response.contains("provider_unavailable"), "{response}");
+    assert!(!response.contains(UNSUPPORTED_KEY), "{response}");
+}
+
+#[test]
+fn unsupported_serper_and_tavily_search_providers_are_also_unsupported_not_missing() {
+    for (provider, key_var) in [("serper", "SERPER_API_KEY"), ("tavily", "TAVILY_API_KEY")] {
+        let (mut child, base) =
+            api_server_with_env(&[("SEARCH_PROVIDER", provider), (key_var, UNSUPPORTED_KEY)]);
+        let response = post(&base, r#"{"query":"rust"}"#);
+        child.kill().unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{provider}: {response}"
+        );
+        assert!(
+            response.contains("\"code\":\"provider_unsupported\""),
+            "{provider}: {response}"
+        );
+        assert!(
+            !response.contains("provider_not_configured"),
+            "{provider}: {response}"
+        );
+        assert!(
+            !response.contains("provider_unavailable"),
+            "{provider}: {response}"
+        );
+    }
+}
+
+#[test]
+fn unknown_search_provider_selector_is_a_truthful_static_configuration_error() {
+    let (mut child, base) = api_server_with_env(&[("SEARCH_PROVIDER", "scorpion-does-not-exist")]);
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(
+        response.contains("\"code\":\"invalid_provider_configuration\""),
+        "{response}"
+    );
+    assert!(!response.contains("provider_unavailable"), "{response}");
+}
+
+#[test]
+fn valid_searxng_search_configuration_is_unaffected() {
+    let provider = fake_searxng(r#"{"query":"rust","results":[]}"#, "200 OK");
+    let (mut child, base) = api_server(Some(provider));
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+}
+
+/// The primary F-4 adversarial acceptance case: for the exact same static
+/// configuration (Brave selected, key present, SearXNG-only shipping
+/// build), Search, Research availability (GET /), and Research submission
+/// (POST /api/research) must all agree on the root configuration class —
+/// none of them may say "not configured" or "unavailable".
+#[test]
+fn unsupported_research_provider_agrees_across_ui_availability_and_execution() {
+    let env: &[(&str, &str)] = &[
+        ("SEARCH_PROVIDER", "brave"),
+        ("BRAVE_API_KEY", UNSUPPORTED_KEY),
+        ("RESEARCH_EVIDENCE_DB", UNSUPPORTED_DB_PATH),
+        ("OPENAI_COMPAT_BASE_URL", UNSUPPORTED_OPENAI_URL),
+        ("OPENAI_COMPAT_MODEL", "operator-model"),
+        ("OPENAI_COMPAT_API_KEY", UNSUPPORTED_OPENAI_KEY),
+    ];
+
+    let (mut child, base) = api_server_with_env(env);
+    let index = get(&base, "/");
+    child.kill().unwrap();
+    assert!(index.starts_with("HTTP/1.1 200 OK"), "{index}");
+    // Truthful: Research is disabled...
+    assert!(
+        index.contains("id=\"research-button\" type=\"submit\" disabled"),
+        "{index}"
+    );
+    // ...but not falsely claimed as simply "not configured" (a key IS
+    // present) nor claimed as available.
+    assert!(
+        !index.contains(">Research is not configured.</p>"),
+        "{index}"
+    );
+    assert!(!index.contains(">Research is configured.</p>"), "{index}");
+    assert!(index.contains("not supported by this build"), "{index}");
+    assert!(!index.contains(UNSUPPORTED_KEY), "{index}");
+    assert!(!index.contains(UNSUPPORTED_OPENAI_KEY), "{index}");
+    assert!(!index.contains(UNSUPPORTED_DB_PATH), "{index}");
+
+    let (mut child, base) = api_server_with_env(env);
+    let submit = post_path(&base, "/api/research", r#"{"topic":"rust"}"#);
+    child.kill().unwrap();
+    // Same root configuration class as the UI/availability projection:
+    // static configuration failure (503), the unsupported-provider code —
+    // never the runtime-failure class (research_unavailable/502) and
+    // never research_not_configured.
+    assert!(
+        submit.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{submit}"
+    );
+    assert!(
+        submit.contains("\"code\":\"research_provider_unsupported\""),
+        "{submit}"
+    );
+    assert!(!submit.contains("research_not_configured"), "{submit}");
+    assert!(!submit.contains("research_unavailable"), "{submit}");
+    assert!(!submit.contains(UNSUPPORTED_KEY), "{submit}");
+    assert!(!submit.contains(UNSUPPORTED_OPENAI_KEY), "{submit}");
+    assert!(!submit.contains(UNSUPPORTED_DB_PATH), "{submit}");
+}
+
+#[test]
+fn invalid_research_provider_selector_agrees_across_ui_and_execution() {
+    let env: &[(&str, &str)] = &[
+        ("SEARCH_PROVIDER", "scorpion-does-not-exist"),
+        ("RESEARCH_EVIDENCE_DB", UNSUPPORTED_DB_PATH),
+        ("OPENAI_COMPAT_BASE_URL", UNSUPPORTED_OPENAI_URL),
+        ("OPENAI_COMPAT_MODEL", "operator-model"),
+        ("OPENAI_COMPAT_API_KEY", UNSUPPORTED_OPENAI_KEY),
+    ];
+
+    let (mut child, base) = api_server_with_env(env);
+    let index = get(&base, "/");
+    child.kill().unwrap();
+    assert!(
+        index.contains("id=\"research-button\" type=\"submit\" disabled"),
+        "{index}"
+    );
+    assert!(
+        !index.contains(">Research is not configured.</p>"),
+        "{index}"
+    );
+    assert!(!index.contains(">Research is configured.</p>"), "{index}");
+    assert!(index.contains("invalid"), "{index}");
+
+    let (mut child, base) = api_server_with_env(env);
+    let submit = post_path(&base, "/api/research", r#"{"topic":"rust"}"#);
+    child.kill().unwrap();
+    assert!(
+        submit.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{submit}"
+    );
+    assert!(
+        submit.contains("\"code\":\"research_provider_configuration_invalid\""),
+        "{submit}"
+    );
+    assert!(!submit.contains("research_not_configured"), "{submit}");
+    assert!(!submit.contains("research_unavailable"), "{submit}");
+}
+
+#[test]
+fn valid_research_configuration_remains_enabled() {
+    let (mut child, base) = api_server_with_research(None, true);
+    let index = get(&base, "/");
+    child.kill().unwrap();
+    assert!(index.contains(">Research is configured.</p>"), "{index}");
+    assert!(
+        !index.contains("id=\"research-button\" type=\"submit\" disabled"),
+        "{index}"
     );
 }

@@ -11,7 +11,9 @@ use spider::features::identity::ResearchId;
 use spider::features::research_session::{
     claim_durable_research, read_research_session, ResearchSession, ResearchSessionState,
 };
-use spider::features::search::{resolve_search_provider, SearchOptions, SearchProvider};
+use spider::features::search::{
+    resolve_search_provider, SearchOptions, SearchProvider, SearchProviderConfigError,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -51,9 +53,38 @@ pub struct SearchResult {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SearchError {
     InvalidRequest(String),
+    /// The selected provider requires operator configuration that is absent
+    /// (canonical `SearchProviderConfigError::MissingConfiguration`).
     ProviderNotConfigured,
+    /// The operator selected a real, recognized provider that this build
+    /// does not compile in (canonical
+    /// `SearchProviderConfigError::UnsupportedProvider`). Distinct from
+    /// `ProviderNotConfigured`: the provider was never executable in this
+    /// shipping build, not merely missing a key/URL.
+    ProviderUnsupported(String),
+    /// The configured selector does not name any canonical provider
+    /// identity (canonical `SearchProviderConfigError::UnknownProvider`).
+    InvalidProviderSelection(String),
+    /// A provider that resolved successfully failed at runtime (network,
+    /// upstream, or backend failure) — distinct from every static
+    /// configuration failure above.
     Provider(String),
     Internal(String),
+}
+
+/// Project the canonical, sanitized provider configuration error into this
+/// application's public `SearchError` classification. Preserves the
+/// canonical resolver's own distinctions rather than collapsing them.
+fn map_search_provider_config_error(error: SearchProviderConfigError) -> SearchError {
+    match error {
+        SearchProviderConfigError::MissingConfiguration(_) => SearchError::ProviderNotConfigured,
+        SearchProviderConfigError::UnsupportedProvider(name) => {
+            SearchError::ProviderUnsupported(name.to_string())
+        }
+        SearchProviderConfigError::UnknownProvider(name) => {
+            SearchError::InvalidProviderSelection(name)
+        }
+    }
 }
 
 impl std::fmt::Display for SearchError {
@@ -61,6 +92,12 @@ impl std::fmt::Display for SearchError {
         match self {
             Self::InvalidRequest(message) => write!(f, "invalid request: {message}"),
             Self::ProviderNotConfigured => f.write_str("search provider is not configured"),
+            Self::ProviderUnsupported(name) => {
+                write!(f, "search provider \"{name}\" is not enabled in this build")
+            }
+            Self::InvalidProviderSelection(name) => {
+                write!(f, "invalid search provider selection \"{name}\"")
+            }
             Self::Provider(message) => write!(f, "search provider failed: {message}"),
             Self::Internal(message) => write!(f, "internal application error: {message}"),
         }
@@ -94,7 +131,7 @@ pub async fn search(
         serper.as_deref(),
         tavily.as_deref(),
     )
-    .map_err(|_| SearchError::ProviderNotConfigured)?
+    .map_err(map_search_provider_config_error)?
     .1;
     let options = request.limit.map_or_else(SearchOptions::new, |limit| {
         SearchOptions::new().with_limit(limit)
@@ -129,10 +166,18 @@ pub async fn search(
 }
 
 /// HTTP status and public JSON error body for an application error.
+///
+/// Every static configuration failure (the provider was never executable in
+/// this build/deployment) is `503 Service Unavailable`. `502 Bad Gateway` is
+/// reserved for `SearchError::Provider` — a provider that resolved
+/// successfully but failed at runtime — never for a provider that was never
+/// reachable in the first place.
 pub fn error_status(error: &SearchError) -> u16 {
     match error {
         SearchError::InvalidRequest(_) => 400,
-        SearchError::ProviderNotConfigured => 503,
+        SearchError::ProviderNotConfigured
+        | SearchError::ProviderUnsupported(_)
+        | SearchError::InvalidProviderSelection(_) => 503,
         SearchError::Provider(_) => 502,
         SearchError::Internal(_) => 500,
     }
@@ -145,6 +190,8 @@ pub fn error_json(error: &SearchError) -> String {
             "code": match error {
                 SearchError::InvalidRequest(_) => "invalid_request",
                 SearchError::ProviderNotConfigured => "provider_not_configured",
+                SearchError::ProviderUnsupported(_) => "provider_unsupported",
+                SearchError::InvalidProviderSelection(_) => "invalid_provider_configuration",
                 SearchError::Provider(_) => "provider_unavailable",
                 SearchError::Internal(_) => "internal_error",
             },
@@ -190,21 +237,62 @@ pub struct ResearchStatus {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ResearchError {
     InvalidRequest(String),
+    /// Required operator configuration (database path, OpenAI-compatible
+    /// endpoint, or the search provider's own required key/URL) is absent.
     NotConfigured,
+    /// The configured search provider is a real, recognized provider that
+    /// this build does not compile in (canonical
+    /// `SearchProviderConfigError::UnsupportedProvider`). A static
+    /// build/config incompatibility, not an execution/runtime dependency
+    /// failure — never classified as `Unavailable`.
+    UnsupportedProvider(String),
+    /// The configured search provider selector does not name any canonical
+    /// provider identity (canonical `SearchProviderConfigError::
+    /// UnknownProvider`). Also a static configuration failure, never
+    /// `Unavailable`.
+    InvalidProviderConfiguration(String),
     CapacityExhausted,
     NotFound,
+    /// An execution/runtime dependency failure (e.g. the durable evidence
+    /// store could not be opened) — reserved for failures that occur only
+    /// after static configuration has already resolved successfully.
     Unavailable,
     Internal,
+}
+
+/// Project the canonical, sanitized provider configuration error into this
+/// application's public `ResearchError` classification. Preserves the
+/// canonical resolver's own distinctions — never collapsed into
+/// `Unavailable`, which is reserved for execution/runtime failures that
+/// occur only after static configuration has already resolved.
+fn map_research_provider_config_error(error: SearchProviderConfigError) -> ResearchError {
+    match error {
+        SearchProviderConfigError::MissingConfiguration(_) => ResearchError::NotConfigured,
+        SearchProviderConfigError::UnsupportedProvider(name) => {
+            ResearchError::UnsupportedProvider(name.to_string())
+        }
+        SearchProviderConfigError::UnknownProvider(name) => {
+            ResearchError::InvalidProviderConfiguration(name)
+        }
+    }
 }
 
 /// Static operator-configuration availability for the Research product.
 ///
 /// This deliberately says nothing about external service health. Execution
 /// still performs every canonical runtime check and remains fail-closed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Reuses `resolve_research_config_with`'s own classification — never a
+/// second, independently-maintained configuration check.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResearchAvailability {
     Available,
     NotConfigured,
+    /// The configured search provider is real but not compiled into this
+    /// build (see `ResearchError::UnsupportedProvider`).
+    UnsupportedProvider(String),
+    /// The configured search provider selector is not a recognized
+    /// canonical identity (see `ResearchError::InvalidProviderConfiguration`).
+    InvalidConfiguration(String),
 }
 
 struct ResearchRuntimeConfig {
@@ -217,22 +305,40 @@ struct ResearchRuntimeConfig {
 
 impl std::fmt::Display for ResearchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::InvalidRequest(_) => "invalid research request",
-            Self::NotConfigured => "research is not configured",
-            Self::CapacityExhausted => "research capacity is temporarily exhausted",
-            Self::NotFound => "research session not found",
-            Self::Unavailable => "research is unavailable",
-            Self::Internal => "internal research error",
-        })
+        match self {
+            Self::InvalidRequest(_) => f.write_str("invalid research request"),
+            Self::NotConfigured => f.write_str("research is not configured"),
+            Self::UnsupportedProvider(name) => write!(
+                f,
+                "configured research search provider \"{name}\" is not enabled in this build"
+            ),
+            Self::InvalidProviderConfiguration(name) => write!(
+                f,
+                "invalid research search provider configuration \"{name}\""
+            ),
+            Self::CapacityExhausted => f.write_str("research capacity is temporarily exhausted"),
+            Self::NotFound => f.write_str("research session not found"),
+            Self::Unavailable => f.write_str("research is unavailable"),
+            Self::Internal => f.write_str("internal research error"),
+        }
     }
 }
 
+/// HTTP status for a public research error.
+///
+/// Every static configuration/build incompatibility — including an
+/// unsupported or invalid provider selection — is `503 Service
+/// Unavailable`, matching `SearchError`'s own convention. `502 Bad Gateway`
+/// remains reserved for `Unavailable`: a real execution/runtime dependency
+/// failure that occurs only after static configuration already resolved.
 pub fn research_error_status(error: &ResearchError) -> u16 {
     match error {
         ResearchError::InvalidRequest(_) => 400,
         ResearchError::NotFound => 404,
-        ResearchError::NotConfigured | ResearchError::CapacityExhausted => 503,
+        ResearchError::NotConfigured
+        | ResearchError::CapacityExhausted
+        | ResearchError::UnsupportedProvider(_)
+        | ResearchError::InvalidProviderConfiguration(_) => 503,
         ResearchError::Unavailable => 502,
         ResearchError::Internal => 500,
     }
@@ -242,6 +348,8 @@ pub fn research_error_json(error: &ResearchError) -> String {
     let code = match error {
         ResearchError::InvalidRequest(_) => "invalid_request",
         ResearchError::NotConfigured => "research_not_configured",
+        ResearchError::UnsupportedProvider(_) => "research_provider_unsupported",
+        ResearchError::InvalidProviderConfiguration(_) => "research_provider_configuration_invalid",
         ResearchError::CapacityExhausted => "execution_capacity_exhausted",
         ResearchError::NotFound => "research_not_found",
         ResearchError::Unavailable => "research_unavailable",
@@ -358,7 +466,7 @@ fn resolve_research_config_with(
         serper.as_deref(),
         tavily.as_deref(),
     )
-    .map_err(|_| ResearchError::Unavailable)?
+    .map_err(map_research_provider_config_error)?
     .1;
     Ok(ResearchRuntimeConfig {
         database,
@@ -382,6 +490,17 @@ pub fn research_availability() -> ResearchAvailability {
 fn research_availability_with(lookup: &impl Fn(&str) -> Option<String>) -> ResearchAvailability {
     match resolve_research_config_with(lookup) {
         Ok(_) => ResearchAvailability::Available,
+        Err(ResearchError::UnsupportedProvider(name)) => {
+            ResearchAvailability::UnsupportedProvider(name)
+        }
+        Err(ResearchError::InvalidProviderConfiguration(name)) => {
+            ResearchAvailability::InvalidConfiguration(name)
+        }
+        // NotConfigured and every other configuration-resolution error
+        // (CapacityExhausted/NotFound/Unavailable/Internal never occur
+        // here — resolve_research_config_with only ever returns
+        // NotConfigured or a provider-configuration variant) collapse to
+        // the truthful NotConfigured state.
         Err(_) => ResearchAvailability::NotConfigured,
     }
 }
@@ -525,6 +644,204 @@ mod tests {
                 "{missing} must be part of the shared Research configuration contract"
             );
             assert!(resolve_research_config_with(&incomplete).is_err());
+        }
+    }
+
+    #[test]
+    fn search_provider_config_error_projects_into_distinct_search_error_classes() {
+        assert_eq!(
+            map_search_provider_config_error(SearchProviderConfigError::MissingConfiguration(
+                "SEARXNG_BASE_URL"
+            )),
+            SearchError::ProviderNotConfigured
+        );
+        for name in ["brave", "serper", "tavily"] {
+            let projected = map_search_provider_config_error(
+                SearchProviderConfigError::UnsupportedProvider(name),
+            );
+            assert_eq!(projected, SearchError::ProviderUnsupported(name.into()));
+            // The exact F-4 defect: a compiled-out provider must never
+            // collapse to the missing-configuration class.
+            assert_ne!(projected, SearchError::ProviderNotConfigured);
+        }
+        let unknown = map_search_provider_config_error(SearchProviderConfigError::UnknownProvider(
+            "scorpion-does-not-exist".into(),
+        ));
+        assert_eq!(
+            unknown,
+            SearchError::InvalidProviderSelection("scorpion-does-not-exist".into())
+        );
+        assert_ne!(unknown, SearchError::ProviderNotConfigured);
+    }
+
+    #[test]
+    fn canonical_resolver_classifies_compiled_out_providers_as_unsupported_in_this_build() {
+        // scorpion_app/Cargo.toml compiles only `search_searxng` — Brave,
+        // Serper, and Tavily are real, recognized providers with their
+        // required key present, but not compiled into this shipping build.
+        for (selector, brave, serper, tavily) in [
+            ("brave", Some("present-key"), None, None),
+            ("serper", None, Some("present-key"), None),
+            ("tavily", None, None, Some("present-key")),
+        ] {
+            let error = resolve_search_provider(Some(selector), None, brave, serper, tavily)
+                .err()
+                .unwrap_or_else(|| panic!("{selector} must fail in a SearXNG-only build"));
+            assert_eq!(
+                error,
+                SearchProviderConfigError::UnsupportedProvider(selector),
+                "{selector} must classify as UnsupportedProvider, not MissingConfiguration"
+            );
+            assert_eq!(
+                map_search_provider_config_error(error),
+                SearchError::ProviderUnsupported(selector.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_resolver_classifies_unknown_selector_distinctly_from_unavailable() {
+        let error =
+            resolve_search_provider(Some("scorpion-does-not-exist"), None, None, None, None)
+                .err()
+                .unwrap();
+        assert_eq!(
+            error,
+            SearchProviderConfigError::UnknownProvider("scorpion-does-not-exist".to_string())
+        );
+        assert_eq!(
+            map_search_provider_config_error(error),
+            SearchError::InvalidProviderSelection("scorpion-does-not-exist".to_string())
+        );
+    }
+
+    #[test]
+    fn unsupported_and_invalid_provider_search_errors_use_static_configuration_http_status() {
+        // Every static configuration/build failure is 503, never 502 —
+        // 502 is reserved for a provider that resolved successfully but
+        // failed at runtime (SearchError::Provider).
+        assert_eq!(error_status(&SearchError::ProviderNotConfigured), 503);
+        assert_eq!(
+            error_status(&SearchError::ProviderUnsupported("brave".into())),
+            503
+        );
+        assert_eq!(
+            error_status(&SearchError::InvalidProviderSelection("x".into())),
+            503
+        );
+        assert_eq!(error_status(&SearchError::Provider("x".into())), 502);
+    }
+
+    #[test]
+    fn search_public_json_error_codes_are_distinct_and_deterministic() {
+        assert!(
+            error_json(&SearchError::ProviderNotConfigured).contains("\"provider_not_configured\"")
+        );
+        let unsupported = error_json(&SearchError::ProviderUnsupported("brave".into()));
+        assert!(unsupported.contains("\"provider_unsupported\""));
+        assert!(!unsupported.contains("\"provider_not_configured\""));
+        assert!(!unsupported.contains("\"provider_unavailable\""));
+        let invalid = error_json(&SearchError::InvalidProviderSelection("x".into()));
+        assert!(invalid.contains("\"invalid_provider_configuration\""));
+        assert!(!invalid.contains("\"provider_unavailable\""));
+    }
+
+    #[test]
+    fn research_config_and_availability_preserve_unsupported_and_invalid_provider_classes() {
+        fn lookup_with(
+            selector: &'static str,
+            key_name: &'static str,
+            key_value: &'static str,
+        ) -> impl Fn(&str) -> Option<String> {
+            move |name: &str| match name {
+                "RESEARCH_EVIDENCE_DB" => Some("/tmp/research.sqlite".to_string()),
+                "OPENAI_COMPAT_BASE_URL" => Some("http://127.0.0.1:11434/v1".to_string()),
+                "OPENAI_COMPAT_MODEL" => Some("operator-model".to_string()),
+                "OPENAI_COMPAT_API_KEY" => Some("operator-key".to_string()),
+                "SEARCH_PROVIDER" => Some(selector.to_string()),
+                other if other == key_name => Some(key_value.to_string()),
+                _ => None,
+            }
+        }
+
+        // Brave selected + key present, SearXNG-only build => UnsupportedProvider.
+        let brave = lookup_with("brave", "BRAVE_API_KEY", "present-key");
+        assert_eq!(
+            resolve_research_config_with(&brave).err().unwrap(),
+            ResearchError::UnsupportedProvider("brave".to_string())
+        );
+        assert_eq!(
+            research_availability_with(&brave),
+            ResearchAvailability::UnsupportedProvider("brave".to_string())
+        );
+        // The exact F-4 defect for Research: must never collapse to
+        // NotConfigured or the runtime-failure class Unavailable.
+        assert_ne!(
+            research_availability_with(&brave),
+            ResearchAvailability::NotConfigured
+        );
+        assert_ne!(
+            resolve_research_config_with(&brave).err().unwrap(),
+            ResearchError::Unavailable
+        );
+
+        // Unknown selector => InvalidProviderConfiguration.
+        let unknown = lookup_with("scorpion-does-not-exist", "UNUSED_KEY", "unused");
+        assert_eq!(
+            resolve_research_config_with(&unknown).err().unwrap(),
+            ResearchError::InvalidProviderConfiguration("scorpion-does-not-exist".to_string())
+        );
+        assert_eq!(
+            research_availability_with(&unknown),
+            ResearchAvailability::InvalidConfiguration("scorpion-does-not-exist".to_string())
+        );
+        assert_ne!(
+            research_availability_with(&unknown),
+            ResearchAvailability::NotConfigured
+        );
+    }
+
+    #[test]
+    fn unsupported_and_invalid_research_provider_use_static_configuration_http_status() {
+        assert_eq!(
+            research_error_status(&ResearchError::UnsupportedProvider("brave".into())),
+            503
+        );
+        assert_eq!(
+            research_error_status(&ResearchError::InvalidProviderConfiguration("x".into())),
+            503
+        );
+        // The runtime-failure class remains the only 502.
+        assert_eq!(research_error_status(&ResearchError::Unavailable), 502);
+    }
+
+    #[test]
+    fn research_public_json_error_codes_are_distinct_and_deterministic() {
+        let unsupported = research_error_json(&ResearchError::UnsupportedProvider("brave".into()));
+        assert!(unsupported.contains("\"research_provider_unsupported\""));
+        assert!(!unsupported.contains("\"research_not_configured\""));
+        assert!(!unsupported.contains("\"research_unavailable\""));
+        let invalid = research_error_json(&ResearchError::InvalidProviderConfiguration("x".into()));
+        assert!(invalid.contains("\"research_provider_configuration_invalid\""));
+        assert!(!invalid.contains("\"research_unavailable\""));
+    }
+
+    #[test]
+    fn provider_configuration_error_messages_never_leak_secrets() {
+        // Only the sanitized provider identity/selector — never a key,
+        // URL, or filesystem path — may appear in a public message.
+        let messages = [
+            SearchError::ProviderUnsupported("brave".into()).to_string(),
+            SearchError::InvalidProviderSelection("scorpion-does-not-exist".into()).to_string(),
+            ResearchError::UnsupportedProvider("brave".into()).to_string(),
+            ResearchError::InvalidProviderConfiguration("scorpion-does-not-exist".into())
+                .to_string(),
+        ];
+        for message in messages {
+            assert!(!message.contains("present-key"));
+            assert!(!message.contains("operator-key"));
+            assert!(!message.contains("http://"));
+            assert!(!message.contains("/tmp/"));
         }
     }
 

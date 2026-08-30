@@ -89,6 +89,31 @@ pub mod artifact_download_execution;
 /// Provider-neutral metadata for versioned repository artifacts. Always
 /// available and performs no acquisition, download, parsing, or verification.
 pub mod artifact_reference;
+/// Canonical audit fact/finding contract:
+/// `ACQUIRED -> OBSERVED -> EVIDENCED -> DERIVED FINDING`. `PageFacts` is
+/// a transient, deterministic, network-free projection of one acquired
+/// `Page` (canonical link observations, closed-allowlist audit response
+/// headers, effective/observed status); `EvidencedPageFacts` binds those
+/// facts to the exact `EvidenceRef` recording of the same `Page` — never
+/// by index/ordering/URL-string equality, only by construction from the
+/// same acquired value. `Finding` is a content-addressed, immutable,
+/// evidence-linked derived record (Track 6/9's own
+/// `TransformLineageId`/`ChangeEventId` construction and
+/// `DomainPersistence::append_history` idempotent-duplicate pattern,
+/// reused verbatim — no second persistence backend). Exactly one
+/// production rule lives here today: `SEO_CANONICAL_MISSING`. No
+/// analyzer in this module performs network acquisition (that remains
+/// `crate::utils::evidence::fetch_single_page`'s sole responsibility, the
+/// same one-shot primitive every other evidence-first caller uses); no
+/// discovery/search type (`SearchProvider`/`SearchResult`/
+/// `SearchResults`) is imported or reachable — discovery may select a
+/// URL, only acquisition can establish page evidence. Requires
+/// `evidence` and `disk`, exactly like `change_detection`, which this
+/// module's persistence pattern mirrors. No CLI/API/MCP/Web Console
+/// surface, no site-wide analytics, no network/Nmap capability, no AI —
+/// see this module's own doc comment for the full scope firewall.
+#[cfg(all(feature = "evidence", feature = "disk"))]
+pub mod audit;
 /// Canonical authenticated-session lifecycle: `AuthSessionState`
 /// (Active/Paused/Invalidated), `PauseSession`/`ResumeSession`/
 /// `InvalidateSession` transitions (built on `domain_state::Transition`),

@@ -142,6 +142,83 @@ pub struct EvidenceBundle {
     /// (`spider_transport::ResponseOrigin`); `None` for a page no audited
     /// path stamped.
     pub response_origin: Option<String>,
+    /// Every observed value of each closed-allowlist, audit-relevant
+    /// response header (see [`AUDIT_RESPONSE_HEADER_ALLOWLIST`] and
+    /// [`audit_response_headers`]), keyed by lowercase header name in
+    /// deterministic (sorted) order, values preserved as raw bytes in
+    /// observed order — never collapsed, never lossily re-encoded.
+    /// Additive field: `None` on evidence recorded before it existed, and
+    /// on any page whose response carried none of the allowlisted
+    /// headers. This is never a general response-header capture — in
+    /// particular `Set-Cookie` is deliberately never in the allowlist
+    /// (see that constant's own doc comment).
+    pub response_headers: Option<std::collections::BTreeMap<String, Vec<Vec<u8>>>>,
+}
+
+/// The exact, closed set of response headers Scorpion's audit
+/// architecture observes. Deliberately small — only headers required or
+/// clearly useful for the deterministic audit rules this and successor
+/// frontiers implement (starting with `SEO_CANONICAL_MISSING`) — never a
+/// blanket capture of the full response `HeaderMap`.
+///
+/// `Set-Cookie` is deliberately never included: cookie values may carry
+/// session identifiers, authentication state, or other bearer-equivalent
+/// material, and persisting them raw would reopen credential-persistence
+/// risk merely to support passive security analysis. A future
+/// passive-security analyzer frontier may add a value-redacted cookie
+/// *attribute* representation (`Secure`/`HttpOnly`/`SameSite` presence,
+/// never the cookie value) — that is a deliberately separate design
+/// decision, not made here.
+pub const AUDIT_RESPONSE_HEADER_ALLOWLIST: &[&str] = &[
+    "content-language",
+    "x-robots-tag",
+    "strict-transport-security",
+    "content-security-policy",
+    "content-security-policy-report-only",
+    "x-frame-options",
+    "x-content-type-options",
+    "referrer-policy",
+    "permissions-policy",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "server",
+    "x-powered-by",
+];
+
+/// Extract every value `headers` actually carries for each
+/// [`AUDIT_RESPONSE_HEADER_ALLOWLIST`] name, losslessly — HTTP header
+/// values are not guaranteed to be valid UTF-8, so each value is kept as
+/// raw bytes rather than risking a lossy `String` conversion — in the
+/// exact order `HeaderMap` yields them for that name (multiple values for
+/// one name, e.g. repeated `Content-Security-Policy` headers, are
+/// preserved individually, never comma-joined). Header names are the
+/// allowlist's own lowercase spelling (`HeaderMap` lookup is already
+/// case-insensitive). A name with zero observed values is omitted
+/// entirely from the result — absence is never fabricated as an empty
+/// list — and the returned `BTreeMap` keeps header-name ordering
+/// deterministic regardless of the order headers were observed in.
+///
+/// Truthful for every acquisition path: this reads only what `headers`
+/// actually contains, so a Chrome/CDP-derived `HeaderMap` (whatever
+/// fidelity that path actually captures) is never embellished with
+/// duplicate or fabricated values the browser path did not provide.
+pub fn audit_response_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> std::collections::BTreeMap<String, Vec<Vec<u8>>> {
+    let mut observed = std::collections::BTreeMap::new();
+    for &name in AUDIT_RESPONSE_HEADER_ALLOWLIST {
+        let values: Vec<Vec<u8>> = headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.as_bytes().to_vec())
+            .collect();
+        if !values.is_empty() {
+            observed.insert(name.to_string(), values);
+        }
+    }
+    observed
 }
 
 /// Build retrieval evidence for one fetched page. Content and screenshot
@@ -191,6 +268,11 @@ pub fn build_evidence(
         .and_then(|headers| headers.get("content-type"))
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let response_headers = page
+        .headers
+        .as_ref()
+        .map(audit_response_headers)
+        .filter(|observed| !observed.is_empty());
     let links = page.page_links.as_ref().map(|links| {
         links
             .iter()
@@ -222,6 +304,7 @@ pub fn build_evidence(
         dns: provenance.dns,
         backend_provenance: provenance.backend_provenance,
         response_origin: provenance.response_origin,
+        response_headers,
     }
 }
 
@@ -750,6 +833,7 @@ mod tests {
         assert_eq!(bundle.dns, None);
         assert_eq!(bundle.backend_provenance, None);
         assert_eq!(bundle.response_origin, None);
+        assert_eq!(bundle.response_headers, None);
     }
 
     /// requested_url and final_url are independent fields — a redirect
@@ -884,6 +968,218 @@ mod tests {
             assert_eq!(bundle.backend_provenance, provenance.backend_provenance);
             assert_eq!(bundle.response_origin, provenance.response_origin);
             assert_eq!(bundle.observed_status_code, provenance.observed_status_code);
+        }
+    }
+
+    mod audit_response_header_tests {
+        use super::*;
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+        fn header(name: &'static str, value: &str) -> (HeaderName, HeaderValue) {
+            (
+                HeaderName::from_static(name),
+                HeaderValue::from_str(value).unwrap(),
+            )
+        }
+
+        // A/B/C: individually allowlisted headers survive.
+        #[test]
+        fn hsts_header_survives_into_audit_evidence() {
+            let mut headers = HeaderMap::new();
+            let (name, value) = header("strict-transport-security", "max-age=63072000");
+            headers.insert(name, value);
+            let observed = audit_response_headers(&headers);
+            assert_eq!(
+                observed.get("strict-transport-security"),
+                Some(&vec![b"max-age=63072000".to_vec()])
+            );
+        }
+
+        #[test]
+        fn csp_header_survives_into_audit_evidence() {
+            let mut headers = HeaderMap::new();
+            let (name, value) = header("content-security-policy", "default-src 'self'");
+            headers.insert(name, value);
+            let observed = audit_response_headers(&headers);
+            assert_eq!(
+                observed.get("content-security-policy"),
+                Some(&vec![b"default-src 'self'".to_vec()])
+            );
+        }
+
+        #[test]
+        fn x_robots_tag_header_survives_into_audit_evidence() {
+            let mut headers = HeaderMap::new();
+            let (name, value) = header("x-robots-tag", "noindex");
+            headers.insert(name, value);
+            let observed = audit_response_headers(&headers);
+            assert_eq!(
+                observed.get("x-robots-tag"),
+                Some(&vec![b"noindex".to_vec()])
+            );
+        }
+
+        // D: server/x-powered-by survive when present.
+        #[test]
+        fn server_and_x_powered_by_survive_when_present() {
+            let mut headers = HeaderMap::new();
+            let (n1, v1) = header("server", "nginx");
+            let (n2, v2) = header("x-powered-by", "Express");
+            headers.insert(n1, v1);
+            headers.insert(n2, v2);
+            let observed = audit_response_headers(&headers);
+            assert_eq!(observed.get("server"), Some(&vec![b"nginx".to_vec()]));
+            assert_eq!(
+                observed.get("x-powered-by"),
+                Some(&vec![b"Express".to_vec()])
+            );
+        }
+
+        // E: multiple values for one retained header preserve every value.
+        #[test]
+        fn multiple_values_for_one_header_are_all_preserved() {
+            let mut headers = HeaderMap::new();
+            let (name, v1) = header("content-security-policy", "default-src 'self'");
+            let (_, v2) = header("content-security-policy", "report-uri /csp-report");
+            headers.append(name, v1);
+            headers.append(HeaderName::from_static("content-security-policy"), v2);
+            let observed = audit_response_headers(&headers);
+            assert_eq!(
+                observed.get("content-security-policy"),
+                Some(&vec![
+                    b"default-src 'self'".to_vec(),
+                    b"report-uri /csp-report".to_vec(),
+                ])
+            );
+        }
+
+        // F: header-name ordering is deterministic (sorted), independent of
+        // insertion order.
+        #[test]
+        fn header_name_ordering_is_deterministic() {
+            let mut headers = HeaderMap::new();
+            let (n1, v1) = header("x-powered-by", "Express");
+            let (n2, v2) = header("server", "nginx");
+            let (n3, v3) = header("x-frame-options", "DENY");
+            headers.insert(n1, v1);
+            headers.insert(n2, v2);
+            headers.insert(n3, v3);
+            let observed = audit_response_headers(&headers);
+            let names: Vec<&str> = observed.keys().map(String::as_str).collect();
+            assert_eq!(names, vec!["server", "x-frame-options", "x-powered-by"]);
+        }
+
+        // G: old EvidenceBundle JSON without the new field still
+        // deserializes, and the new field is truthfully absent.
+        #[test]
+        fn old_evidence_bundle_json_without_header_field_still_deserializes() {
+            let old_json = r#"{
+                "requested_url": "https://example.test/",
+                "status_code": 200
+            }"#;
+            let bundle: EvidenceBundle = serde_json::from_str(old_json).unwrap();
+            assert_eq!(
+                bundle.requested_url.as_deref(),
+                Some("https://example.test/")
+            );
+            assert_eq!(bundle.response_headers, None);
+        }
+
+        // H: missing headers remain absent, never fabricated.
+        #[test]
+        fn absent_headers_are_never_fabricated() {
+            let headers = HeaderMap::new();
+            let observed = audit_response_headers(&headers);
+            assert!(observed.is_empty());
+
+            // Even with unrelated headers present, no allowlisted name is
+            // fabricated into the result.
+            let mut headers = HeaderMap::new();
+            let (name, value) = header("x-custom-app-header", "irrelevant");
+            headers.insert(name, value);
+            let observed = audit_response_headers(&headers);
+            assert!(observed.is_empty());
+        }
+
+        // I: the Set-Cookie raw value sentinel is never persisted in the
+        // new header evidence field — proven both at the extraction
+        // function and through the full build_evidence path.
+        #[test]
+        fn set_cookie_raw_value_is_never_persisted_in_audit_header_evidence() {
+            const SENTINEL: &str = "SUPER_SECRET_SENTINEL";
+            let mut headers = HeaderMap::new();
+            let (name, value) = header(
+                "set-cookie",
+                &format!("session={SENTINEL}; Secure; HttpOnly"),
+            );
+            headers.insert(name, value);
+            let observed = audit_response_headers(&headers);
+            assert!(observed.is_empty(), "set-cookie must never be allowlisted");
+            for values in observed.values() {
+                for value in values {
+                    assert!(!value
+                        .windows(SENTINEL.len())
+                        .any(|w| w == SENTINEL.as_bytes()));
+                }
+            }
+
+            // End-to-end through build_evidence: the sentinel must not
+            // appear anywhere in the resulting EvidenceBundle, serialized
+            // or not.
+            let page = crate::page::build(
+                "https://example.test/",
+                crate::utils::PageResponse {
+                    content: Some(b"<html></html>".to_vec()),
+                    status_code: reqwest::StatusCode::OK,
+                    headers: Some(headers),
+                    ..Default::default()
+                },
+            );
+            let bundle = build_evidence(&page, Some("raw".to_string()), false, false);
+            assert_eq!(bundle.response_headers, None);
+            let serialized = serde_json::to_string(&bundle).unwrap();
+            assert!(!serialized.contains(SENTINEL));
+        }
+
+        // J: Chrome-limited (or any path's) fidelity is never embellished
+        // beyond what Page actually carries — only the headers genuinely
+        // present are ever returned, nothing else fabricated to "fill
+        // out" the allowlist.
+        #[test]
+        fn fidelity_never_exceeds_what_page_actually_carries() {
+            let mut headers = HeaderMap::new();
+            let (name, value) = header("x-content-type-options", "nosniff");
+            headers.insert(name, value);
+            let page = crate::page::build(
+                "https://example.test/",
+                crate::utils::PageResponse {
+                    content: Some(b"<html></html>".to_vec()),
+                    status_code: reqwest::StatusCode::OK,
+                    headers: Some(headers),
+                    ..Default::default()
+                },
+            );
+            let bundle = build_evidence(&page, Some("raw".to_string()), false, false);
+            let observed = bundle.response_headers.expect("one header observed");
+            assert_eq!(observed.len(), 1);
+            assert_eq!(
+                observed.get("x-content-type-options"),
+                Some(&vec![b"nosniff".to_vec()])
+            );
+        }
+
+        // Byte-fidelity: a non-UTF-8 header value is preserved exactly,
+        // never dropped or lossily converted.
+        #[test]
+        fn non_utf8_header_value_is_preserved_losslessly() {
+            let mut headers = HeaderMap::new();
+            let raw_bytes = vec![0x78, 0xFF, 0xFE, 0x79]; // not valid UTF-8
+            headers.insert(
+                HeaderName::from_static("server"),
+                HeaderValue::from_bytes(&raw_bytes).unwrap(),
+            );
+            let observed = audit_response_headers(&headers);
+            assert_eq!(observed.get("server"), Some(&vec![raw_bytes]));
         }
     }
 

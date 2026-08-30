@@ -5974,3 +5974,219 @@ fn no_local_qwen_provider_identity_or_runtime_module_exists() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001
+// ---------------------------------------------------------------------------
+//
+// `spider/src/features/audit.rs` establishes the canonical audit
+// fact/finding contract: `PageFacts` (a transient, network-free projection
+// of one acquired `Page`), `EvidencedPageFacts` (facts bound to the
+// `EvidenceRef` of that same page), and `Finding` (a content-addressed,
+// immutable, evidence-linked derived record). These guardrails encode the
+// architectural decisions that frontier made — not merely their current
+// absence-by-accident — so a later change cannot silently reintroduce a
+// discovery->Finding bypass, a second persistence backend, network/process
+// execution inside the analyzer, or an AI dependency.
+
+/// Discovery may select a URL. Only acquisition can establish page
+/// evidence — the audit analyzer must never import `Website` (it must
+/// reuse `crate::utils::evidence::fetch_single_page`, not perform its own
+/// acquisition) or any search-provider result type. Checked as actual
+/// `use` import lines only, never bare prose — the module's own doc
+/// comment legitimately *names* `SearchProvider`/`SearchResult` in
+/// English to explain exactly this boundary.
+#[test]
+fn audit_module_never_imports_website_or_search_provider_types() {
+    let audit_source = read_src_file("features/audit.rs");
+    let import_lines: Vec<&str> = audit_source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("use "))
+        .collect();
+
+    for forbidden in [
+        "crate::website::Website",
+        "crate::features::search",
+        "spider_search::",
+        "SearchProvider",
+        "SearchResult",
+        "SearchResults",
+    ] {
+        assert!(
+            !import_lines.iter().any(|line| line.contains(forbidden)),
+            "spider/src/features/audit.rs must never import {forbidden:?} \
+             as an actual `use` line — discovery may select a URL, only \
+             acquisition can establish page evidence"
+        );
+    }
+}
+
+/// `Finding` must never become — or be constructible from/into —
+/// `EvidenceBundle`. `Finding` is a derived record that references
+/// evidence by `EvidenceRef`; it is never itself evidence.
+#[test]
+fn finding_never_becomes_an_evidence_bundle() {
+    let audit_source = read_src_file("features/audit.rs");
+    for forbidden in [
+        "impl From<Finding> for EvidenceBundle",
+        "impl From<EvidenceBundle> for Finding",
+        "impl Into<EvidenceBundle> for Finding",
+    ] {
+        assert!(
+            !audit_source.contains(forbidden),
+            "spider/src/features/audit.rs must never define {forbidden:?} \
+             — Finding is a derived record, never Evidence itself"
+        );
+    }
+}
+
+/// `FindingId` is a content-addressed *derived-record* id and must live
+/// with its domain module (`features/audit.rs`), exactly like
+/// `ChangeEventId` and `TransformLineageId` — never registered in the
+/// canonical random-mint identity module.
+#[test]
+fn finding_id_is_not_registered_in_canonical_identity_module() {
+    let identity_source = read_src_file("features/identity.rs");
+    assert!(
+        !identity_source.contains("FindingId"),
+        "FindingId must never be added to features/identity.rs — this \
+         repository's own established precedent (ChangeEventId) is that \
+         content-addressed derived-record ids live with their domain \
+         module"
+    );
+}
+
+/// Strip comment-only lines (`//`, `///`, `//!`) before a forbidden-code
+/// scan — the same "not merely a comment mention" discipline this file
+/// already applies elsewhere (see the Qwen guardrail section above):
+/// audit.rs's own doc comments legitimately *name* `write_current`/
+/// `Nmap`/AI capabilities in English to explain exactly what this module
+/// does not do, so a bare substring scan over the raw file would
+/// false-positive on its own architecture documentation.
+fn strip_comment_lines(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The audit module must never construct its own storage backend — it
+/// may only call through `DomainPersistence`. No raw `sqlx`/pool
+/// construction, no second persistence mechanism.
+#[test]
+fn audit_module_introduces_no_second_persistence_backend() {
+    let audit_code = strip_comment_lines(&read_src_file("features/audit.rs"));
+    for forbidden in [
+        "sqlx::",
+        "SqlitePool",
+        "PgPool",
+        "MySqlPool",
+        ".write_current(",
+    ] {
+        assert!(
+            !audit_code.contains(forbidden),
+            "spider/src/features/audit.rs must never reference {forbidden:?} \
+             in actual code — Finding persistence goes exclusively through \
+             DomainPersistence::append_history, the same append-only \
+             derived-record precedent change_detection/transform_lineage \
+             already established"
+        );
+    }
+}
+
+/// This frontier introduces no network/process-execution capability
+/// (Nmap, port scanning, service detection, arbitrary process spawning)
+/// inside the audit analyzer's production code. (Test-only code in this
+/// same file uses `TcpListener`/`TcpStream` to run a local loopback
+/// fixture *server* for its own deterministic end-to-end proof — that is
+/// not network acquisition by the analyzer and is exempted by scoping
+/// this check to non-`#[cfg(test)]` content below the `mod tests` marker.)
+#[test]
+fn audit_module_introduces_no_network_or_process_execution_capability() {
+    let full_source = read_src_file("features/audit.rs");
+    let production_only = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    let production_code = strip_comment_lines(production_only);
+    for forbidden in [
+        "std::process::Command",
+        "tokio::process",
+        "nmap",
+        "rustscan",
+        "TcpStream::connect",
+        "TcpListener::",
+        "reqwest::Client",
+    ] {
+        assert!(
+            !production_code
+                .to_lowercase()
+                .contains(&forbidden.to_lowercase()),
+            "spider/src/features/audit.rs must not reference {forbidden:?} \
+             in production code — no Nmap/network/process-execution \
+             capability belongs in this frontier's scope"
+        );
+    }
+}
+
+/// No AI dependency (LLM completion, summarization, generated severity or
+/// narrative) is introduced by the audit module. Severity is fixed rule
+/// policy, and `SEO_CANONICAL_MISSING`'s predicate is a pure deterministic
+/// function of `PageFacts`.
+#[test]
+fn audit_module_introduces_no_ai_dependency() {
+    let audit_code = strip_comment_lines(&read_src_file("features/audit.rs"));
+    for forbidden in [
+        "AgentBuilder",
+        "openai",
+        "gemini",
+        "OPENAI_",
+        "chat_completion",
+    ] {
+        assert!(
+            !audit_code
+                .to_lowercase()
+                .contains(&forbidden.to_lowercase()),
+            "spider/src/features/audit.rs must not reference {forbidden:?} \
+             in actual code — no AI/LLM capability belongs in this \
+             frontier's scope"
+        );
+    }
+}
+
+/// This frontier adds no new heavy analytics/scanning dependency to
+/// `spider/Cargo.toml` (Polars, Arrow, DataFusion, Rayon, petgraph,
+/// jsonschema, RustScan, or an Nmap binding) — the audit contract reuses
+/// existing `lol_html`/`serde`/`sha2`/`DomainPersistence` machinery only.
+/// Matches only actual TOML dependency-key lines (`name = ...`), never an
+/// incidental substring elsewhere in the manifest (e.g. "narrower" in an
+/// unrelated comment contains "arrow").
+#[test]
+fn spider_cargo_toml_introduces_no_heavy_analytics_or_network_scanning_dependency() {
+    let manifest = fs::read_to_string(workspace_root().join("spider/Cargo.toml")).unwrap();
+    let declares_dependency = |name: &str| {
+        manifest.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with(&format!("{name} =")) || trimmed.starts_with(&format!("{name}="))
+        })
+    };
+    for forbidden in [
+        "polars",
+        "arrow",
+        "datafusion",
+        "rayon",
+        "petgraph",
+        "jsonschema",
+        "rustscan",
+        "nmap",
+    ] {
+        assert!(
+            !declares_dependency(forbidden),
+            "spider/Cargo.toml must not declare a {forbidden:?} dependency \
+             — SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001 and \
+             its successors reuse existing crates only"
+        );
+    }
+}

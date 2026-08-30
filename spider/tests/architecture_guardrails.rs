@@ -6190,3 +6190,103 @@ fn spider_cargo_toml_introduces_no_heavy_analytics_or_network_scanning_dependenc
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_AUDIT_EXACT_PAGE_EVIDENCE_BINDING_CORRECTION_001
+// ---------------------------------------------------------------------------
+//
+// The original `EvidencedPageFacts` exposed `pub fn new(facts: PageFacts,
+// evidence_ref: EvidenceRef)` — a public constructor accepting two
+// independently-suppliable halves. Adversarial reproduction proved this let
+// a caller pair one page's `PageFacts` with a *different, validly
+// resolving* page's `EvidenceRef`, producing a durably persisted `Finding`
+// whose claimed observed condition contradicted its own linked evidence.
+// `record_finding` only ever proved the referenced evidence *exists* —
+// never that it came from the same acquisition as the facts. The fix
+// removed that constructor entirely in favor of
+// `EvidencedPageFacts::record(store, page)`, the sole seam, which takes
+// one `&Page` and produces both halves from it. This guardrail makes sure
+// that constructor-removal decision cannot be silently reintroduced.
+
+/// No public function signature anywhere in `audit.rs`'s production code
+/// may accept both a `PageFacts` and an `EvidenceRef` as independent
+/// parameters — that is exactly the shape of the removed, forgeable
+/// `EvidencedPageFacts::new`. The legitimate factory,
+/// `EvidencedPageFacts::record(store: &DomainPersistence, page: &Page)`,
+/// never names either type in its own parameter list, so this check has
+/// no legitimate signature to false-positive against. Whitespace is
+/// collapsed first so the check is tolerant of any line-wrapping
+/// `cargo fmt` produces.
+#[test]
+fn no_public_audit_function_pairs_pagefacts_and_evidenceref_independently() {
+    let full_source = read_src_file("features/audit.rs");
+    let production_only = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    let collapsed = production_only
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut checked_any = false;
+    for fragment in collapsed.split("pub ").skip(1) {
+        let is_fn = fragment.starts_with("fn ") || fragment.starts_with("async fn ");
+        if !is_fn {
+            continue;
+        }
+        checked_any = true;
+        let signature = fragment.split('{').next().unwrap_or(fragment);
+        assert!(
+            !(signature.contains("PageFacts") && signature.contains("EvidenceRef")),
+            "found a public fn signature accepting both PageFacts and \
+             EvidenceRef independently: {signature:?} — \
+             EvidencedPageFacts must only ever be constructed via \
+             EvidencedPageFacts::record(store, page), never an arbitrary \
+             caller-supplied pairing (see \
+             SCORPION_AUDIT_EXACT_PAGE_EVIDENCE_BINDING_CORRECTION_001)"
+        );
+    }
+    assert!(
+        checked_any,
+        "expected at least one `pub fn` in audit.rs's production code — \
+         this guardrail would otherwise vacuously pass"
+    );
+}
+
+/// The removed constructor's name must not exist as a public associated
+/// function on `EvidencedPageFacts` at all — a direct, minimal-noise
+/// signal alongside the structural check above.
+#[test]
+fn evidenced_page_facts_has_no_new_associated_function() {
+    let audit_source = read_src_file("features/audit.rs");
+    let production_only = audit_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    assert!(
+        !production_only.contains("pub fn new(facts: PageFacts"),
+        "EvidencedPageFacts::new(facts: PageFacts, ...) must not exist — \
+         the only production constructor is \
+         EvidencedPageFacts::record(store, page)"
+    );
+}
+
+/// `EvidencedPageFacts::record` is the single canonical association seam:
+/// it must exist, and it must be the function `audit_seo_canonical_missing`
+/// (and any future analyzer) actually calls — never a per-rule binding
+/// implementation.
+#[test]
+fn evidenced_page_facts_record_is_the_single_canonical_association_seam() {
+    let audit_source = read_src_file("features/audit.rs");
+    assert!(
+        audit_source.contains("pub async fn record("),
+        "EvidencedPageFacts::record must exist as the canonical association seam"
+    );
+    assert!(
+        audit_source.contains("EvidencedPageFacts::record(store, &page)"),
+        "audit_seo_canonical_missing (and any future analyzer) must call \
+         EvidencedPageFacts::record — never build its own independent \
+         evidence/PageFacts pairing"
+    );
+}

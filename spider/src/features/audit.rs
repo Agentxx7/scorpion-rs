@@ -42,15 +42,24 @@
 //! `SearchProvider` into [`PageFacts`], [`EvidencedPageFacts`], or
 //! [`Finding`] anywhere in this module — none of those types are
 //! imported here at all (enforced by
-//! `audit_module_never_imports_search_provider_types` in
-//! `architecture_guardrails.rs`). [`EvidencedPageFacts`] can only be
-//! constructed by pairing [`PageFacts::from_page`]'s output with the
-//! [`EvidenceRef`] returned from durably recording that *same* acquired
-//! [`Page`] — never by index, completion ordering, or URL-string
-//! equality alone. [`record_finding`] additionally verifies every
-//! [`EvidenceRef`] a [`Finding`] carries actually resolves in
-//! [`DomainPersistence`] before persisting anything — fail-closed, never
-//! accepting an identity-shaped string as proof evidence exists.
+//! `audit_module_never_imports_website_or_search_provider_types` in
+//! `architecture_guardrails.rs`). [`EvidencedPageFacts`] is obtained
+//! exclusively through [`EvidencedPageFacts::record`], which receives one
+//! `&Page` and derives *both* its evidence recording and its facts from
+//! that single value — never by independently pairing a caller-supplied
+//! `PageFacts` with a caller-supplied `EvidenceRef` (an earlier revision
+//! exposed exactly that pairing as `EvidencedPageFacts::new`; adversarial
+//! reproduction proved it let one page's facts be durably linked to a
+//! different, validly-resolving page's evidence —
+//! `SCORPION_AUDIT_EXACT_PAGE_EVIDENCE_BINDING_CORRECTION_001` fixed this
+//! by removing that constructor rather than merely discouraging it), and
+//! never by index, completion ordering, or URL-string equality.
+//! [`record_finding`] additionally verifies every [`EvidenceRef`] a
+//! [`Finding`] carries actually resolves in [`DomainPersistence`] before
+//! persisting anything — fail-closed, never accepting an identity-shaped
+//! string as proof evidence exists — though that check alone was never
+//! sufficient to prevent a mismatched pairing, which is why construction
+//! authority lives in [`EvidencedPageFacts::record`] instead.
 //!
 //! # Finding identity and persistence
 //!
@@ -226,12 +235,22 @@ fn extract_canonical_links(html: &str) -> Vec<String> {
 
 /// [`PageFacts`] bound to the exact [`EvidenceRef`] naming the durable
 /// recording of the same acquired [`Page`] the facts were derived from.
-/// The only way to obtain one is [`audit_seo_canonical_missing`]'s
-/// internal construction (or a test building both halves from the same
-/// `Page`) — never from an index, completion ordering, or URL-string
-/// equality. This is what makes it structurally impossible to
-/// accidentally analyze Page A and link the resulting `Finding` to
-/// Evidence B.
+///
+/// There is exactly one way to obtain one: [`EvidencedPageFacts::record`],
+/// which receives a `&Page` and, from that single value, both builds and
+/// durably records its evidence *and* derives its facts — never two
+/// independently supplied halves. There is no public constructor that
+/// accepts a caller-supplied `PageFacts` and `EvidenceRef` pair (a prior
+/// version of this type had exactly that — `EvidencedPageFacts::new(facts,
+/// evidence_ref)` — which let a caller pair one page's facts with a
+/// *different, unrelated but validly-resolving* page's evidence; that
+/// constructor has been removed, not merely discouraged). This is what
+/// makes it structurally impossible — not just conventionally
+/// discouraged — to analyze Page A and link the resulting `Finding` to
+/// Evidence B: association authority lives here, not in caller
+/// discipline or in [`record_finding`]'s evidence-resolution check
+/// (which only proves the referenced evidence *exists*, never that it
+/// came from the same acquisition as the facts).
 #[derive(Debug, Clone)]
 pub struct EvidencedPageFacts {
     facts: PageFacts,
@@ -239,16 +258,27 @@ pub struct EvidencedPageFacts {
 }
 
 impl EvidencedPageFacts {
-    /// Pair `facts` (derived from some acquired `Page`) with
-    /// `evidence_ref` (naming the durable recording of that *same*
-    /// `Page`). Callers must derive both from one acquisition — see
-    /// [`audit_seo_canonical_missing`] for the only production call site
-    /// that does this correctly.
-    pub fn new(facts: PageFacts, evidence_ref: EvidenceRef) -> Self {
-        Self {
+    /// The sole production association seam: build and durably record
+    /// `page`'s own evidence, derive [`PageFacts`] from that *exact same*
+    /// `page` value, and pair them. No network activity — `page` must
+    /// already be acquired (see [`fetch_single_page`]); this performs no
+    /// second fetch, ever.
+    pub async fn record(store: &DomainPersistence, page: &Page) -> Result<Self, AuditError> {
+        let content = page.get_html();
+        let bundle: EvidenceBundle = build_evidence(page, Some(content), false, false);
+        let recorded = record_evidence(store, bundle)
+            .await
+            .map_err(AuditError::EvidenceRecording)?;
+        let evidence_ref = EvidenceRef::new(
+            recorded
+                .id
+                .expect("record_evidence always assigns an id on success"),
+        );
+        let facts = PageFacts::from_page(page);
+        Ok(Self {
             facts,
             evidence_ref,
-        }
+        })
     }
 
     /// The deterministic facts.
@@ -631,19 +661,7 @@ pub async fn audit_seo_canonical_missing(
         .await
         .map_err(AuditError::Acquisition)?;
 
-    let content = page.get_html();
-    let bundle: EvidenceBundle = build_evidence(&page, Some(content), false, false);
-    let recorded = record_evidence(store, bundle)
-        .await
-        .map_err(AuditError::EvidenceRecording)?;
-    let evidence_ref = EvidenceRef::new(
-        recorded
-            .id
-            .expect("record_evidence always assigns an id on success"),
-    );
-
-    let facts = PageFacts::from_page(&page);
-    let evidenced = EvidencedPageFacts::new(facts, evidence_ref);
+    let evidenced = EvidencedPageFacts::record(store, &page).await?;
 
     match seo_canonical_missing(&evidenced) {
         Some(finding) => Ok(Some(record_finding(store, finding).await?)),
@@ -672,6 +690,119 @@ mod tests {
         let bundle = build_evidence(page, Some(page.get_html()), false, false);
         let recorded = record_evidence(store, bundle).await.unwrap();
         EvidenceRef::new(recorded.id.unwrap())
+    }
+
+    /// `SCORPION_AUDIT_EXACT_PAGE_EVIDENCE_BINDING_CORRECTION_001`: prior
+    /// to this correction, `EvidencedPageFacts::new(facts, evidence_ref)`
+    /// was a public constructor accepting independently-supplied halves.
+    /// Adversarial reproduction confirmed empirically (before the fix)
+    /// that pairing Page A's facts with genuinely-resolvable Page B's
+    /// evidence produced a `Finding` claiming `canonical_link_count=0`
+    /// durably linked to evidence that actually contained a canonical
+    /// link — `record_finding` only proves evidence *exists*, never that
+    /// it came from the same acquisition as the facts. That constructor
+    /// no longer exists; this module now provides only
+    /// [`EvidencedPageFacts::record`], which cannot be given two
+    /// independent halves at all. The tests below prove the replacement
+    /// seam is both safe (same-page binding, Phase 9/10) and that safety
+    /// does not depend on the mismatched evidence being unresolvable
+    /// (Phase 11 — both pages' evidence coexist in the same store).
+    mod exact_page_evidence_binding {
+        use super::*;
+
+        fn page_a() -> Page {
+            page_with_html(
+                "https://a.example/",
+                "<html><head><title>A</title></head><body>A</body></html>",
+            )
+        }
+
+        fn page_b() -> Page {
+            page_with_html(
+                "https://b.example/",
+                r#"<html><head><link rel="canonical" href="https://b.example/"><title>B</title></head><body>B</body></html>"#,
+            )
+        }
+
+        // Phase 9: positive same-page binding proof for Page A.
+        #[tokio::test]
+        async fn page_a_finding_references_page_a_evidence_and_only_page_a() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            // Phase 11 setup: Page B's evidence coexists in the same
+            // store, fully valid and resolvable, before Page A is ever
+            // touched.
+            let _evidence_b = record(&store, &page_b()).await;
+
+            let page_a = page_a();
+            let evidenced_a = EvidencedPageFacts::record(&store, &page_a).await.unwrap();
+            assert_eq!(evidenced_a.facts().requested_url(), page_a.get_url());
+
+            let finding =
+                seo_canonical_missing(&evidenced_a).expect("Page A has no canonical link");
+            let persisted = record_finding(&store, finding).await.unwrap();
+
+            let resolved = persisted.evidence()[0]
+                .resolve(&store)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.requested_url.as_deref(), Some(page_a.get_url()));
+            let content = resolved.content.unwrap();
+            assert!(
+                extract_canonical_links(&content).is_empty(),
+                "resolved evidence must genuinely be Page A's own content"
+            );
+        }
+
+        // Phase 10: positive proof for Page B — zero findings.
+        #[tokio::test]
+        async fn page_b_produces_no_finding() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let page_b = page_b();
+            let evidenced_b = EvidencedPageFacts::record(&store, &page_b).await.unwrap();
+            assert!(seo_canonical_missing(&evidenced_b).is_none());
+        }
+
+        // Phase 11: the cross-page adversarial case. Both pages' evidence
+        // are valid and resolvable in the same store — resolvability
+        // alone must not be what prevents a mismatched pairing. The
+        // supported production API (`EvidencedPageFacts::record`) simply
+        // has no way to accept Page B's evidence while deriving facts
+        // from Page A: it takes exactly one `&Page` and produces both
+        // halves from it. Calling it twice, on two different pages,
+        // necessarily produces two independently and correctly bound
+        // values.
+        #[tokio::test]
+        async fn evidence_from_two_pages_in_the_same_store_never_cross_binds() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let page_a = page_a();
+            let page_b = page_b();
+
+            let evidenced_a = EvidencedPageFacts::record(&store, &page_a).await.unwrap();
+            let evidenced_b = EvidencedPageFacts::record(&store, &page_b).await.unwrap();
+
+            assert_ne!(evidenced_a.evidence_ref(), evidenced_b.evidence_ref());
+
+            let bundle_a = evidenced_a
+                .evidence_ref()
+                .resolve(&store)
+                .await
+                .unwrap()
+                .unwrap();
+            let bundle_b = evidenced_b
+                .evidence_ref()
+                .resolve(&store)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(bundle_a.requested_url.as_deref(), Some(page_a.get_url()));
+            assert_eq!(bundle_b.requested_url.as_deref(), Some(page_b.get_url()));
+
+            // seo_canonical_missing on each evidenced value still agrees
+            // with that exact page's own content, never the other's.
+            assert!(seo_canonical_missing(&evidenced_a).is_some());
+            assert!(seo_canonical_missing(&evidenced_b).is_none());
+        }
     }
 
     mod canonical_extraction {
@@ -737,8 +868,8 @@ mod tests {
                 "https://example.test/",
                 "<html><head><title>Example</title></head><body>hello</body></html>",
             );
-            let evidence_ref = record(&store, &page).await;
-            let evidenced = EvidencedPageFacts::new(PageFacts::from_page(&page), evidence_ref);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+            let evidence_ref = evidenced.evidence_ref();
 
             let finding = seo_canonical_missing(&evidenced).expect("must find a violation");
             assert_eq!(finding.rule_id(), SEO_CANONICAL_MISSING_RULE_ID);
@@ -763,8 +894,7 @@ mod tests {
                 "https://example.test/product",
                 r#"<html><head><link rel="canonical" href="https://example.test/product"></head></html>"#,
             );
-            let evidence_ref = record(&store, &page).await;
-            let evidenced = EvidencedPageFacts::new(PageFacts::from_page(&page), evidence_ref);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
 
             assert!(seo_canonical_missing(&evidenced).is_none());
         }
@@ -915,8 +1045,7 @@ mod tests {
                 "https://example.test/",
                 "<html><head></head><body>hello</body></html>",
             );
-            let evidence_ref = record(&store, &page).await;
-            let evidenced = EvidencedPageFacts::new(PageFacts::from_page(&page), evidence_ref);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
             let finding = seo_canonical_missing(&evidenced).unwrap();
             let id = finding.id();
 
@@ -936,8 +1065,7 @@ mod tests {
                 "https://example.test/",
                 "<html><head></head><body>hello</body></html>",
             );
-            let evidence_ref = record(&store, &page).await;
-            let evidenced = EvidencedPageFacts::new(PageFacts::from_page(&page), evidence_ref);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
             let finding = seo_canonical_missing(&evidenced).unwrap();
 
             record_finding(&store, finding.clone()).await.unwrap();
@@ -995,8 +1123,7 @@ mod tests {
                 "https://example.test/",
                 "<html><head></head><body>hello</body></html>",
             );
-            let evidence_ref = record(&store, &page).await;
-            let evidenced = EvidencedPageFacts::new(PageFacts::from_page(&page), evidence_ref);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
             let finding = seo_canonical_missing(&evidenced).unwrap();
             let payload = serde_json::to_vec(&finding).unwrap();
 
@@ -1091,23 +1218,24 @@ mod tests {
     mod discovery_negative_proof {
         use super::*;
 
-        #[test]
-        fn evidenced_page_facts_construction_requires_a_real_evidence_ref_not_a_search_result() {
+        #[tokio::test]
+        async fn evidenced_page_facts_construction_requires_a_real_acquired_page_not_a_search_result(
+        ) {
             // There is no `From<SearchResult>` / `From<SearchResults>`
             // for `PageFacts` or `EvidencedPageFacts` anywhere in this
-            // module — the only way to obtain `PageFacts` is
-            // `PageFacts::from_page(&Page)`, and the only way to obtain
-            // an `EvidenceRef` is durably recording a `Page`'s own
-            // evidence. This test proves the *shape* of that contract:
-            // building `EvidencedPageFacts` requires an `EvidenceRef`
-            // value, which requires an `EvidenceId`, which requires
-            // either `EvidenceId::new()` or a durable-recording
-            // round-trip — never a raw string, URL, or search-result
-            // field.
+            // module, and — since
+            // SCORPION_AUDIT_EXACT_PAGE_EVIDENCE_BINDING_CORRECTION_001 —
+            // no public constructor accepts a `PageFacts`/`EvidenceRef`
+            // pair at all. The sole production seam,
+            // `EvidencedPageFacts::record`, takes `&DomainPersistence`
+            // and `&Page` — a `SearchResult`/`SearchResults` value has
+            // neither shape and cannot be substituted for either
+            // parameter. This test proves the seam actually works end to
+            // end from a real acquired `Page`, the only input it accepts.
+            let store = DomainPersistence::open_in_memory().await.unwrap();
             let page = page_with_html("https://example.test/", "<html></html>");
-            let facts = PageFacts::from_page(&page);
-            let evidence_ref = EvidenceRef::new(crate::features::identity::EvidenceId::new());
-            let _evidenced = EvidencedPageFacts::new(facts, evidence_ref);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+            assert_eq!(evidenced.facts().requested_url(), page.get_url());
         }
     }
 }

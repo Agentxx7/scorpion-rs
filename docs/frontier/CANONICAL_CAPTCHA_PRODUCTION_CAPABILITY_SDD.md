@@ -83,9 +83,21 @@ is what distinguishes them at runtime.
   independent of real hardware observation, and a shipping runtime
   capability that depends on real GPU inference is exactly the case that
   proof class exists for.
-- No `CI_PROVEN` record exists — no GitHub Actions run of this capability's
-  evidence has been observed. `UNPROVEN` names this honestly. `ADVERSARIALLY_
-  VERIFIED`, `CI_ENFORCED`, and `CLOSED` are not claimed.
+- At this SDD's original writing, no `CI_PROVEN` record existed — no GitHub
+  Actions run of this capability's evidence had been observed, and
+  `ADVERSARIALLY_VERIFIED`, `CI_ENFORCED`, and `CLOSED` were not claimed.
+  That has since advanced and was never reconciled back into this prose:
+  this frontier's own ledger now carries a real `[proof.CI_PROVEN]` record
+  (GitHub Actions run `32927984609`, commit `97092abc`, 25 passed / 0
+  failed / 2 ignored), and `[stages.ADVERSARIALLY_VERIFIED]`,
+  `[stages.CI_ENFORCED]`, and `[stages.CLOSED]` are all present and
+  independently satisfied — see
+  `SCORPION_CANONICAL_CAPTCHA_CI_ENFORCED_AND_CLOSED_ACTIVATION_001`'s own
+  closure report for that transition. The ledger this SDD backs
+  (`docs/frontier/ledger/SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_
+  CAPABILITY_COVERAGE_001.toml`) is the authoritative current record of
+  this capability's closure state; the `UNPROVEN` assessment above is
+  preserved here as history, not as this capability's present status.
 
 ## 4. Architecture decision gate
 

@@ -190,6 +190,70 @@ fn genuine_empty_results_remain_successful() {
 }
 
 #[test]
+fn api_search_preserves_provider_score_including_values_above_one() {
+    // Canonical truth: score is optional, provider-owned, unbounded (values
+    // above 1.0 are valid), and Scorpion performs no normalization,
+    // clamping, or filtering on it. `/api/search` must pass it through
+    // unchanged, in provider order, and preserve absence as null.
+    let provider = fake_searxng(
+        r#"{"query":"rust","number_of_results":2,"results":[
+            {"title":"High Score Result","url":"https://high.example","content":"first","score":1.5},
+            {"title":"No Score Result","url":"https://none.example","content":"second"}
+        ]}"#,
+        "200 OK",
+    );
+    let (mut child, base) = api_server(Some(provider));
+    let response = post(&base, r#"{"query":"rust"}"#);
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"score\":1.5"), "{response}");
+    assert!(response.contains("\"score\":null"), "{response}");
+
+    // Result ordering remains provider/canonical position order, unrelated
+    // to score value.
+    let high = response
+        .find("High Score Result")
+        .expect("first result present");
+    let none = response
+        .find("No Score Result")
+        .expect("second result present");
+    assert!(high < none, "provider order must be preserved: {response}");
+}
+
+#[test]
+fn default_console_ui_hides_raw_search_score_without_replacement_metric() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    // The opaque raw provider score fragment must be gone from the
+    // default human-facing rendering path.
+    assert!(!response.contains("score ${result.score}"), "{response}");
+    assert!(!response.contains("result.score"), "{response}");
+
+    // No synthetic replacement metric was introduced in its place.
+    for forbidden in [
+        "confidence",
+        "relevance",
+        "match %",
+        "matchScore",
+        "quality",
+    ] {
+        assert!(
+            !response.to_lowercase().contains(&forbidden.to_lowercase()),
+            "unexpected synthetic metric `{forbidden}` in: {response}"
+        );
+    }
+
+    // Truthful discovery presentation remains intact.
+    assert!(response.contains("result.title"), "{response}");
+    assert!(response.contains("result.url"), "{response}");
+    assert!(response.contains("result.snippet"), "{response}");
+    assert!(response.contains("result.date"), "{response}");
+}
+
+#[test]
 fn malformed_request_and_missing_provider_fail_without_200() {
     let (mut child, base) = api_server(None);
     let response = post(&base, "not-json");

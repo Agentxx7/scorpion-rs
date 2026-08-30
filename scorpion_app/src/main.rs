@@ -310,7 +310,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
           const snippet = document.createElement('div'); snippet.className = 'snippet'; snippet.appendChild(text(result.snippet));
           const meta = document.createElement('div'); meta.className = 'meta';
           if (result.date) meta.appendChild(text(result.date));
-          if (result.score != null) { if (result.date) meta.appendChild(text(' · ')); meta.appendChild(text(`score ${result.score}`)); }
           item.append(link, url, snippet, meta); results.appendChild(item);
         }
       } catch (_) { showError('Search is unavailable.'); }

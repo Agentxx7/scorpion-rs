@@ -12,24 +12,33 @@
 //!
 //! `SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001` established
 //! this contract with exactly one rule.
-//! `SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001` turns it into the
+//! `SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001` turned it into the
 //! first real deterministic page-audit engine: eleven production page
 //! rules (seven SEO, four passive security) evaluated purely over one
 //! [`EvidencedPageFacts`] value by [`analyze_page`], executed by the
 //! single generic seam [`audit_page`].
+//! `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` added a second,
+//! parallel deterministic projection over that same
+//! [`EvidencedPageFacts`] value — [`extract_technology_markers`] — for
+//! technology-identifying values the page directly exposed. A marker is
+//! not a `Finding` (see "Technology boundary" below); [`audit_page`]
+//! still performs exactly one acquisition either way.
 //!
 //! # Fetch once, evidence once, parse once, analyze many
 //!
 //! [`audit_page`] performs exactly one acquisition
 //! ([`fetch_single_page`]) and exactly one evidence recording
 //! ([`EvidencedPageFacts::record`]) per audited page — never once per
-//! rule. [`PageFacts::from_page`] performs exactly one HTML fact
-//! extraction pass ([`extract_html_facts`]) covering every authorized
-//! DOM fact, not one `lol_html` parse per rule. Every `Finding`
-//! [`analyze_page`] returns for one page therefore carries the exact
-//! same [`EvidenceRef`] — proven in this module's own
-//! `exact_page_evidence_binding` and `same_evidence_across_rules` test
-//! modules.
+//! rule, and never a second acquisition for technology-marker
+//! extraction either. [`PageFacts::from_page`] performs exactly one
+//! HTML fact extraction pass ([`extract_html_facts`]) covering every
+//! authorized DOM fact — including `<meta name="generator">` capture —
+//! not one `lol_html` parse per rule and not a second parse for
+//! markers. Every `Finding` [`analyze_page`] returns and every
+//! [`ObservedTechnologyMarker`] [`extract_technology_markers`] returns,
+//! for one page, therefore carries the exact same [`EvidenceRef`] —
+//! proven in this module's own `exact_page_evidence_binding`,
+//! `same_evidence_across_rules`, and `technology_markers` test modules.
 //!
 //! # Applicability
 //!
@@ -127,29 +136,53 @@
 //! graphs, insecure form actions, CSP/XFO/Referrer-Policy/
 //! Permissions-Policy *quality* evaluation, certificate analysis, any
 //! active probe or exploit technique; any technology/CMS/framework/WAF
-//! fingerprinting or CVE mapping (deliberately deferred — see
-//! `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` below); any
-//! site-wide analytics (duplicate-title aggregation, orphan detection,
-//! canonical loops, redirect graphs, sitemap drift); any network/Nmap
-//! capability (`NetworkObservation`, port scanning, service detection,
-//! process execution, target admission policy); any CLI/API/MCP/Web
-//! Console surface; and no AI (summarization, severity generation,
-//! report generation). Severity here is fixed rule policy, never
-//! observed evidence and never AI-generated narrative — see
-//! [`FindingSeverity`]. A header-absence or scheme Finding states a
-//! deterministic policy check, never a vulnerability, exploitability,
-//! or CVE claim.
+//! *fingerprinting*, *inference*, or CVE mapping (permanently out of
+//! scope — see "Technology boundary" below; this is distinct from, and
+//! never satisfied by, the directly-observed technology markers that
+//! section describes); any site-wide analytics (duplicate-title
+//! aggregation, orphan detection, canonical loops, redirect graphs,
+//! sitemap drift); any network/Nmap capability (`NetworkObservation`,
+//! port scanning, service detection, process execution, target
+//! admission policy); any CLI/API/MCP/Web Console surface; and no AI
+//! (summarization, severity generation, report generation, technology
+//! classification). Severity here is fixed rule policy, never observed
+//! evidence and never AI-generated narrative — see [`FindingSeverity`].
+//! A header-absence or scheme Finding states a deterministic policy
+//! check, never a vulnerability, exploitability, or CVE claim.
 //!
 //! # Technology boundary
 //!
-//! Technology fingerprinting is deliberately out of scope here: the
+//! `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` added deterministic
+//! extraction of technology-identifying values the remote page
+//! *explicitly* exposed — never an inference. This is a genuinely
+//! different contract from [`Finding`], not a variant of it: the
 //! `Finding` contract is predicate-shaped (observed condition vs.
 //! expected condition), and an observation-only fact like `Server:
-//! nginx/1.24` or an inference like "likely Next.js" has no truthful
-//! "expected" counterpart to contort it into. A successor frontier,
-//! `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001`, must introduce its
-//! own model distinguishing an observed marker from an inferred
-//! technology from a vulnerability claim — not solved accidentally here.
+//! nginx/1.24` has no truthful "expected" counterpart to contort it
+//! into, so it is never forced into `FindingCondition`/`Finding`. See
+//! [`ObservedTechnologyMarker`], [`TechnologyMarkerSource`], and
+//! [`extract_technology_markers`].
+//!
+//! What counts as an observation here is narrow and closed:
+//! [`MARKER_HEADER_NAMES`]'s three response headers (`Server`,
+//! `X-Powered-By`, and `X-Generator`, all already
+//! [`AUDIT_RESPONSE_HEADER_ALLOWLIST`] members before this frontier
+//! except the last, added by it — see that constant's own doc comment)
+//! and `<meta name="generator">`'s literal `content` value. Permanently
+//! *not* a marker source, no matter how suggestive: a `/wp-content/`
+//! path, a `.php` URL, a framework-shaped script `src`, DOM structure,
+//! favicon/asset hashing, TLS/JA3 fingerprinting, timing, a regex
+//! signature catalog, or any Wappalyzer/BuiltWith-style probabilistic
+//! database — none of those are the remote system *declaring* a value,
+//! only Scorpion *guessing* one, and Scorpion does not guess. There are
+//! no active probes, no hidden-endpoint requests, and no version
+//! probing: every marker comes from the exact same one acquisition
+//! [`audit_page`] already performed for [`analyze_page`] — see
+//! [`extract_technology_markers`]'s own doc comment for the full
+//! same-evidence, single-acquisition, parse-once proof. Markers are
+//! never persisted as their own durable, independently-identified
+//! record in this frontier — see the "Observed technology markers"
+//! section directly above [`MARKER_HEADER_NAMES`] in this file for why.
 
 use crate::features::domain_persistence::{DomainPersistence, PersistenceError};
 use crate::page::Page;
@@ -301,8 +334,10 @@ fn is_success_2xx(status: u16) -> bool {
 }
 
 /// One-pass, deterministic extraction of every authorized HTML DOM fact
-/// this frontier's rules need. Only ever computed by
-/// [`PageFacts::from_page`] when the page's own
+/// this frontier's rules — and, since
+/// `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001`,
+/// [`extract_html_generator_technology_markers`] — need. Only ever
+/// computed by [`PageFacts::from_page`] when the page's own
 /// [`DocumentRepresentation`] is [`DocumentRepresentation::Html`] —
 /// parsing non-HTML/unknown-representation bytes as HTML would not be
 /// truthful.
@@ -315,6 +350,15 @@ pub struct HtmlPageFacts {
     html_lang_present: bool,
     image_count: usize,
     images_missing_alt: usize,
+    /// Every `<meta name="generator" content="...">` observation's raw,
+    /// unnormalized `content` attribute value, in document order. An
+    /// element with the attribute present but empty contributes `""`;
+    /// an element with the attribute entirely absent contributes nothing.
+    /// This is a truthful capture, not a technology marker itself — see
+    /// [`extract_html_generator_technology_markers`] for the
+    /// deterministic normalization (trim, drop-if-empty) applied when
+    /// turning this into an [`ObservedTechnologyMarker`].
+    meta_generators: Vec<String>,
 }
 
 impl HtmlPageFacts {
@@ -362,6 +406,13 @@ impl HtmlPageFacts {
     pub fn images_missing_alt(&self) -> usize {
         self.images_missing_alt
     }
+
+    /// Every `<meta name="generator">` observation's raw `content`
+    /// attribute value, in document order — truthful capture, not yet a
+    /// normalized technology marker. See this field's own doc comment.
+    pub fn meta_generators(&self) -> &[String] {
+        &self.meta_generators
+    }
 }
 
 /// Truthfully extract every authorized HTML DOM fact from `html` in one
@@ -391,6 +442,7 @@ fn extract_html_facts(html: &str) -> HtmlPageFacts {
     let html_lang_present = Cell::new(false);
     let image_count = Cell::new(0_usize);
     let images_missing_alt = Cell::new(0_usize);
+    let meta_generators: RefCell<Vec<String>> = RefCell::new(Vec::new());
 
     // catch_unwind guards against lol_html's internal panic on malformed
     // encodings, exactly like `clean_html_base` — a page whose HTML
@@ -430,6 +482,20 @@ fn extract_html_facts(html: &str) -> HtmlPageFacts {
                         }
                         Ok(())
                     }),
+                    // Directly observed, not inferred: the remote
+                    // document itself declared this value in a
+                    // `<meta name="generator">` element. Raw capture
+                    // only — normalization/emptiness policy lives in
+                    // `extract_html_generator_technology_markers`, not
+                    // here (this pass stays a truthful, unopinionated
+                    // fact extractor, matching every other handler
+                    // above).
+                    element!("meta[name=\"generator\"]", |el| {
+                        if let Some(content) = el.get_attribute("content") {
+                            meta_generators.borrow_mut().push(content);
+                        }
+                        Ok(())
+                    }),
                     element!("h1", |_el| {
                         h1_count.set(h1_count.get() + 1);
                         Ok(())
@@ -455,6 +521,7 @@ fn extract_html_facts(html: &str) -> HtmlPageFacts {
         html_lang_present: html_lang_present.get(),
         image_count: image_count.get(),
         images_missing_alt: images_missing_alt.get(),
+        meta_generators: meta_generators.into_inner(),
     }
 }
 
@@ -1287,6 +1354,199 @@ pub fn analyze_page(evidenced: &EvidencedPageFacts) -> Vec<Finding> {
         .collect()
 }
 
+// ---------------------------------------------------------------------
+// Observed technology markers — SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001
+// ---------------------------------------------------------------------
+//
+// A technology marker is not a `Finding`: a `Finding` states that a
+// deterministic rule evaluated observed facts against an expected
+// condition; a marker states only that the remote page *itself*
+// explicitly exposed a technology-identifying value in the same
+// acquisition an audit already evidenced. There is no "expected"
+// counterpart to a `Server: nginx` observation, so it is never forced
+// into `FindingCondition`/`Finding`'s predicate shape — see this
+// module's "Technology boundary" doc section above.
+//
+// Deliberately *not* introduced here: a `TechnologyMarkerId` or any
+// other content-addressed identity, and no durable persistence path
+// (no `append_history`/`write_current` call for markers). Both
+// `PageFacts` and `HtmlPageFacts` are themselves "[n]ever persisted
+// itself" (see their own doc comments) — they are pure, deterministic,
+// re-derivable projections of the one thing that *is* durably recorded:
+// the page's `Evidence` (which already stores `response_headers` and
+// raw HTML `content`). `extract_technology_markers` is exactly one more
+// such pure projection: a future consumer (MCP/Web Console, out of
+// scope here — see the shipping-surface firewall below) can reproduce
+// today's exact marker sequence at any time by reading the same
+// `Evidence` back and calling this same deterministic function again —
+// inventing marker identity/versioning now, before any real consumer
+// exists, would be exactly the kind of premature, unauthorized-here
+// shipping-surface design this frontier's own scope firewall forbids.
+
+/// Response header names this frontier treats as technology-identifying
+/// when the remote server sets them — a fixed, closed, deliberately
+/// small subset of [`AUDIT_RESPONSE_HEADER_ALLOWLIST`] (never a
+/// signature/fingerprint database, and never grown to "detect" a
+/// specific product): each name here is a header a system may use to
+/// *voluntarily self-declare* what serves it, not a name any other
+/// system probes for. Order here is also
+/// [`extract_response_header_technology_markers`]'s emission order —
+/// stable and explicit, never `HashMap`-order-dependent.
+pub const MARKER_HEADER_NAMES: &[&str] = &["server", "x-powered-by", "x-generator"];
+
+/// Where an [`ObservedTechnologyMarker`]'s value was directly observed —
+/// never an inferred, guessed, or probabilistic source. See this
+/// module's non-inference boundary
+/// (`SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TechnologyMarkerSource {
+    /// One response header's own literal value, named by its lowercase
+    /// [`AUDIT_RESPONSE_HEADER_ALLOWLIST`] spelling (always one of
+    /// [`MARKER_HEADER_NAMES`] in production output).
+    ResponseHeader(String),
+    /// `<meta name="generator" content="...">`'s own literal `content`
+    /// value.
+    HtmlMetaGenerator,
+}
+
+/// A technology-identifying value the remote page *explicitly* exposed
+/// in the same acquisition an audit already evidenced — the observation
+/// itself, never an interpretation of it. Scorpion records that a
+/// `Server` header's value was `"nginx"`, or that a
+/// `<meta name="generator">` value was `"WordPress 6.4"`; Scorpion never
+/// records a conclusion like `"technology = nginx"` or
+/// `"cms = WordPress"`. Interpreting an observed marker into a named
+/// technology/product/vendor claim belongs to a future consumer (an AI
+/// via MCP, or a human reviewing canonical evidence through Web
+/// Console) — never to this module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedTechnologyMarker {
+    source: TechnologyMarkerSource,
+    value: String,
+}
+
+impl ObservedTechnologyMarker {
+    /// Where this value was observed.
+    pub fn source(&self) -> &TechnologyMarkerSource {
+        &self.source
+    }
+
+    /// The literal, deterministically-normalized (trimmed, never
+    /// case-folded, never parsed/split) value the remote page exposed.
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+/// Deterministic technology markers from `facts`'s observed response
+/// headers. Requires `facts.response_headers()` to be `Some(_)` —
+/// header observation itself being unavailable ([`None`]) yields zero
+/// markers, exactly like every header-absence security rule in this
+/// module: absence of *observation* is never treated as absence of
+/// *value*. Unlike [`page_content_seo_applicable`]-gated SEO rules, this
+/// is **not** gated on 2xx status or HTML representation — a header a
+/// server sets is a header a server sets, regardless of what status
+/// code or body it served alongside it (an HTML 404 error page that
+/// still answers `Server: nginx` really did expose that value).
+///
+/// For each of [`MARKER_HEADER_NAMES`], in that fixed order, every raw
+/// byte value actually observed for that header name is considered in
+/// observed order. A value is skipped (never a fabricated/lossy
+/// substitute) when it is not valid UTF-8 — HTTP header values are not
+/// guaranteed to be text, and Scorpion fails closed for that one value
+/// rather than synthesizing a guess from raw bytes — or when, after
+/// trimming surrounding whitespace, it is empty (an empty value
+/// identifies no technology). Multiple distinct values for one header
+/// name, and exact repeated identical values, are **all** retained as
+/// separate markers — mirroring [`audit_response_headers`]'s own
+/// never-collapse, never-comma-join semantics; no value is silently
+/// deduplicated away.
+pub fn extract_response_header_technology_markers(
+    facts: &PageFacts,
+) -> Vec<ObservedTechnologyMarker> {
+    let Some(headers) = facts.response_headers() else {
+        return Vec::new();
+    };
+    let mut markers = Vec::new();
+    for &name in MARKER_HEADER_NAMES {
+        let Some(values) = headers.get(name) else {
+            continue;
+        };
+        for raw in values {
+            let Ok(text) = std::str::from_utf8(raw) else {
+                continue;
+            };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            markers.push(ObservedTechnologyMarker {
+                source: TechnologyMarkerSource::ResponseHeader(name.to_string()),
+                value: trimmed.to_string(),
+            });
+        }
+    }
+    markers
+}
+
+/// Deterministic technology markers from `facts`'s observed
+/// `<meta name="generator">` elements. Requires
+/// `facts.representation() == `[`DocumentRepresentation::Html`] — a
+/// non-HTML/unknown-representation body was never parsed as HTML in the
+/// first place (see [`PageFacts::from_page`]), so there is nothing to
+/// read. **Not** additionally gated on 2xx status, deliberately unlike
+/// [`page_content_seo_applicable`]: technology markers are observations,
+/// not SEO findings, and an HTML error page can truthfully expose a
+/// generator tag exactly as any other HTML page can (see this module's
+/// own applicability tests).
+///
+/// Reuses [`HtmlPageFacts::meta_generators`] — the exact same single
+/// [`extract_html_facts`] parse pass every other HTML fact in this
+/// module already shares; this function performs no second HTML parse.
+/// Each raw captured value is trimmed and, if empty after trimming,
+/// skipped (an empty `content` attribute identifies no technology) —
+/// otherwise kept verbatim (never case-folded, never parsed apart into
+/// a name/version split). Multiple `<meta name="generator">` elements,
+/// including exact repeated identical values, all produce separate
+/// markers in document order — never deduplicated.
+pub fn extract_html_generator_technology_markers(
+    facts: &PageFacts,
+) -> Vec<ObservedTechnologyMarker> {
+    let Some(html) = facts.html() else {
+        return Vec::new();
+    };
+    html.meta_generators()
+        .iter()
+        .filter_map(|raw| {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then(|| ObservedTechnologyMarker {
+                source: TechnologyMarkerSource::HtmlMetaGenerator,
+                value: trimmed.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Every deterministic technology marker `evidenced`'s page directly
+/// exposed — response-header markers first (in [`MARKER_HEADER_NAMES`]
+/// order), then HTML `<meta name="generator">` markers (in document
+/// order); both orderings are fixed and explicit, never
+/// iteration-order-dependent. A pure function of already-derived facts:
+/// no network activity, no second acquisition
+/// ([`fetch_single_page`] is never called here), no second evidence
+/// recording, no persistence, no AI. Every marker this returns
+/// describes the exact same acquisition as `evidenced`'s own
+/// [`EvidencedPageFacts::evidence_ref`] — this function does not carry
+/// that reference itself only because it has no independent identity to
+/// attach it to; [`audit_page`]'s caller-facing [`PageAuditResult`]
+/// pairs every marker it returns with that one shared `EvidenceRef`.
+pub fn extract_technology_markers(evidenced: &EvidencedPageFacts) -> Vec<ObservedTechnologyMarker> {
+    let facts = evidenced.facts();
+    let mut markers = extract_response_header_technology_markers(facts);
+    markers.extend(extract_html_generator_technology_markers(facts));
+    markers
+}
+
 /// Durably record `finding`, first verifying every `EvidenceRef` it
 /// carries actually resolves in `store` — fail-closed: no finding is
 /// persisted if any evidence reference is unresolvable. Recording an
@@ -1343,19 +1603,22 @@ pub async fn read_finding(
 }
 
 /// The smallest internal result proving one page audit's architecture:
-/// the exact [`EvidenceRef`] every returned [`Finding`] is linked to, and
-/// the deterministic Finding list itself. Not a shipping DTO — no API,
-/// UI, MCP, or CLI schema is authorized in this frontier.
+/// the exact [`EvidenceRef`] every returned [`Finding`] *and* every
+/// returned [`ObservedTechnologyMarker`] is linked to, the deterministic
+/// Finding list, and the deterministic technology-marker list. Not a
+/// shipping DTO — no API, UI, MCP, or CLI schema is authorized in this
+/// frontier.
 #[derive(Debug, Clone)]
 pub struct PageAuditResult {
     evidence_ref: EvidenceRef,
     findings: Vec<Finding>,
+    technology_markers: Vec<ObservedTechnologyMarker>,
 }
 
 impl PageAuditResult {
-    /// The evidence every `Finding` in [`Self::findings`] is linked to —
-    /// always the exact evidence recorded for the one `Page` this audit
-    /// acquired.
+    /// The evidence every `Finding` in [`Self::findings`] and every
+    /// marker in [`Self::technology_markers`] is linked to — always the
+    /// exact evidence recorded for the one `Page` this audit acquired.
     pub fn evidence_ref(&self) -> EvidenceRef {
         self.evidence_ref
     }
@@ -1365,21 +1628,33 @@ impl PageAuditResult {
     pub fn findings(&self) -> &[Finding] {
         &self.findings
     }
+
+    /// Every directly observed technology marker produced by this
+    /// audit, in [`extract_technology_markers`]'s deterministic order.
+    /// Never persisted independently — see the "Observed technology
+    /// markers" section of this module's doc comment for why.
+    pub fn technology_markers(&self) -> &[ObservedTechnologyMarker] {
+        &self.technology_markers
+    }
 }
 
 /// The internal, generic canonical audit execution seam — the *only*
 /// production acquisition entrypoint in this module, reused by every
-/// current and future page rule (never one acquisition entrypoint per
-/// rule):
+/// current and future page rule and by technology-marker extraction
+/// (never one acquisition entrypoint per rule, and never a second
+/// acquisition entrypoint for markers):
 /// acquire exactly one page ([`fetch_single_page`], the same one-shot
 /// primitive every other evidence-first caller uses) -> record its
 /// evidence and derive [`PageFacts`] from that *exact same* `Page`
 /// ([`EvidencedPageFacts::record`]) -> run every rule in [`PAGE_RULES`]
 /// ([`analyze_page`]) -> persist each resulting [`Finding`]
-/// ([`record_finding`]). Exactly one acquisition, exactly one evidence
-/// recording, per audited page — every returned `Finding` therefore
-/// shares [`PageAuditResult::evidence_ref`]. This is not a CLI/API/MCP/
-/// Web Console surface — see this module's doc comment.
+/// ([`record_finding`]) -> derive every technology marker from that
+/// *same* [`EvidencedPageFacts`] value ([`extract_technology_markers`]).
+/// Exactly one acquisition, exactly one evidence recording, per audited
+/// page — every returned `Finding` and every returned
+/// `ObservedTechnologyMarker` therefore shares
+/// [`PageAuditResult::evidence_ref`]. This is not a CLI/API/MCP/Web
+/// Console surface — see this module's doc comment.
 pub async fn audit_page(
     store: &DomainPersistence,
     url: &str,
@@ -1396,9 +1671,12 @@ pub async fn audit_page(
         findings.push(record_finding(store, finding).await?);
     }
 
+    let technology_markers = extract_technology_markers(&evidenced);
+
     Ok(PageAuditResult {
         evidence_ref,
         findings,
+        technology_markers,
     })
 }
 
@@ -1671,6 +1949,62 @@ mod tests {
             assert_eq!(facts.image_count(), 3);
             // Only the first image (no `alt` attribute at all) counts.
             assert_eq!(facts.images_missing_alt(), 1);
+        }
+
+        // SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001: meta-generator
+        // capture reuses this same single parse pass — raw, untrimmed,
+        // unfiltered values only; normalization is the marker layer's
+        // job, not this one's.
+        #[test]
+        fn meta_generator_raw_capture_matches_every_other_fact_in_the_same_pass() {
+            assert!(extract_html_facts("<html><head></head></html>")
+                .meta_generators()
+                .is_empty());
+            assert_eq!(
+                extract_html_facts(
+                    r#"<html><head><meta name="generator" content="WordPress 6.4"></head></html>"#
+                )
+                .meta_generators(),
+                &["WordPress 6.4".to_string()]
+            );
+            // Present-but-empty content is captured raw (not filtered
+            // here) — the marker layer decides that policy.
+            assert_eq!(
+                extract_html_facts(
+                    r#"<html><head><meta name="generator" content=""></head></html>"#
+                )
+                .meta_generators(),
+                &["".to_string()]
+            );
+            // Attribute entirely absent contributes nothing.
+            assert!(
+                extract_html_facts(r#"<html><head><meta name="generator"></head></html>"#)
+                    .meta_generators()
+                    .is_empty()
+            );
+            // Multiple elements, document order, duplicates retained.
+            assert_eq!(
+                extract_html_facts(
+                    r#"<html><head>
+                        <meta name="generator" content="WordPress 6.4">
+                        <meta name="generator" content="WordPress 6.4">
+                        <meta name="generator" content="Elementor 3.2">
+                    </head></html>"#
+                )
+                .meta_generators(),
+                &[
+                    "WordPress 6.4".to_string(),
+                    "WordPress 6.4".to_string(),
+                    "Elementor 3.2".to_string(),
+                ]
+            );
+            // A discovery/OpenGraph-shaped generator-adjacent meta name
+            // never substitutes — only the literal `name="generator"`.
+            assert!(extract_html_facts(
+                r#"<html><head><meta name="og:generator" content="Something"></head></html>"#
+            )
+            .meta_generators()
+            .is_empty());
         }
     }
 
@@ -2809,6 +3143,484 @@ mod tests {
                 .findings()
                 .iter()
                 .all(|f| f.rule_id() != SEO_CANONICAL_MISSING_RULE_ID));
+        }
+    }
+
+    // SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001: deterministic
+    // technology-marker extraction — header observations, HTML
+    // observations, same-evidence/single-acquisition proof, and the
+    // non-inference boundary.
+    mod technology_markers {
+        use super::*;
+
+        async fn evidenced(page: &Page) -> EvidencedPageFacts {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            EvidencedPageFacts::record(&store, page).await.unwrap()
+        }
+
+        fn header_value(bytes: &[u8]) -> reqwest::header::HeaderValue {
+            reqwest::header::HeaderValue::from_bytes(bytes).unwrap()
+        }
+
+        // ---- HEADER OBSERVATIONS ----
+
+        #[tokio::test]
+        async fn server_header_observed_produces_exact_marker() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[("server", "nginx/1.24.0")],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![ObservedTechnologyMarker {
+                    source: TechnologyMarkerSource::ResponseHeader("server".to_string()),
+                    value: "nginx/1.24.0".to_string(),
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn x_powered_by_header_observed_produces_exact_marker() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[("x-powered-by", "Express")],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![ObservedTechnologyMarker {
+                    source: TechnologyMarkerSource::ResponseHeader("x-powered-by".to_string()),
+                    value: "Express".to_string(),
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn x_generator_header_observed_produces_exact_marker() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[("x-generator", "Drupal 9")],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![ObservedTechnologyMarker {
+                    source: TechnologyMarkerSource::ResponseHeader("x-generator".to_string()),
+                    value: "Drupal 9".to_string(),
+                }]
+            );
+        }
+
+        // Deterministic ordering across distinct marker headers:
+        // MARKER_HEADER_NAMES order (server, x-powered-by, x-generator),
+        // never insertion/HashMap order.
+        #[tokio::test]
+        async fn multiple_distinct_header_markers_follow_declared_order() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[
+                    ("x-generator", "Drupal 9"),
+                    ("x-powered-by", "Express"),
+                    ("server", "nginx"),
+                ],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            let sources: Vec<&str> = markers
+                .iter()
+                .map(|m| match m.source() {
+                    TechnologyMarkerSource::ResponseHeader(name) => name.as_str(),
+                    TechnologyMarkerSource::HtmlMetaGenerator => "meta",
+                })
+                .collect();
+            assert_eq!(sources, vec!["server", "x-powered-by", "x-generator"]);
+        }
+
+        // Repeated identical header values are retained, never
+        // silently deduplicated.
+        #[tokio::test]
+        async fn repeated_identical_header_values_are_retained_not_deduplicated() {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("text/plain"),
+            );
+            headers.append(
+                reqwest::header::HeaderName::from_static("server"),
+                reqwest::header::HeaderValue::from_static("nginx"),
+            );
+            headers.append(
+                reqwest::header::HeaderName::from_static("server"),
+                reqwest::header::HeaderValue::from_static("nginx"),
+            );
+            let page = build(
+                "https://example.test/",
+                PageResponse {
+                    content: Some(b"hello".to_vec()),
+                    status_code: reqwest::StatusCode::OK,
+                    headers: Some(headers),
+                    ..Default::default()
+                },
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![
+                    ObservedTechnologyMarker {
+                        source: TechnologyMarkerSource::ResponseHeader("server".to_string()),
+                        value: "nginx".to_string(),
+                    },
+                    ObservedTechnologyMarker {
+                        source: TechnologyMarkerSource::ResponseHeader("server".to_string()),
+                        value: "nginx".to_string(),
+                    },
+                ]
+            );
+        }
+
+        // Header observation itself unavailable -> zero header-derived
+        // markers, exactly like every header-absence security rule.
+        #[tokio::test]
+        async fn headers_unavailable_produces_no_header_markers() {
+            let page = page_with_no_headers("https://example.test/", "hello");
+            let evidenced = evidenced(&page).await;
+            assert_eq!(evidenced.facts().response_headers(), None);
+            assert!(extract_response_header_technology_markers(evidenced.facts()).is_empty());
+        }
+
+        // An observed-but-empty marker header value produces no marker
+        // (an empty value identifies no technology) — documented
+        // deterministic behavior.
+        #[tokio::test]
+        async fn observed_empty_header_value_produces_no_marker() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[("server", "   ")],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        // Non-UTF-8 header bytes fail closed for that one value rather
+        // than a lossy/fabricated substitute — other, valid values for
+        // the same header still survive.
+        #[tokio::test]
+        async fn non_utf8_header_value_fails_closed_for_that_marker() {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("text/plain"),
+            );
+            headers.append(
+                reqwest::header::HeaderName::from_static("server"),
+                header_value(&[0x78, 0xFF, 0xFE, 0x79]),
+            );
+            headers.append(
+                reqwest::header::HeaderName::from_static("server"),
+                reqwest::header::HeaderValue::from_static("nginx"),
+            );
+            let page = build(
+                "https://example.test/",
+                PageResponse {
+                    content: Some(b"hello".to_vec()),
+                    status_code: reqwest::StatusCode::OK,
+                    headers: Some(headers),
+                    ..Default::default()
+                },
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![ObservedTechnologyMarker {
+                    source: TechnologyMarkerSource::ResponseHeader("server".to_string()),
+                    value: "nginx".to_string(),
+                }]
+            );
+        }
+
+        // Set-Cookie is not in AUDIT_RESPONSE_HEADER_ALLOWLIST at all, so
+        // it structurally cannot become a marker; reconfirmed here at
+        // the marker layer.
+        #[tokio::test]
+        async fn set_cookie_never_becomes_a_marker() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[("set-cookie", "session=SECRET; Secure; HttpOnly")],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        // Authorization/Cookie/Proxy-Authorization never become markers
+        // even if a (misconfigured) response echoed them — defense in
+        // depth on top of the closed MARKER_HEADER_NAMES allowlist.
+        #[tokio::test]
+        async fn credential_bearing_headers_never_become_markers() {
+            let page = page_with(
+                "https://example.test/",
+                "hello",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[
+                    ("authorization", "Bearer SUPER_SECRET_TOKEN"),
+                    ("cookie", "session=SUPER_SECRET_TOKEN"),
+                    ("proxy-authorization", "Basic SUPER_SECRET_TOKEN"),
+                ],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+            for marker in &markers {
+                assert!(!marker.value().contains("SUPER_SECRET_TOKEN"));
+            }
+        }
+
+        // ---- HTML OBSERVATIONS ----
+
+        #[tokio::test]
+        async fn meta_generator_observed_produces_marker() {
+            let page = page_with_html(
+                "https://example.test/",
+                r#"<html><head><meta name="generator" content="WordPress 6.4"></head></html>"#,
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![ObservedTechnologyMarker {
+                    source: TechnologyMarkerSource::HtmlMetaGenerator,
+                    value: "WordPress 6.4".to_string(),
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn multiple_meta_generators_preserve_document_order_and_duplicates() {
+            let page = page_with_html(
+                "https://example.test/",
+                r#"<html><head>
+                    <meta name="generator" content="WordPress 6.4">
+                    <meta name="generator" content="WordPress 6.4">
+                    <meta name="generator" content="Elementor 3.2">
+                </head></html>"#,
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            let values: Vec<&str> = markers
+                .iter()
+                .map(ObservedTechnologyMarker::value)
+                .collect();
+            assert_eq!(
+                values,
+                vec!["WordPress 6.4", "WordPress 6.4", "Elementor 3.2"]
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_generator_content_produces_no_marker() {
+            let page = page_with_html(
+                "https://example.test/",
+                r#"<html><head><meta name="generator" content="   "></head></html>"#,
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        // An HTML error page can truthfully expose a generator tag —
+        // technology markers are not gated on 2xx status, deliberately
+        // unlike page_content_seo_applicable.
+        #[tokio::test]
+        async fn meta_generator_on_html_error_page_still_produces_a_marker() {
+            let page = page_with(
+                "https://example.test/missing",
+                r#"<html><head><meta name="generator" content="WordPress 6.4"></head></html>"#,
+                "text/html",
+                reqwest::StatusCode::NOT_FOUND,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert_eq!(
+                markers,
+                vec![ObservedTechnologyMarker {
+                    source: TechnologyMarkerSource::HtmlMetaGenerator,
+                    value: "WordPress 6.4".to_string(),
+                }]
+            );
+        }
+
+        #[tokio::test]
+        async fn text_plain_containing_meta_generator_markup_produces_no_html_marker() {
+            let page = page_with(
+                "https://example.test/",
+                r#"<meta name="generator" content="WordPress 6.4">"#,
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        #[tokio::test]
+        async fn json_containing_html_like_string_produces_no_html_marker() {
+            let page = page_with(
+                "https://example.test/",
+                r#"{"note":"<meta name=\"generator\" content=\"WordPress 6.4\">"}"#,
+                "application/json",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        #[tokio::test]
+        async fn image_representation_produces_no_html_marker() {
+            let page = page_with(
+                "https://example.test/x.png",
+                "not really png bytes",
+                "image/png",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        // ---- EVIDENCE / SINGLE-ACQUISITION / DETERMINISM ----
+
+        #[tokio::test]
+        async fn markers_and_findings_from_one_audit_page_share_the_same_evidence_ref() {
+            use std::io::Write;
+            use std::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let html =
+                r#"<html><head><meta name="generator" content="WordPress 6.4"></head></html>"#;
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nServer: nginx\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        html.len()
+                    );
+                    let _ = stream.write_all(html.as_bytes());
+                }
+            });
+            let url = format!("http://{addr}/");
+
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let result = audit_page(&store, &url).await.unwrap();
+
+            assert!(!result.findings().is_empty());
+            assert!(!result.technology_markers().is_empty());
+            for f in result.findings() {
+                assert_eq!(f.evidence(), &[result.evidence_ref()]);
+            }
+            // Technology markers do not themselves carry an EvidenceRef
+            // (no independent identity — see this module's doc comment),
+            // but every one of them came from the exact same
+            // PageAuditResult, which itself names exactly one shared
+            // EvidenceRef for both findings and markers.
+            assert!(result
+                .technology_markers()
+                .iter()
+                .any(|m| m.source() == &TechnologyMarkerSource::HtmlMetaGenerator));
+            assert!(result.technology_markers().iter().any(
+                |m| m.source() == &TechnologyMarkerSource::ResponseHeader("server".to_string())
+            ));
+        }
+
+        // Deterministic repeated analysis: calling extract_technology_markers
+        // twice on the same EvidencedPageFacts yields an identical sequence.
+        #[tokio::test]
+        async fn repeated_analysis_produces_an_identical_marker_sequence() {
+            let page = page_with(
+                "https://example.test/",
+                r#"<html><head><meta name="generator" content="WordPress 6.4"></head></html>"#,
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[("server", "nginx"), ("x-powered-by", "PHP/8.2")],
+            );
+            let evidenced = evidenced(&page).await;
+            let first = extract_technology_markers(&evidenced);
+            let second = extract_technology_markers(&evidenced);
+            assert_eq!(first, second);
+            assert_eq!(first.len(), 3);
+        }
+
+        // extract_technology_markers is a pure function of an already
+        // evidenced page: no acquisition, no persistence handle. This
+        // is a compile-time proof (the call below would not type-check
+        // if the signature required &DomainPersistence or async), not
+        // merely a runtime assertion.
+        #[tokio::test]
+        async fn extract_technology_markers_takes_only_evidenced_page_facts() {
+            let page = page_with_html("https://example.test/", "<html></html>");
+            let evidenced = evidenced(&page).await;
+            let _markers: Vec<ObservedTechnologyMarker> = extract_technology_markers(&evidenced);
+        }
+
+        // ---- NON-INFERENCE BOUNDARY ----
+
+        #[tokio::test]
+        async fn wp_content_path_alone_produces_no_marker() {
+            let page = page_with(
+                "https://example.test/wp-content/uploads/x.png",
+                "<html><body>no header or meta markers at all</body></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        #[tokio::test]
+        async fn php_url_alone_produces_no_marker() {
+            let page = page_with(
+                "https://example.test/index.php?p=1",
+                "<html><body>no header or meta markers at all</body></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
+        }
+
+        #[tokio::test]
+        async fn framework_like_script_path_alone_produces_no_marker() {
+            let page = page_with(
+                "https://example.test/",
+                r#"<html><body>
+                    <script src="/_next/static/chunks/main.js"></script>
+                    <script src="/wp-includes/js/wp-embed.min.js"></script>
+                </body></html>"#,
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let markers = extract_technology_markers(&evidenced(&page).await);
+            assert!(markers.is_empty());
         }
     }
 

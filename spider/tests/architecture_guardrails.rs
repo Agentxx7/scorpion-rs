@@ -6385,27 +6385,202 @@ fn every_security_header_rule_requires_observed_headers() {
     }
 }
 
-/// No technology/CMS/framework/WAF fingerprinting is introduced —
-/// `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` remains a separate,
-/// unauthorized-here frontier. Checked as actual code (comment lines
-/// stripped first — this module's own doc comment legitimately *names*
-/// these concepts in English to explain the deferral).
+/// No technology/CMS/framework/WAF *fingerprinting* or *inference* is
+/// introduced — that remains permanently out of scope, distinct from
+/// (and never satisfied by) `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001`'s
+/// directly-observed marker extraction. Checked as actual code (comment
+/// lines stripped first — this module's own doc comment legitimately
+/// *names* these concepts in English to explain the boundary).
+///
+/// `"x-powered-by"` was removed from this forbidden list by
+/// `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001`: it is now a
+/// legitimate literal marker-header name (see `MARKER_HEADER_NAMES`),
+/// not fingerprinting — the remote server itself sets that header to
+/// self-declare a value; Scorpion records it verbatim, it never infers
+/// or catalogs it. `"cms"`, `"framework_detect"`, `"waf"`,
+/// `"fingerprint"`, and `"cve"` remain forbidden: no CMS/framework/WAF
+/// inference engine or CVE mapping was introduced alongside marker
+/// extraction.
 #[test]
 fn audit_module_introduces_no_technology_fingerprinting() {
     let audit_code = strip_comment_lines(&read_src_file("features/audit.rs"));
-    for forbidden in [
-        "cms",
-        "framework_detect",
-        "waf",
-        "fingerprint",
-        "x-powered-by",
-        "cve",
-    ] {
+    for forbidden in ["cms", "framework_detect", "waf", "fingerprint", "cve"] {
         assert!(
             !audit_code.to_lowercase().contains(forbidden),
             "spider/src/features/audit.rs must not reference {forbidden:?} \
-             in actual code — technology fingerprinting is deliberately \
-             deferred to a successor frontier"
+             in actual code — technology/CMS/framework/WAF inference and \
+             CVE mapping remain permanently out of scope, distinct from \
+             directly-observed technology-marker extraction"
+        );
+    }
+}
+
+/// The response-header names technology-marker extraction may read are a
+/// small, fixed, closed subset of `AUDIT_RESPONSE_HEADER_ALLOWLIST` —
+/// never that whole allowlist, and never a name that could carry a
+/// credential/session value. Structural proof, not merely a runtime
+/// assertion: this reads `MARKER_HEADER_NAMES`'s own literal source
+/// text.
+#[test]
+fn technology_marker_header_names_are_closed_and_credential_free() {
+    let audit_source = read_src_file("features/audit.rs");
+    let start = audit_source
+        .find("pub const MARKER_HEADER_NAMES")
+        .expect("MARKER_HEADER_NAMES must exist in audit.rs");
+    let end = audit_source[start..]
+        .find("];")
+        .map(|offset| start + offset)
+        .expect("MARKER_HEADER_NAMES declaration must be array-shaped");
+    let declaration = &audit_source[start..end];
+
+    for forbidden in [
+        "authorization",
+        "proxy-authorization",
+        "\"cookie\"",
+        "set-cookie",
+    ] {
+        assert!(
+            !declaration.to_lowercase().contains(forbidden),
+            "MARKER_HEADER_NAMES must never name a credential-bearing \
+             header ({forbidden:?} found) — technology markers must \
+             never carry session/credential material"
+        );
+    }
+    for expected in ["\"server\"", "\"x-powered-by\"", "\"x-generator\""] {
+        assert!(
+            declaration.contains(expected),
+            "MARKER_HEADER_NAMES must contain {expected:?} — the exact \
+             three headers this frontier authorizes as marker sources"
+        );
+    }
+    // Closed: exactly the three authorized names, nothing more (a
+    // fourth entry would need its own explicit frontier authorization).
+    let name_count = declaration.matches('"').count() / 2;
+    assert_eq!(
+        name_count, 3,
+        "MARKER_HEADER_NAMES must name exactly three headers — growing \
+         this list is a new frontier decision, not an incidental change"
+    );
+}
+
+/// `extract_technology_markers` is a pure function of an already
+/// evidenced page: its signature must accept only `&EvidencedPageFacts`
+/// and must not be `async`, `&DomainPersistence`-parameterized, or
+/// otherwise shaped to allow acquisition/persistence side effects —
+/// structural proof that technology-marker extraction can never
+/// independently fetch or record evidence.
+#[test]
+fn extract_technology_markers_is_a_pure_function_with_no_acquisition_or_persistence_capability() {
+    let audit_source = read_src_file("features/audit.rs");
+    let signature_line = audit_source
+        .lines()
+        .find(|line| {
+            line.trim_start()
+                .starts_with("pub fn extract_technology_markers(")
+        })
+        .expect("extract_technology_markers must exist as a `pub fn` (never `pub async fn`)");
+    assert!(
+        signature_line.contains("evidenced: &EvidencedPageFacts"),
+        "extract_technology_markers must take exactly &EvidencedPageFacts, \
+         found: {signature_line:?}"
+    );
+    assert!(
+        !signature_line.contains("DomainPersistence") && !signature_line.contains("store:"),
+        "extract_technology_markers must not accept a persistence handle \
+         — it must never independently record evidence or findings"
+    );
+}
+
+/// Technology-marker HTML extraction reuses the single canonical
+/// `lol_html` parse pass every other HTML fact already shares —
+/// `rewrite_str(` must appear exactly once in `audit.rs`'s production
+/// code, and the `meta[name="generator"]` element handler must be
+/// defined textually inside `extract_html_facts`'s own body, never in a
+/// second, independent parse function.
+#[test]
+fn technology_markers_reuse_the_single_canonical_html_parse_pass() {
+    let full_source = read_src_file("features/audit.rs");
+    let production_only = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    let occurrences = production_only.matches("rewrite_str(").count();
+    assert_eq!(
+        occurrences, 1,
+        "audit.rs's production code must call rewrite_str exactly once \
+         — one canonical HTML parse pass, never a second independent \
+         parse for technology markers"
+    );
+
+    let fn_start = production_only
+        .find("fn extract_html_facts(")
+        .expect("extract_html_facts must exist in audit.rs");
+    let fn_end = production_only[fn_start..]
+        .find("\n}\n")
+        .map(|offset| fn_start + offset)
+        .unwrap_or(production_only.len());
+    let fn_body = &production_only[fn_start..fn_end];
+    assert!(
+        fn_body.contains("meta[name=\\\"generator\\\"]"),
+        "the meta[name=\"generator\"] element handler must be defined \
+         inside extract_html_facts's own body — reusing the single \
+         canonical HTML parse pass, never a second parse function"
+    );
+}
+
+/// No independent, content-addressed technology-marker identity type
+/// (e.g. a `TechnologyMarkerId`) exists in production code — this
+/// frontier deliberately leaves markers re-derivable from already-
+/// persisted `Evidence` rather than inventing an unversioned/unstable
+/// identity/persistence scheme prematurely (see this module's
+/// "Observed technology markers" doc section for the full reasoning).
+#[test]
+fn no_technology_marker_identity_type_is_introduced() {
+    let audit_code = strip_comment_lines(&read_src_file("features/audit.rs"));
+    for forbidden in ["TechnologyMarkerId", "MarkerId", "marker_id"] {
+        assert!(
+            !audit_code.contains(forbidden),
+            "spider/src/features/audit.rs must not define {forbidden:?} \
+             — technology markers deliberately carry no independent, \
+             persisted identity in this frontier"
+        );
+    }
+}
+
+/// `extract_response_header_technology_markers` must consume the
+/// canonical, already-captured `PageFacts::response_headers()` value —
+/// never a second, independent header acquisition or parallel capture
+/// path (e.g. reading `page.headers` directly, or calling
+/// `audit_response_headers(` a second time itself). Structural proof:
+/// reads the function's own body text.
+#[test]
+fn technology_marker_headers_consume_the_canonical_captured_value_only() {
+    let audit_source = read_src_file("features/audit.rs");
+    let fn_start = audit_source
+        .find("pub fn extract_response_header_technology_markers(")
+        .expect("extract_response_header_technology_markers must exist in audit.rs");
+    let fn_end = audit_source[fn_start..]
+        .find("\n}\n")
+        .map(|offset| fn_start + offset)
+        .unwrap_or(audit_source.len());
+    let fn_body = &audit_source[fn_start..fn_end];
+
+    assert!(
+        fn_body.contains("facts.response_headers()"),
+        "extract_response_header_technology_markers must read \
+         facts.response_headers() — the single canonical captured value"
+    );
+    for forbidden in [
+        "page.headers",
+        ".headers.as_ref()",
+        "audit_response_headers(",
+    ] {
+        assert!(
+            !fn_body.contains(forbidden),
+            "extract_response_header_technology_markers must not \
+             reference {forbidden:?} — that would be an independent \
+             header acquisition or a parallel capture path, bypassing \
+             the canonical PageFacts::response_headers() capture"
         );
     }
 }
@@ -6450,10 +6625,14 @@ fn no_shipping_crate_references_the_audit_module() {
             assert!(
                 !file.contents.contains("features::audit")
                     && !file.contents.contains("audit_page")
-                    && !file.contents.contains("analyze_page"),
-                "{name} ({}) must not reference the audit module — \
-                 no CLI/API/MCP/Web Console audit surface is authorized in \
-                 SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001",
+                    && !file.contents.contains("analyze_page")
+                    && !file.contents.contains("extract_technology_markers")
+                    && !file.contents.contains("ObservedTechnologyMarker"),
+                "{name} ({}) must not reference the audit module — no \
+                 CLI/API/MCP/Web Console audit or technology-marker \
+                 surface is authorized in \
+                 SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001 or \
+                 SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001",
                 file.relative_path
             );
         }

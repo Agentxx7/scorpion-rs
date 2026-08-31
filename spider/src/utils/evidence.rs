@@ -169,6 +169,19 @@ pub struct EvidenceBundle {
 /// *attribute* representation (`Secure`/`HttpOnly`/`SameSite` presence,
 /// never the cookie value) — that is a deliberately separate design
 /// decision, not made here.
+///
+/// `x-generator` was added by
+/// `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` for the same reason
+/// `server`/`x-powered-by` were already here: it is a response header the
+/// remote system uses to *voluntarily self-declare* a technology-identifying
+/// value (e.g. a CMS setting `X-Generator: Drupal 9`), carries no
+/// session/credential/bearer material of its own (unlike `Set-Cookie`,
+/// `Authorization`, or `Cookie` — none of which are, or will ever be,
+/// allowlisted here), and is read through the exact same closed-allowlist,
+/// raw-bytes, never-fabricated capture this function already provides —
+/// broadening the allowlist by one more self-declared, non-credential
+/// header name preserves every existing privacy/security guarantee this
+/// module makes.
 pub const AUDIT_RESPONSE_HEADER_ALLOWLIST: &[&str] = &[
     "content-language",
     "x-robots-tag",
@@ -185,6 +198,7 @@ pub const AUDIT_RESPONSE_HEADER_ALLOWLIST: &[&str] = &[
     "access-control-allow-headers",
     "server",
     "x-powered-by",
+    "x-generator",
 ];
 
 /// Extract every value `headers` actually carries for each
@@ -1035,6 +1049,21 @@ mod tests {
             );
         }
 
+        // D2: x-generator survives when present (added by
+        // SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001 — see this
+        // constant's own doc comment for why).
+        #[test]
+        fn x_generator_survives_when_present() {
+            let mut headers = HeaderMap::new();
+            let (name, value) = header("x-generator", "Drupal 9 (https://www.drupal.org)");
+            headers.insert(name, value);
+            let observed = audit_response_headers(&headers);
+            assert_eq!(
+                observed.get("x-generator"),
+                Some(&vec![b"Drupal 9 (https://www.drupal.org)".to_vec()])
+            );
+        }
+
         // E: multiple values for one retained header preserve every value.
         #[test]
         fn multiple_values_for_one_header_are_all_preserved() {
@@ -1139,6 +1168,45 @@ mod tests {
             assert_eq!(bundle.response_headers, None);
             let serialized = serde_json::to_string(&bundle).unwrap();
             assert!(!serialized.contains(SENTINEL));
+        }
+
+        // I2 (SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001): the
+        // allowlist itself — not just runtime behavior for one sentinel
+        // header — structurally excludes every credential/session-bearing
+        // header name, and stays a small, fixed, closed list. Added
+        // alongside the `x-generator` extension to prove that extension
+        // preserved this invariant rather than merely asserting it in
+        // prose.
+        #[test]
+        fn allowlist_structurally_excludes_credential_bearing_headers_and_stays_bounded() {
+            for forbidden in [
+                "authorization",
+                "proxy-authorization",
+                "cookie",
+                "set-cookie",
+            ] {
+                assert!(
+                    !AUDIT_RESPONSE_HEADER_ALLOWLIST.contains(&forbidden),
+                    "AUDIT_RESPONSE_HEADER_ALLOWLIST must never contain \
+                     {forbidden:?} — that would reopen credential/session \
+                     persistence risk"
+                );
+            }
+            // Every entry is lowercase (HeaderMap lookup is
+            // case-insensitive, but the allowlist's own spelling must
+            // stay canonical) and the list is small/closed — a bulk
+            // capture-everything allowlist is exactly what this
+            // constant's own doc comment says it must never become.
+            for name in AUDIT_RESPONSE_HEADER_ALLOWLIST {
+                assert_eq!(*name, name.to_lowercase());
+            }
+            assert!(
+                AUDIT_RESPONSE_HEADER_ALLOWLIST.len() <= 20,
+                "AUDIT_RESPONSE_HEADER_ALLOWLIST grew unexpectedly large \
+                 ({} entries) — this is a deliberately small, closed \
+                 allowlist, never a general response-header capture",
+                AUDIT_RESPONSE_HEADER_ALLOWLIST.len()
+            );
         }
 
         // J: Chrome-limited (or any path's) fidelity is never embellished

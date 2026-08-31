@@ -124,7 +124,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
 | CLI | `spider_cli` | canonical Spider public seams, including `run_durable_research`, `read_research_session`, and `EvidenceRef::resolve` | `Agent::research`, `CanonicalPageAcquirer` construction, identity minting, parallel persistence, independent domain logic | `scorpion` binary, including `scorpion research` / `research show` | None |
-| MCP | `spider_mcp` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers`, `spider::features::audit`/`domain_runtime` (`spider_mcp/src/tools/audit.rs` only — see §3.19) | `reqwest::Client` construction, independent domain logic, independent audit rule/technology-marker assembly | `serve_stdio()` | `spider_mcp::evidence` shim |
+| MCP | `spider_mcp` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers`, `spider::features::audit`/`domain_runtime` (`spider_mcp/src/tools/audit.rs` only — see §3.19), `spider::utils::evidence::{EvidenceRef::resolve, read_evidence}` (`spider_mcp/src/tools/evidence_read.rs` only — see §3.19) | `reqwest::Client` construction, independent domain logic, independent audit rule/technology-marker assembly, independent evidence reconstruction | `serve_stdio()` | `spider_mcp::evidence` shim |
 | Agent types | `spider_agent_types` | Pure data | `spider`, `spider_agent` | Data types | None |
 | Agent HTML | `spider_agent_html` | `lol_html` | `spider`, `spider_agent` | `clean_html*()` | None |
 
@@ -631,38 +631,64 @@ shape is described immediately below (still not a second model — see its
 own doc comment).
 
 **Human/AI interface boundary — MCP realized by
-`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`, Web Console still
-future:** `spider_mcp/src/tools/audit.rs` is the single authorized MCP
-consumer — the `spider_audit_page` tool — of `audit_page`/
-`PageAuditResult` (§7.6, §7.7); every other shipping file, in every
-shipping crate, remains forbidden from referencing the audit module or
-its result vocabulary at all
-(`audit_module_has_a_precise_allowed_consumer_boundary`, which also keeps
-every internal assembly primitive — the individual rule functions,
+`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` and
+`SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`, Web Console still future:**
+`spider_mcp/src/tools/audit.rs` is the single authorized MCP consumer —
+the `spider_audit_page` tool — of `audit_page`/`PageAuditResult` (§7.6,
+§7.7); every other shipping file, in every shipping crate, remains
+forbidden from referencing the audit module or its result vocabulary at
+all (`audit_module_has_a_precise_allowed_consumer_boundary`, which also
+keeps every internal assembly primitive — the individual rule functions,
 `PageFacts::from_page`, `EvidencedPageFacts::record`,
 `extract_technology_markers` and its two sub-extractors, `FindingId::derive`,
 `record_finding` — universally forbidden, with no exception even inside
 that one authorized file: an interface calls the aggregate seam, it never
-assembles the capability itself). A future Web Console/API must consume
-the identical seam the same way — never re-derive, re-implement, or
-approximate SEO rule evaluation, security-header rules, technology-marker
-extraction, applicability decisions, rule versions, or `FindingId`
-derivation independently. Both consumers observe the *same*
-`PageAuditResult`/evidence truth:
+assembles the capability itself). `spider_mcp/src/tools/evidence_read.rs`
+is, analogously, the single authorized MCP consumer of the
+persistence-touching evidence read/resolve seam
+(`EvidenceRef::resolve`/`read_evidence`) —
+`evidence_read_tool_has_a_precise_allowed_consumer_boundary` forbids that
+call anywhere else, and
+`evidence_read_tool_has_zero_acquisition_or_audit_capability` proves its
+production code has no acquisition, audit, or persistence-write primitive
+of its own ("read means read": no `fetch_single_page`, no `Website`, no
+`audit_page(`, no `record_evidence(`/`append_history(`/`write_current(`).
+`EvidenceBundle`/`build_evidence` themselves remain broadly usable
+everywhere they already were (`spider_scrape`/`spider_crawl`'s own
+`evidence: true` opt-in, unaffected) — only the durable read/resolve seam
+is newly narrowed, since no shipping interface touched it before this
+frontier. A future Web Console/API must consume the identical seams the
+same way — never re-derive, re-implement, or approximate SEO rule
+evaluation, security-header rules, technology-marker extraction,
+applicability decisions, rule versions, `FindingId` derivation, or
+evidence reconstruction independently. All consumers observe the *same*
+`PageAuditResult`/`EvidenceBundle` truth:
 
 ```text
                        AI
                         │
-                       MCP (spider_mcp/src/tools/audit.rs, realized)
+                       MCP (spider_mcp/src/tools/{audit,evidence_read}.rs, realized)
                         │
                         ▼
-                 canonical audit (audit_page / PageAuditResult)
-                        ▲
+     canonical audit (audit_page / PageAuditResult)
                         │
-                 Web Console/API (still future)
-                        │
-                      human
+                        ▼
+          EvidenceRef ──────────► canonical evidence read
+                                  (EvidenceRef::resolve / EvidenceBundle)
+                                          ▲
+                                          │
+                                  Web Console/API (still future)
+                                          │
+                                        human
 ```
+
+`spider_audit_page`'s returned `evidence_ref` passes directly into
+`spider_evidence_read` with no translation — proven by real MCP
+composition tests (`evidence_read_production_reality.rs`) — so an AI can
+receive a `Finding`/`ObservedTechnologyMarker` through audit and then
+resolve the exact underlying evidence through MCP without any
+reacquisition: zero additional target requests for the read, proven both
+structurally and against a real fixture's request count.
 
 **Persistence binding, realized:** the MCP tool obtains its durable store
 exclusively through `domain_runtime::open_shared_domain_store` (§3.11),
@@ -695,10 +721,15 @@ production-reality tests prove it resolves from a process wholly distinct
 from the one that wrote it. A future Web Console must not reconstruct a
 parallel truth — inspecting "what the AI saw" and "what a human reviewer
 sees" must resolve to the same evidence record, not two independently
-derived ones. MCP exposes no generic `EvidenceRef -> EvidenceBundle` read
-capability yet (deferred candidate:
-`SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) — the audit response itself
-does not need to embed the full evidence bundle.
+derived ones. MCP now exposes exactly this generic
+`EvidenceRef -> EvidenceBundle` read capability — the `spider_evidence_read`
+tool (`SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) — returning the complete
+canonical `EvidenceBundle` directly (no wrapper DTO, no field
+reconstruction, no truncation) for any durably-recorded evidence
+identity, not only audit-produced ones. The audit response itself still
+does not need to embed the full evidence bundle, and does not — this is
+exactly why the read seam exists as a separate tool rather than growing
+`spider_audit_page`'s own response.
 
 ---
 
@@ -1280,5 +1311,19 @@ The following are intentionally not refactored in this frontier:
   literal in any shipping interface's production code outside
   `features/domain_runtime.rs` itself
   (`domain_runtime_seam_owns_database_resolution_not_a_local_literal`)
+
+- The persistence-touching evidence read/resolve seam
+  (`read_evidence(`/`EvidenceRef::resolve(`) is called by exactly one
+  shipping file — `spider_mcp/src/tools/evidence_read.rs` — and by no
+  other file in `spider_cli`, `spider_mcp`, or `scorpion_app`
+  (`evidence_read_tool_has_a_precise_allowed_consumer_boundary`); that
+  one file's production code contains no acquisition, audit, or
+  persistence-write primitive of its own — no `fetch_single_page`,
+  `Website`, `reqwest::Client`, `audit_page(`, `crate::tools::scrape`,
+  `crate::tools::crawl`, `execute_streaming_request`,
+  `resolve_search_provider`, `record_evidence(`, `append_history(`,
+  `write_current(`, or `record_finding(`
+  (`evidence_read_tool_has_zero_acquisition_or_audit_capability`) —
+  "read means read"
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod crawl;
 pub mod crawl_status;
+pub mod evidence_read;
 #[cfg(feature = "feed")]
 pub mod feed;
 pub mod links;

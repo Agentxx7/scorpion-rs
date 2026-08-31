@@ -335,14 +335,21 @@ Interfaces must not:
   the same underlying evidence for both an AI-visible and a human-facing
   consumer — no other file, in any shipping crate, may reference the
   audit module's result vocabulary at all
+- independently resolve/reconstruct durable evidence — the
+  `spider_evidence_read` MCP tool (`spider_mcp/src/tools/evidence_read.rs`,
+  realized by `SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) is the sole
+  authorized shipping consumer of the persistence-touching
+  `EvidenceRef::resolve`/`read_evidence` seam, and returns the canonical
+  `EvidenceBundle` exactly as persisted — no re-fetch, no recalculated
+  hash, no reconstructed provenance, no normalization; "read means read"
 
 Current conformance: `spider_cli` and `spider_mcp` call canonical seams
 (`fetch_single_page_with_options`, `build_evidence`, `Website` crawl seam,
-search providers, and — `spider_mcp` only, through the one authorized
-file above — `audit_page()`/`domain_runtime::open_shared_domain_store()`)
-and hold no duplicate domain models. `spider_cli::oauth` constructs an
-HTTP client as a documented authentication-flow exception — not an
-acquisition path.
+search providers, and — `spider_mcp` only, through the two authorized
+files above — `audit_page()`/`EvidenceRef::resolve()`/
+`domain_runtime::open_shared_domain_store()`) and hold no duplicate
+domain models. `spider_cli::oauth` constructs an HTTP client as a
+documented authentication-flow exception — not an acquisition path.
 
 ---
 

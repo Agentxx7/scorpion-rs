@@ -6910,3 +6910,102 @@ fn every_canonical_identity_prefix_is_pairwise_distinct() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_MCP_CANONICAL_EVIDENCE_READ_001
+// ---------------------------------------------------------------------------
+
+/// Precise allowed-consumer boundary for durable evidence read/resolve,
+/// analogous to audit's own boundary
+/// (`audit_module_has_a_precise_allowed_consumer_boundary`).
+/// `read_evidence`/`EvidenceRef::resolve(` — the persistence-touching
+/// evidence-read operations — are authorized in exactly one shipping
+/// file: `spider_mcp/src/tools/evidence_read.rs`. `EvidenceBundle`/
+/// `build_evidence` remain broadly usable everywhere they already are
+/// (construction from a freshly acquired page — already used by
+/// `spider_scrape`/`spider_crawl`'s own `evidence: true` opt-in) — this
+/// guardrail narrows only the read/resolve seam, which touches durable
+/// persistence and, before this frontier, no shipping interface used at
+/// all.
+#[test]
+fn evidence_read_tool_has_a_precise_allowed_consumer_boundary() {
+    let forbidden_calls = ["read_evidence(", "EvidenceRef::resolve("];
+    let allowed_consumer_files = [("spider_mcp", "tools/evidence_read.rs")];
+
+    for (name, relative) in [
+        ("spider_cli", "spider_cli/src"),
+        ("spider_mcp", "spider_mcp/src"),
+        ("scorpion_app", "scorpion_app/src"),
+    ] {
+        let dir = workspace_root().join(relative);
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            let production = file
+                .contents
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(&file.contents);
+
+            let is_allowed_consumer = allowed_consumer_files.iter().any(|(crate_name, path)| {
+                *crate_name == name && file.relative_path.replace('\\', "/") == *path
+            });
+            if is_allowed_consumer {
+                continue;
+            }
+
+            for forbidden in forbidden_calls {
+                assert!(
+                    !production.contains(forbidden),
+                    "{name} ({}) must not call {forbidden:?} — only \
+                     spider_mcp/src/tools/evidence_read.rs is authorized \
+                     to resolve durable evidence \
+                     (SCORPION_MCP_CANONICAL_EVIDENCE_READ_001)",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}
+
+/// `spider_mcp/src/tools/evidence_read.rs`'s production code has zero
+/// target-acquisition and zero audit capability of its own — "read means
+/// read." Structural proof that the module never imports or calls any
+/// acquisition/audit/search primitive; see this module's own tests for
+/// the behavioral proof (a real fixture's hit count stays zero across an
+/// evidence read).
+#[test]
+fn evidence_read_tool_has_zero_acquisition_or_audit_capability() {
+    let full_source =
+        fs::read_to_string(workspace_root().join("spider_mcp/src/tools/evidence_read.rs"))
+            .expect("failed to read spider_mcp/src/tools/evidence_read.rs");
+    let production = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    for forbidden in [
+        "fetch_single_page",
+        "Website",
+        "reqwest::Client",
+        "audit_page(",
+        "crate::tools::scrape",
+        "crate::tools::crawl",
+        "execute_streaming_request",
+        "resolve_search_provider",
+        "record_evidence(",
+        "append_history(",
+        "write_current(",
+        "record_finding(",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "spider_mcp/src/tools/evidence_read.rs must not reference \
+             {forbidden:?} in production code — this tool reads existing \
+             durable evidence only, it never acquires, audits, or \
+             mutates (SCORPION_MCP_CANONICAL_EVIDENCE_READ_001)"
+        );
+    }
+}

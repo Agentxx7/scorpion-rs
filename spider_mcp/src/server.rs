@@ -13,8 +13,9 @@ use crate::tools::robots_sitemap::RobotsSitemapReadParams;
 use crate::tools::sitemap::SitemapReadParams;
 use crate::tools::{
     audit::AuditPageParams, crawl::CrawlParams, crawl_status::CrawlStatusParams,
-    links::LinksParams, media_search::MediaSearchParams, news_search::NewsSearchParams,
-    scrape::ScrapeParams, search::SearchParams, transform::TransformParams,
+    evidence_read::EvidenceReadParams, links::LinksParams, media_search::MediaSearchParams,
+    news_search::NewsSearchParams, scrape::ScrapeParams, search::SearchParams,
+    transform::TransformParams,
 };
 
 #[derive(Clone)]
@@ -180,6 +181,17 @@ impl SpiderMcpServer {
         Parameters(params): Parameters<AuditPageParams>,
     ) -> Result<String, String> {
         crate::tools::audit::run(params).await
+    }
+
+    #[tool(
+        name = "spider_evidence_read",
+        description = "Read one already-persisted Scorpion EvidenceBundle by canonical EvidenceRef (the exact evidence_ref string returned by spider_audit_page). Performs no network request and does not reconstruct or re-fetch evidence — it resolves an existing durable identity and returns exactly what was recorded, unchanged."
+    )]
+    async fn evidence_read_tool(
+        &self,
+        Parameters(params): Parameters<EvidenceReadParams>,
+    ) -> Result<String, String> {
+        crate::tools::evidence_read::run(params).await
     }
 }
 
@@ -406,6 +418,42 @@ mod tests {
                 "spider_audit_page description must not claim {forbidden:?}: {description:?}"
             );
         }
+    }
+
+    /// Phase 16 (SCORPION_MCP_CANONICAL_EVIDENCE_READ_001): the real
+    /// server router advertises `spider_evidence_read` with exactly one
+    /// authorized property (`evidence_ref`, required) — no `url`, no
+    /// `refresh`/`fetch_if_missing` property — and its description makes
+    /// the no-network-request/no-reconstruction distinction explicit.
+    #[test]
+    fn spider_evidence_read_tool_is_registered_with_exact_input_schema() {
+        let router = SpiderMcpServer::tool_router();
+        let tools = router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "spider_evidence_read")
+            .expect("spider_evidence_read must be registered in the tool router");
+        let actual = serde_json::Value::Object((*tool.input_schema).clone());
+        let expected = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "evidence_ref": {"description": "The canonical EvidenceRef to read — the exact `evid_...` string returned by spider_audit_page's own `evidence_ref` field, passed through unchanged.", "type": "string"}
+            },
+            "required": ["evidence_ref"]
+        });
+        assert_eq!(actual, expected);
+
+        let description = tool
+            .description
+            .as_deref()
+            .expect("spider_evidence_read must have a description");
+        assert!(description.contains("no network request"));
+        assert!(description.contains("does not reconstruct or re-fetch"));
+        let properties = actual["properties"].as_object().unwrap();
+        assert!(!properties.contains_key("url"));
+        assert!(!properties.contains_key("refresh"));
+        assert!(!properties.contains_key("fetch_if_missing"));
     }
 
     /// Section L (blocker-fix frontier): the full `transport` field

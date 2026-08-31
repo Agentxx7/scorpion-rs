@@ -304,7 +304,7 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # 8d8173f2 re-bind (grep across every docs/frontier/ledger/*.toml for
 # `ci_workflow_file`/`[stages.CLOSED]`): CAPTCHA is the only one that
 # exists in this repository.
-reviewed_commit = "PLACEHOLDER_CONTENT_FIX_COMMIT"
+reviewed_commit = "889c246efc21dbf355f0a3612386677a8f4ea0b6"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -385,4 +385,4 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # authoritative binding; 663c8213, 5223110f, and 8d8173f2 remain
 # accurate as prior attestation points in this history, not as the
 # present claim.
-closed_commit = "PLACEHOLDER_CONTENT_FIX_COMMIT"
+closed_commit = "889c246efc21dbf355f0a3612386677a8f4ea0b6"

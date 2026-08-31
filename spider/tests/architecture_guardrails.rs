@@ -6285,8 +6285,242 @@ fn evidenced_page_facts_record_is_the_single_canonical_association_seam() {
     );
     assert!(
         audit_source.contains("EvidencedPageFacts::record(store, &page)"),
-        "audit_seo_canonical_missing (and any future analyzer) must call \
+        "audit_page (and any future analyzer entrypoint) must call \
          EvidencedPageFacts::record — never build its own independent \
          evidence/PageFacts pairing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001
+// ---------------------------------------------------------------------------
+//
+// Eleven production page rules (seven SEO, four passive security) now run
+// over one EvidencedPageFacts value via a single generic analyzer
+// (`analyze_page`) and a single generic execution seam (`audit_page`).
+// These guardrails encode that frontier's own architectural decisions —
+// one acquisition/evidence-recording per page, HTML applicability required
+// before any DOM SEO rule fires, header-absence rules requiring observed
+// headers, no technology inference, no new shipping surface, no new
+// dependency — so a later change cannot silently regress any of them.
+
+/// Exactly one acquisition primitive call
+/// (`fetch_single_page`) may exist in `audit.rs`'s production code — the
+/// single generic seam, never one acquisition entrypoint per rule.
+#[test]
+fn audit_module_performs_exactly_one_acquisition_call_in_production_code() {
+    let full_source = read_src_file("features/audit.rs");
+    let production_only = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    let occurrences = production_only.matches("fetch_single_page(url)").count();
+    assert_eq!(
+        occurrences, 1,
+        "audit.rs's production code must call fetch_single_page(url) \
+         exactly once — the single generic audit_page seam, never a \
+         per-rule acquisition entrypoint"
+    );
+}
+
+/// Every HTML DOM SEO rule function must consult
+/// `page_content_seo_applicable` before evaluating its predicate — a
+/// non-HTML or non-2xx page must never reach a DOM SEO rule's fact
+/// checks at all.
+#[test]
+fn every_html_dom_seo_rule_checks_page_content_applicability() {
+    let audit_source = read_src_file("features/audit.rs");
+    for rule_fn in [
+        "pub fn seo_canonical_missing(",
+        "pub fn seo_title_missing(",
+        "pub fn seo_meta_description_missing(",
+        "pub fn seo_h1_missing(",
+        "pub fn seo_h1_multiple(",
+        "pub fn seo_html_lang_missing(",
+        "pub fn seo_image_alt_missing(",
+    ] {
+        let start = audit_source
+            .find(rule_fn)
+            .unwrap_or_else(|| panic!("{rule_fn} must exist in audit.rs"));
+        let body_end = audit_source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .unwrap_or(audit_source.len());
+        let body = &audit_source[start..body_end];
+        assert!(
+            body.contains("page_content_seo_applicable(facts)"),
+            "{rule_fn} must check page_content_seo_applicable before its \
+             own predicate — every HTML DOM SEO rule shares this one \
+             applicability check"
+        );
+    }
+}
+
+/// Every header-absence security rule must resolve
+/// `response_headers()` through a fallible `?`/`match` on the `Option`
+/// (never `.unwrap_or_default()` or similar) — absence must never be
+/// inferred when header observation itself is unavailable.
+#[test]
+fn every_security_header_rule_requires_observed_headers() {
+    let audit_source = read_src_file("features/audit.rs");
+    for rule_fn in [
+        "pub fn security_hsts_missing(",
+        "pub fn security_csp_missing(",
+        "pub fn security_x_content_type_options_missing(",
+    ] {
+        let start = audit_source
+            .find(rule_fn)
+            .unwrap_or_else(|| panic!("{rule_fn} must exist in audit.rs"));
+        let body_end = audit_source[start..]
+            .find("\n}\n")
+            .map(|offset| start + offset)
+            .unwrap_or(audit_source.len());
+        let body = &audit_source[start..body_end];
+        assert!(
+            body.contains("= facts.response_headers()?;"),
+            "{rule_fn} must fail closed (via `?`) when response_headers() \
+             is None — header absence must never be inferred from an \
+             unavailable observation surface"
+        );
+    }
+}
+
+/// No technology/CMS/framework/WAF fingerprinting is introduced —
+/// `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` remains a separate,
+/// unauthorized-here frontier. Checked as actual code (comment lines
+/// stripped first — this module's own doc comment legitimately *names*
+/// these concepts in English to explain the deferral).
+#[test]
+fn audit_module_introduces_no_technology_fingerprinting() {
+    let audit_code = strip_comment_lines(&read_src_file("features/audit.rs"));
+    for forbidden in [
+        "cms",
+        "framework_detect",
+        "waf",
+        "fingerprint",
+        "x-powered-by",
+        "cve",
+    ] {
+        assert!(
+            !audit_code.to_lowercase().contains(forbidden),
+            "spider/src/features/audit.rs must not reference {forbidden:?} \
+             in actual code — technology fingerprinting is deliberately \
+             deferred to a successor frontier"
+        );
+    }
+}
+
+/// No network-scanning tool invocation or arbitrary process execution
+/// is introduced anywhere in the audit module — page rules are pure
+/// functions over `EvidencedPageFacts`, never a shell-out.
+#[test]
+fn audit_module_never_shells_out_or_invokes_a_network_scanner() {
+    let audit_source = read_src_file("features/audit.rs");
+    for forbidden in [
+        "std::process::Command",
+        "tokio::process::Command",
+        "Command::new(",
+        "nmap",
+    ] {
+        assert!(
+            !audit_source.contains(forbidden),
+            "spider/src/features/audit.rs must never reference {forbidden:?} \
+             — no Nmap/network-scanning or arbitrary process execution is \
+             authorized in SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001"
+        );
+    }
+}
+
+/// No shipping surface (CLI/API/MCP/Web Console) references the audit
+/// module yet.
+#[test]
+fn no_shipping_crate_references_the_audit_module() {
+    for (name, relative) in [
+        ("spider_cli", "spider_cli/src"),
+        ("spider_mcp", "spider_mcp/src"),
+        ("scorpion_app", "scorpion_app/src"),
+    ] {
+        let dir = workspace_root().join(relative);
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            assert!(
+                !file.contents.contains("features::audit")
+                    && !file.contents.contains("audit_page")
+                    && !file.contents.contains("analyze_page"),
+                "{name} ({}) must not reference the audit module — \
+                 no CLI/API/MCP/Web Console audit surface is authorized in \
+                 SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001",
+                file.relative_path
+            );
+        }
+    }
+}
+
+/// Every production rule id has a distinct wire string, and every rule
+/// id constant has a corresponding, separately declared version
+/// constant.
+#[test]
+fn production_rule_ids_are_unique_and_each_has_an_explicit_version() {
+    let audit_source = read_src_file("features/audit.rs");
+    let rule_id_consts = [
+        "SEO_CANONICAL_MISSING_RULE_ID",
+        "SEO_TITLE_MISSING_RULE_ID",
+        "SEO_META_DESCRIPTION_MISSING_RULE_ID",
+        "SEO_H1_MISSING_RULE_ID",
+        "SEO_H1_MULTIPLE_RULE_ID",
+        "SEO_HTML_LANG_MISSING_RULE_ID",
+        "SEO_IMAGE_ALT_MISSING_RULE_ID",
+        "SECURITY_HTTPS_MISSING_RULE_ID",
+        "SECURITY_HSTS_MISSING_RULE_ID",
+        "SECURITY_CSP_MISSING_RULE_ID",
+        "SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_ID",
+    ];
+    assert_eq!(
+        rule_id_consts.len(),
+        11,
+        "expected exactly 11 production page rules"
+    );
+
+    let mut wire_ids = Vec::new();
+    for id_const in rule_id_consts {
+        let version_const = format!("{}_VERSION", id_const.trim_end_matches("_ID"));
+        assert!(
+            audit_source.contains(&format!("pub const {id_const}: &str")),
+            "{id_const} must be declared in audit.rs"
+        );
+        assert!(
+            audit_source.contains(&format!("pub const {version_const}: u32")),
+            "{id_const} must have a corresponding {version_const} constant"
+        );
+        let decl = format!("pub const {id_const}: &str =");
+        let start = audit_source.find(&decl).unwrap() + decl.len();
+        let rest = &audit_source[start..];
+        let quote_start = rest.find('"').unwrap();
+        let quote_end = rest[quote_start + 1..].find('"').unwrap();
+        wire_ids.push(rest[quote_start + 1..quote_start + 1 + quote_end].to_string());
+    }
+    let mut sorted = wire_ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        wire_ids.len(),
+        "duplicate production rule id wire string among {wire_ids:?}"
+    );
+}
+
+/// `seo.canonical.missing`'s production version is exactly `2` — the
+/// original, applicability-free `1` remains historical only.
+#[test]
+fn canonical_missing_production_version_is_exactly_two() {
+    let audit_source = read_src_file("features/audit.rs");
+    assert!(
+        audit_source.contains("pub const SEO_CANONICAL_MISSING_RULE_VERSION: u32 = 2;"),
+        "SEO_CANONICAL_MISSING_RULE_VERSION must be exactly 2 in production \
+         code — see that constant's own doc comment for why"
     );
 }

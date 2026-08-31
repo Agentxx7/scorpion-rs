@@ -10,11 +10,55 @@
 //!   -> durable Finding readback
 //! ```
 //!
-//! `SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001`. This is the
-//! foundation the queued `SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001`
-//! frontier will build many more rules on top of — deliberately not that
-//! frontier. Exactly one production rule exists here:
-//! [`SEO_CANONICAL_MISSING_RULE_ID`].
+//! `SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001` established
+//! this contract with exactly one rule.
+//! `SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001` turns it into the
+//! first real deterministic page-audit engine: eleven production page
+//! rules (seven SEO, four passive security) evaluated purely over one
+//! [`EvidencedPageFacts`] value by [`analyze_page`], executed by the
+//! single generic seam [`audit_page`].
+//!
+//! # Fetch once, evidence once, parse once, analyze many
+//!
+//! [`audit_page`] performs exactly one acquisition
+//! ([`fetch_single_page`]) and exactly one evidence recording
+//! ([`EvidencedPageFacts::record`]) per audited page — never once per
+//! rule. [`PageFacts::from_page`] performs exactly one HTML fact
+//! extraction pass ([`extract_html_facts`]) covering every authorized
+//! DOM fact, not one `lol_html` parse per rule. Every `Finding`
+//! [`analyze_page`] returns for one page therefore carries the exact
+//! same [`EvidenceRef`] — proven in this module's own
+//! `exact_page_evidence_binding` and `same_evidence_across_rules` test
+//! modules.
+//!
+//! # Applicability
+//!
+//! Reproduced empirically before this frontier's mutation: the original
+//! single rule had no content-type or status applicability check at
+//! all, and produced a false-positive `SEO_CANONICAL_MISSING` Finding
+//! for a `200 text/plain` response, a `200 application/json` response,
+//! and a `404 text/html` error document. Every HTML DOM SEO rule in this
+//! module now reuses one shared predicate,
+//! [`page_content_seo_applicable`]: the final response must be a
+//! successful 2xx *and* the observed representation must be
+//! HTML/XHTML ([`DocumentRepresentation::Html`], derived only from the
+//! declared `Content-Type` — never body sniffing, filename extensions,
+//! search metadata, or AI). Passive security/transport rules state their
+//! own applicability explicitly where it differs (see
+//! [`security_https_missing`], [`security_hsts_missing`]).
+//!
+//! # Header observation vs. header absence
+//!
+//! [`PageFacts::response_headers`] is `Option<BTreeMap<..>>`, not a bare
+//! `BTreeMap`: `None` means header observation itself was unavailable
+//! (`Page.headers` was `None`), `Some(map)` — possibly empty — means
+//! headers *were* observed and `map` names every allowlisted header
+//! actually present. A security-header-absence rule
+//! ([`security_hsts_missing`], [`security_csp_missing`],
+//! [`security_x_content_type_options_missing`]) requires `Some(_)`
+//! before it can produce a Finding at all; when observation itself is
+//! unknown, no Finding is produced — absence is never inferred from an
+//! observation surface that cannot prove it.
 //!
 //! # Truth chain
 //!
@@ -23,17 +67,6 @@
 //! record that *references* evidence by [`EvidenceRef`] — it is never
 //! itself `Evidence`, and it can never be recorded, read back, or
 //! serialized as an [`EvidenceBundle`].
-//!
-//! # Fetch once, observe once, evidence once, analyze many
-//!
-//! No analyzer in this module performs network acquisition — that
-//! remains [`fetch_single_page`]'s sole responsibility (the exact
-//! one-shot primitive every other evidence-first caller in this crate
-//! already uses; see [`audit_seo_canonical_missing`], the only function
-//! here that touches the network). [`PageFacts::from_page`] is a pure,
-//! synchronous, network-free projection of an already-acquired [`Page`]:
-//! it does not call [`Website`](crate::website::Website), `reqwest`, or
-//! any search provider.
 //!
 //! # Discovery/evidence boundary
 //!
@@ -83,20 +116,40 @@
 //! is that content-addressed *derived-record* ids live with their domain
 //! module, not in the canonical random-mint identity registry.
 //!
-//! # Scope firewall (this frontier only)
+//! # Scope firewall
 //!
-//! Not implemented here: any SEO rule beyond `SEO_CANONICAL_MISSING`
-//! (meta description, hreflang, headings, image-alt, structured data,
-//! sitemap, duplicate-content, broken-link); any security rule (CSP/HSTS
-//! evaluation, cookie rules, CORS, mixed content, form security); any
-//! technology/CMS/framework/WAF fingerprinting; any site-wide analytics
-//! (duplicate-title aggregation, orphan detection, canonical loops,
-//! redirect graphs, sitemap drift); any network/Nmap capability
-//! (`NetworkObservation`, port scanning, service detection, process
-//! execution, target admission policy); any CLI/API/MCP/Web Console
-//! surface; and no AI (summarization, severity generation, report
-//! generation). Severity here is fixed rule policy, never observed
-//! evidence and never AI-generated narrative.
+//! Exactly eleven production page rules exist — see [`PAGE_RULES`]. Not
+//! implemented here: canonical conflict/normalization/loops, hreflang,
+//! sitemap/robots.txt/X-Robots-Tag analysis, structured data, OpenGraph
+//! scoring, title/description length or keyword recommendations,
+//! duplicate titles/descriptions across pages, orphan detection,
+//! broken-link graphs; CORS, cookie attribute evaluation, mixed-content
+//! graphs, insecure form actions, CSP/XFO/Referrer-Policy/
+//! Permissions-Policy *quality* evaluation, certificate analysis, any
+//! active probe or exploit technique; any technology/CMS/framework/WAF
+//! fingerprinting or CVE mapping (deliberately deferred — see
+//! `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` below); any
+//! site-wide analytics (duplicate-title aggregation, orphan detection,
+//! canonical loops, redirect graphs, sitemap drift); any network/Nmap
+//! capability (`NetworkObservation`, port scanning, service detection,
+//! process execution, target admission policy); any CLI/API/MCP/Web
+//! Console surface; and no AI (summarization, severity generation,
+//! report generation). Severity here is fixed rule policy, never
+//! observed evidence and never AI-generated narrative — see
+//! [`FindingSeverity`]. A header-absence or scheme Finding states a
+//! deterministic policy check, never a vulnerability, exploitability,
+//! or CVE claim.
+//!
+//! # Technology boundary
+//!
+//! Technology fingerprinting is deliberately out of scope here: the
+//! `Finding` contract is predicate-shaped (observed condition vs.
+//! expected condition), and an observation-only fact like `Server:
+//! nginx/1.24` or an inference like "likely Next.js" has no truthful
+//! "expected" counterpart to contort it into. A successor frontier,
+//! `SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001`, must introduce its
+//! own model distinguishing an observed marker from an inferred
+//! technology from a vulnerability claim — not solved accidentally here.
 
 use crate::features::domain_persistence::{DomainPersistence, PersistenceError};
 use crate::page::Page;
@@ -109,16 +162,301 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::SystemTime;
 
-/// Stable semantic identity of this frontier's sole production rule.
-/// Follows the `<category>.<check>` naming Phase 21 of the authorizing
-/// frontier specified.
+// Stable semantic identities and deterministic predicate versions for
+// every production page rule. Naming follows `<category>.<check>`
+// (Phase 21 of the authorizing frontier). A rule's *version* is
+// independent of crate/package version — a future behavior change to a
+// predicate must bump only that rule's own constant, never
+// `Cargo.toml`'s version, and never silently.
+//
+// `SEO_CANONICAL_MISSING_RULE_VERSION` is `2`, not `1`: the original
+// `SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001` predicate had
+// no applicability check at all (reproduced empirically: it false-
+// positived on `200 text/plain`, `200 application/json`, and
+// `404 text/html`). Historical `version = 1` Finding payloads remain
+// fully readable — `Finding`'s shape, `FindingId::derive`'s formula, and
+// `FindingCondition::CanonicalLinkCount`/`CanonicalLinkCountAtLeast`'s
+// `identity_repr()` are all byte-identical to before; only the *value*
+// fed into `rule_version` at execution time changed, which the identity
+// formula already treats as ordinary data — see
+// `historical_compatibility` in this module's tests.
+/// Rule id: zero `<link rel="canonical">` observations.
 pub const SEO_CANONICAL_MISSING_RULE_ID: &str = "seo.canonical.missing";
+/// Deterministic predicate version for
+/// [`SEO_CANONICAL_MISSING_RULE_ID`]. `2`, not `1` — see the module-level
+/// comment directly above.
+pub const SEO_CANONICAL_MISSING_RULE_VERSION: u32 = 2;
 
-/// Deterministic version of [`SEO_CANONICAL_MISSING_RULE_ID`]'s
-/// predicate. Independent of crate/package version — a future behavior
-/// change to the predicate (e.g. treating a self-referential canonical
-/// differently) must bump this, never `Cargo.toml`'s version.
-pub const SEO_CANONICAL_MISSING_RULE_VERSION: u32 = 1;
+/// Rule id: missing/empty `<title>`.
+pub const SEO_TITLE_MISSING_RULE_ID: &str = "seo.title.missing";
+/// Deterministic predicate version for [`SEO_TITLE_MISSING_RULE_ID`].
+pub const SEO_TITLE_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: missing/empty `<meta name="description">`.
+pub const SEO_META_DESCRIPTION_MISSING_RULE_ID: &str = "seo.meta_description.missing";
+/// Deterministic predicate version for
+/// [`SEO_META_DESCRIPTION_MISSING_RULE_ID`].
+pub const SEO_META_DESCRIPTION_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: zero `<h1>` elements.
+pub const SEO_H1_MISSING_RULE_ID: &str = "seo.h1.missing";
+/// Deterministic predicate version for [`SEO_H1_MISSING_RULE_ID`].
+pub const SEO_H1_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: more than one `<h1>` element.
+pub const SEO_H1_MULTIPLE_RULE_ID: &str = "seo.h1.multiple";
+/// Deterministic predicate version for [`SEO_H1_MULTIPLE_RULE_ID`].
+pub const SEO_H1_MULTIPLE_RULE_VERSION: u32 = 1;
+
+/// Rule id: missing/empty `<html lang="...">`.
+pub const SEO_HTML_LANG_MISSING_RULE_ID: &str = "seo.html_lang.missing";
+/// Deterministic predicate version for [`SEO_HTML_LANG_MISSING_RULE_ID`].
+pub const SEO_HTML_LANG_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: one or more `<img>` elements missing an `alt` attribute.
+pub const SEO_IMAGE_ALT_MISSING_RULE_ID: &str = "seo.image_alt.missing";
+/// Deterministic predicate version for [`SEO_IMAGE_ALT_MISSING_RULE_ID`].
+pub const SEO_IMAGE_ALT_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: final URL scheme is `http`, not `https`.
+pub const SECURITY_HTTPS_MISSING_RULE_ID: &str = "security.https.missing";
+/// Deterministic predicate version for [`SECURITY_HTTPS_MISSING_RULE_ID`].
+pub const SECURITY_HTTPS_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: `Strict-Transport-Security` absent on an observed `https` response.
+pub const SECURITY_HSTS_MISSING_RULE_ID: &str = "security.hsts.missing";
+/// Deterministic predicate version for [`SECURITY_HSTS_MISSING_RULE_ID`].
+pub const SECURITY_HSTS_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: `Content-Security-Policy` absent (report-only does not satisfy).
+pub const SECURITY_CSP_MISSING_RULE_ID: &str = "security.csp.missing";
+/// Deterministic predicate version for [`SECURITY_CSP_MISSING_RULE_ID`].
+pub const SECURITY_CSP_MISSING_RULE_VERSION: u32 = 1;
+
+/// Rule id: `X-Content-Type-Options` absent (value not yet evaluated).
+pub const SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_ID: &str =
+    "security.x_content_type_options.missing";
+/// Deterministic predicate version for
+/// [`SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_ID`].
+pub const SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_VERSION: u32 = 1;
+
+/// Truthful classification of what kind of document representation was
+/// observed — derived *only* from the declared `Content-Type` (parameters
+/// like `; charset=utf-8` ignored, matched case-insensitively). Never
+/// inferred from body sniffing (`bytes.starts_with(b"<html")`), a
+/// filename extension, search/discovery metadata, or AI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentRepresentation {
+    /// Declared `Content-Type` is `text/html` or `application/xhtml+xml`.
+    Html,
+    /// A `Content-Type` was observed and it is not HTML/XHTML.
+    NonHtml,
+    /// No `Content-Type` was observed, or it could not be parsed — there
+    /// is insufficient information to classify. Never silently promoted
+    /// to `Html`.
+    Unknown,
+}
+
+/// The declared `Content-Type` header value, verbatim, when present.
+fn declared_content_type(page: &Page) -> Option<String> {
+    page.headers
+        .as_ref()
+        .and_then(|headers| headers.get("content-type"))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Classify `content_type` into a [`DocumentRepresentation`]. Parameters
+/// (`; charset=...`) are stripped before comparison; the base media type
+/// is matched case-insensitively.
+fn classify_representation(content_type: Option<&str>) -> DocumentRepresentation {
+    let Some(raw) = content_type else {
+        return DocumentRepresentation::Unknown;
+    };
+    let base = raw
+        .split(';')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "text/html" | "application/xhtml+xml" => DocumentRepresentation::Html,
+        "" => DocumentRepresentation::Unknown,
+        _ => DocumentRepresentation::NonHtml,
+    }
+}
+
+/// True iff a page-content HTML DOM SEO rule may apply to `facts`: the
+/// final response was a successful 2xx *and* the observed representation
+/// is HTML/XHTML. Every HTML DOM SEO rule in this module reuses this one
+/// predicate — never duplicated independently per rule. Passive
+/// security/transport rules state their own, different applicability
+/// explicitly (see [`security_https_missing`], [`security_hsts_missing`]).
+fn page_content_seo_applicable(facts: &PageFacts) -> bool {
+    is_success_2xx(facts.effective_status) && facts.representation == DocumentRepresentation::Html
+}
+
+fn is_success_2xx(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+/// One-pass, deterministic extraction of every authorized HTML DOM fact
+/// this frontier's rules need. Only ever computed by
+/// [`PageFacts::from_page`] when the page's own
+/// [`DocumentRepresentation`] is [`DocumentRepresentation::Html`] —
+/// parsing non-HTML/unknown-representation bytes as HTML would not be
+/// truthful.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HtmlPageFacts {
+    canonical_links: Vec<String>,
+    title_present: bool,
+    meta_description_present: bool,
+    h1_count: usize,
+    html_lang_present: bool,
+    image_count: usize,
+    images_missing_alt: usize,
+}
+
+impl HtmlPageFacts {
+    /// Every `<link rel="canonical" href="...">` observation, in
+    /// document order. Search title/snippet/provider score, discovery
+    /// metadata, an HTTP `Link` header, and an OpenGraph URL are never
+    /// treated as an HTML canonical element.
+    pub fn canonical_links(&self) -> &[String] {
+        &self.canonical_links
+    }
+
+    /// `true` only when a real `<title>` observation contains
+    /// non-whitespace text.
+    pub fn title_present(&self) -> bool {
+        self.title_present
+    }
+
+    /// `true` only when a real `<meta name="description" content="...">`
+    /// observation's `content` contains non-whitespace text.
+    pub fn meta_description_present(&self) -> bool {
+        self.meta_description_present
+    }
+
+    /// The exact number of `<h1>` elements observed. Wording/content
+    /// quality is never evaluated.
+    pub fn h1_count(&self) -> usize {
+        self.h1_count
+    }
+
+    /// `true` only when `<html lang="...">` carries a non-empty,
+    /// non-whitespace value.
+    pub fn html_lang_present(&self) -> bool {
+        self.html_lang_present
+    }
+
+    /// The total number of `<img>` elements observed.
+    pub fn image_count(&self) -> usize {
+        self.image_count
+    }
+
+    /// The number of `<img>` elements whose `alt` attribute is entirely
+    /// absent. `<img alt="">` (a valid, intentional decorative-image
+    /// marker) never counts here — only a genuinely missing attribute
+    /// does.
+    pub fn images_missing_alt(&self) -> usize {
+        self.images_missing_alt
+    }
+}
+
+/// Truthfully extract every authorized HTML DOM fact from `html` in one
+/// deterministic pass. Reuses this crate's existing `lol_html`
+/// infrastructure (the same synchronous, side-effecting `element!`/
+/// `text!` handler pattern `crate::utils::clean_html_base` and
+/// `crate::page::metadata_handlers` already use) — no new HTML parser
+/// dependency, and this module deliberately does not reuse
+/// `crate::page::metadata_handlers`/`Page::metadata` itself: that
+/// function is coupled to the Chrome/streaming link-extraction pipeline
+/// (different lifetimes, different composition point), and empirical
+/// testing (`fetch_single_page` against a real fixture server) showed
+/// `Page::metadata` population depends on that pipeline's own link-
+/// extraction configuration rather than being unconditionally guaranteed
+/// on every acquisition this seam might run under — so this module owns
+/// one small, fully self-contained, independently testable extraction
+/// pass instead of taking on that hidden dependency.
+fn extract_html_facts(html: &str) -> HtmlPageFacts {
+    use lol_html::{element, rewrite_str, text, RewriteStrSettings};
+    use std::cell::Cell;
+    use std::cell::RefCell;
+
+    let canonical_links: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    let title_present = Cell::new(false);
+    let meta_description_present = Cell::new(false);
+    let h1_count = Cell::new(0_usize);
+    let html_lang_present = Cell::new(false);
+    let image_count = Cell::new(0_usize);
+    let images_missing_alt = Cell::new(0_usize);
+
+    // catch_unwind guards against lol_html's internal panic on malformed
+    // encodings, exactly like `clean_html_base` — a page whose HTML
+    // cannot be safely rewritten yields every fact at its truthful
+    // zero/absent default rather than propagating a panic into the audit
+    // seam.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rewrite_str(
+            html,
+            RewriteStrSettings {
+                element_content_handlers: vec![
+                    element!("link[rel=\"canonical\"]", |el| {
+                        if let Some(href) = el.get_attribute("href") {
+                            canonical_links.borrow_mut().push(href);
+                        }
+                        Ok(())
+                    }),
+                    element!("html", |el| {
+                        if let Some(lang) = el.get_attribute("lang") {
+                            if !lang.trim().is_empty() {
+                                html_lang_present.set(true);
+                            }
+                        }
+                        Ok(())
+                    }),
+                    text!("title", |chunk| {
+                        if !chunk.as_str().trim().is_empty() {
+                            title_present.set(true);
+                        }
+                        Ok(())
+                    }),
+                    element!("meta[name=\"description\"]", |el| {
+                        if let Some(content) = el.get_attribute("content") {
+                            if !content.trim().is_empty() {
+                                meta_description_present.set(true);
+                            }
+                        }
+                        Ok(())
+                    }),
+                    element!("h1", |_el| {
+                        h1_count.set(h1_count.get() + 1);
+                        Ok(())
+                    }),
+                    element!("img", |el| {
+                        image_count.set(image_count.get() + 1);
+                        if el.get_attribute("alt").is_none() {
+                            images_missing_alt.set(images_missing_alt.get() + 1);
+                        }
+                        Ok(())
+                    }),
+                ],
+                ..RewriteStrSettings::default()
+            },
+        )
+    }));
+
+    HtmlPageFacts {
+        canonical_links: canonical_links.into_inner(),
+        title_present: title_present.get(),
+        meta_description_present: meta_description_present.get(),
+        h1_count: h1_count.get(),
+        html_lang_present: html_lang_present.get(),
+        image_count: image_count.get(),
+        images_missing_alt: images_missing_alt.get(),
+    }
+}
 
 /// Transient, deterministic, network-free projection of one acquired
 /// [`Page`]'s audit-relevant facts. Never persisted itself — see this
@@ -133,8 +471,15 @@ pub struct PageFacts {
     final_url: String,
     effective_status: u16,
     observed_status: Option<u16>,
-    canonical_links: Vec<String>,
-    response_headers: BTreeMap<String, Vec<Vec<u8>>>,
+    content_type: Option<String>,
+    representation: DocumentRepresentation,
+    /// `None` = header observation itself was unavailable
+    /// (`Page.headers` was `None`). `Some(map)` — possibly empty — =
+    /// headers were observed; `map` names every allowlisted header
+    /// actually present. See this module's doc comment.
+    response_headers: Option<BTreeMap<String, Vec<Vec<u8>>>>,
+    /// `Some` only when `representation == Html`.
+    html: Option<HtmlPageFacts>,
 }
 
 impl PageFacts {
@@ -143,18 +488,20 @@ impl PageFacts {
     /// provider.
     pub fn from_page(page: &Page) -> Self {
         let provenance = page_provenance(page);
-        let response_headers = page
-            .headers
-            .as_ref()
-            .map(audit_response_headers)
-            .unwrap_or_default();
+        let content_type = declared_content_type(page);
+        let representation = classify_representation(content_type.as_deref());
+        let response_headers = page.headers.as_ref().map(audit_response_headers);
+        let html = (representation == DocumentRepresentation::Html)
+            .then(|| extract_html_facts(&page.get_html()));
         Self {
             requested_url: page.get_url().to_string(),
             final_url: page.get_url_final().to_string(),
             effective_status: page.status_code.as_u16(),
             observed_status: provenance.observed_status_code,
-            canonical_links: extract_canonical_links(&page.get_html()),
+            content_type,
+            representation,
             response_headers,
+            html,
         }
     }
 
@@ -181,56 +528,43 @@ impl PageFacts {
         self.observed_status
     }
 
-    /// Every `<link rel="canonical" href="...">` observation truthfully
-    /// extracted from the acquired document, in document order. Search
-    /// title/snippet/provider score, discovery metadata, an HTTP `Link`
-    /// header, and an OpenGraph URL are never treated as an HTML
-    /// canonical element — see [`extract_canonical_links`].
+    /// The declared `Content-Type` header value, verbatim, when observed.
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+
+    /// The truthful HTML/non-HTML/unknown classification — see
+    /// [`DocumentRepresentation`].
+    pub fn representation(&self) -> DocumentRepresentation {
+        self.representation
+    }
+
+    /// Every `<link rel="canonical" href="...">` observation, in
+    /// document order — `&[]` when [`Self::representation`] is not
+    /// [`DocumentRepresentation::Html`]. Convenience accessor; see
+    /// [`Self::html`] for the full HTML fact set.
     pub fn canonical_links(&self) -> &[String] {
-        &self.canonical_links
+        self.html
+            .as_ref()
+            .map(HtmlPageFacts::canonical_links)
+            .unwrap_or(&[])
+    }
+
+    /// Every authorized HTML DOM fact — `None` when
+    /// [`Self::representation`] is not [`DocumentRepresentation::Html`].
+    pub fn html(&self) -> Option<&HtmlPageFacts> {
+        self.html.as_ref()
     }
 
     /// Every observed value of each closed-allowlist audit-relevant
     /// response header — see
     /// [`audit_response_headers`](crate::utils::evidence::audit_response_headers).
-    pub fn response_headers(&self) -> &BTreeMap<String, Vec<Vec<u8>>> {
-        &self.response_headers
+    /// `None` means header observation itself was unavailable, never
+    /// that headers were observed to be absent — see this module's doc
+    /// comment.
+    pub fn response_headers(&self) -> Option<&BTreeMap<String, Vec<Vec<u8>>>> {
+        self.response_headers.as_ref()
     }
-}
-
-/// Truthfully extract every `<link rel="canonical" href="...">`
-/// observation from `html`, in document order. Reuses this crate's
-/// existing `lol_html` infrastructure (the same synchronous,
-/// side-effecting `element!` handler pattern
-/// `crate::utils::clean_html_base` already uses) — no new HTML parser
-/// dependency. Only the real HTML canonical-link element counts: a
-/// search result's title/snippet, discovery metadata, an HTTP `Link`
-/// header, and an OpenGraph URL are structurally different data this
-/// function never even sees, let alone accepts as a substitute.
-fn extract_canonical_links(html: &str) -> Vec<String> {
-    use lol_html::{element, rewrite_str, RewriteStrSettings};
-    use std::cell::RefCell;
-
-    let found = RefCell::new(Vec::new());
-    // catch_unwind guards against lol_html's internal panic on malformed
-    // encodings, exactly like `clean_html_base` — a page whose HTML
-    // cannot be safely rewritten yields zero canonical-link observations
-    // rather than propagating a panic into the audit seam.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        rewrite_str(
-            html,
-            RewriteStrSettings {
-                element_content_handlers: vec![element!("link[rel=\"canonical\"]", |el| {
-                    if let Some(href) = el.get_attribute("href") {
-                        found.borrow_mut().push(href);
-                    }
-                    Ok(())
-                })],
-                ..RewriteStrSettings::default()
-            },
-        )
-    }));
-    found.into_inner()
 }
 
 /// [`PageFacts`] bound to the exact [`EvidenceRef`] naming the durable
@@ -292,18 +626,21 @@ impl EvidencedPageFacts {
     }
 }
 
-/// Which product area a [`Finding`] belongs to. Exactly one variant has
-/// a real production rule in this frontier: [`FindingCategory::Seo`].
+/// Which product area a [`Finding`] belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindingCategory {
     /// Search-engine-optimization observations.
     Seo,
+    /// Passive security/transport observations — deterministic policy
+    /// checks, never vulnerability, exploitability, or CVE claims.
+    Security,
 }
 
 impl FindingCategory {
     fn as_str(self) -> &'static str {
         match self {
             Self::Seo => "seo",
+            Self::Security => "security",
         }
     }
 }
@@ -336,10 +673,34 @@ impl FindingSeverity {
     }
 }
 
+/// A URL scheme a [`FindingCondition::Scheme`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UrlScheme {
+    /// `http`.
+    Http,
+    /// `https`.
+    Https,
+}
+
+impl UrlScheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 /// A structurally typed observed or expected fact a rule's predicate
 /// compares — never a free-form narrative string like `"SEO is bad"`.
-/// Only the variants `SEO_CANONICAL_MISSING` actually needs exist today;
-/// successor rules add their own.
+/// `CanonicalLinkCount`/`CanonicalLinkCountAtLeast` are load-bearing for
+/// historical Finding identity — see this module's rule-constant doc
+/// comments — and must never change shape or `identity_repr()` wording.
+/// `Present(bool)` is deliberately reused across every simple presence/
+/// absence rule (title, meta description, `html[lang]`, and each
+/// security-header rule) rather than minted once per rule: it is a
+/// closed, typed representation on its own, and its meaning is always
+/// unambiguous alongside the `Finding`'s own `rule_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FindingCondition {
     /// The exact number of `<link rel="canonical">` observations found.
@@ -347,16 +708,37 @@ pub enum FindingCondition {
     /// The minimum number of `<link rel="canonical">` observations
     /// required.
     CanonicalLinkCountAtLeast(usize),
+    /// Whether the fact this condition describes was present.
+    Present(bool),
+    /// The exact number of `<h1>` elements observed.
+    HeadingCount(usize),
+    /// The minimum number of `<h1>` elements required.
+    HeadingCountAtLeast(usize),
+    /// The maximum number of `<h1>` elements allowed.
+    HeadingCountAtMost(usize),
+    /// The exact number of `<img>` elements missing an `alt` attribute.
+    ImagesMissingAlt(usize),
+    /// The URL scheme actually observed or expected.
+    Scheme(UrlScheme),
 }
 
 impl FindingCondition {
     /// Stable, explicit wire representation used only for
     /// [`FindingId`] derivation — never `{:?}` (`Debug` formatting is
-    /// not a serialization contract).
+    /// not a serialization contract). The `CanonicalLinkCount`/
+    /// `CanonicalLinkCountAtLeast` arms are byte-identical to this
+    /// module's original single-rule frontier — changing their wording
+    /// would silently change every historical Finding's identity.
     fn identity_repr(&self) -> String {
         match self {
             Self::CanonicalLinkCount(n) => format!("canonical_link_count={n}"),
             Self::CanonicalLinkCountAtLeast(n) => format!("canonical_link_count>={n}"),
+            Self::Present(present) => format!("present={present}"),
+            Self::HeadingCount(n) => format!("heading_count={n}"),
+            Self::HeadingCountAtLeast(n) => format!("heading_count>={n}"),
+            Self::HeadingCountAtMost(n) => format!("heading_count<={n}"),
+            Self::ImagesMissingAlt(n) => format!("images_missing_alt={n}"),
+            Self::Scheme(scheme) => format!("scheme={}", scheme.as_str()),
         }
     }
 }
@@ -567,28 +949,342 @@ impl std::error::Error for AuditError {
     }
 }
 
-/// The sole production rule this frontier proves. `Some(Finding)` when
-/// `evidenced`'s page carries zero `<link rel="canonical">`
-/// observations, `None` when at least one is present. No severity
-/// gradient, no conflict/loop detection, no normalization policy —
-/// those belong to successor rules.
+/// Build a single-evidence `Finding`. Every production rule in this
+/// module links its `Finding` to exactly the one `EvidenceRef`
+/// `evidenced` carries — never a second, independently-obtained
+/// reference.
+fn single_evidence_finding(
+    rule_id: &str,
+    rule_version: u32,
+    category: FindingCategory,
+    severity: FindingSeverity,
+    target: String,
+    observed: FindingCondition,
+    expected: FindingCondition,
+    evidenced: &EvidencedPageFacts,
+) -> Finding {
+    Finding::new(
+        rule_id,
+        rule_version,
+        category,
+        severity,
+        target,
+        observed,
+        expected,
+        vec![evidenced.evidence_ref],
+    )
+    .expect("EvidencedPageFacts always carries exactly one EvidenceRef")
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// (see [`page_content_seo_applicable`]) carrying zero
+/// `<link rel="canonical">` observations, `None` otherwise. No severity
+/// gradient, no conflict/loop detection, no normalization policy — those
+/// belong to successor rules. Version `2`: see
+/// [`SEO_CANONICAL_MISSING_RULE_VERSION`]'s own doc comment for why this
+/// changed from the original, applicability-free version `1`.
 pub fn seo_canonical_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
-    if !evidenced.facts.canonical_links.is_empty() {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
         return None;
     }
-    Some(
-        Finding::new(
-            SEO_CANONICAL_MISSING_RULE_ID,
-            SEO_CANONICAL_MISSING_RULE_VERSION,
-            FindingCategory::Seo,
-            FindingSeverity::Medium,
-            evidenced.facts.final_url.clone(),
-            FindingCondition::CanonicalLinkCount(0),
-            FindingCondition::CanonicalLinkCountAtLeast(1),
-            vec![evidenced.evidence_ref],
-        )
-        .expect("EvidencedPageFacts always carries exactly one EvidenceRef"),
-    )
+    if !facts.html()?.canonical_links().is_empty() {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_CANONICAL_MISSING_RULE_ID,
+        SEO_CANONICAL_MISSING_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Medium,
+        facts.final_url().to_string(),
+        FindingCondition::CanonicalLinkCount(0),
+        FindingCondition::CanonicalLinkCountAtLeast(1),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// with no non-whitespace `<title>` text, `None` otherwise.
+pub fn seo_title_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    if facts.html()?.title_present() {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_TITLE_MISSING_RULE_ID,
+        SEO_TITLE_MISSING_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Medium,
+        facts.final_url().to_string(),
+        FindingCondition::Present(false),
+        FindingCondition::Present(true),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// with no non-whitespace `<meta name="description">` content, `None`
+/// otherwise.
+pub fn seo_meta_description_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    if facts.html()?.meta_description_present() {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_META_DESCRIPTION_MISSING_RULE_ID,
+        SEO_META_DESCRIPTION_MISSING_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Low,
+        facts.final_url().to_string(),
+        FindingCondition::Present(false),
+        FindingCondition::Present(true),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// with zero `<h1>` elements, `None` otherwise.
+pub fn seo_h1_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    if facts.html()?.h1_count() != 0 {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_H1_MISSING_RULE_ID,
+        SEO_H1_MISSING_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Low,
+        facts.final_url().to_string(),
+        FindingCondition::HeadingCount(0),
+        FindingCondition::HeadingCountAtLeast(1),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// with more than one `<h1>` element, `None` otherwise. This is rule
+/// policy, not a claimed security defect or indexing failure.
+pub fn seo_h1_multiple(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    let h1_count = facts.html()?.h1_count();
+    if h1_count <= 1 {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_H1_MULTIPLE_RULE_ID,
+        SEO_H1_MULTIPLE_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Low,
+        facts.final_url().to_string(),
+        FindingCondition::HeadingCount(h1_count),
+        FindingCondition::HeadingCountAtMost(1),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// with no non-empty `<html lang="...">` value, `None` otherwise.
+pub fn seo_html_lang_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    if facts.html()?.html_lang_present() {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_HTML_LANG_MISSING_RULE_ID,
+        SEO_HTML_LANG_MISSING_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Low,
+        facts.final_url().to_string(),
+        FindingCondition::Present(false),
+        FindingCondition::Present(true),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document
+/// with one or more `<img>` elements entirely missing their `alt`
+/// attribute, `None` otherwise. `<img alt="">` (intentionally
+/// decorative) never counts. Produces exactly one page-level Finding
+/// carrying the observed count — never one Finding per image.
+pub fn seo_image_alt_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    let missing = facts.html()?.images_missing_alt();
+    if missing == 0 {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SEO_IMAGE_ALT_MISSING_RULE_ID,
+        SEO_IMAGE_ALT_MISSING_RULE_VERSION,
+        FindingCategory::Seo,
+        FindingSeverity::Low,
+        facts.final_url().to_string(),
+        FindingCondition::ImagesMissingAlt(missing),
+        FindingCondition::ImagesMissingAlt(0),
+        evidenced,
+    ))
+}
+
+/// The scheme `url` actually uses, when it parses as `http`/`https`;
+/// `None` for anything else (unparseable, or a non-HTTP(S) scheme) — no
+/// guessing.
+fn url_scheme(url: &str) -> Option<UrlScheme> {
+    let parsed = url::Url::parse(url).ok()?;
+    match parsed.scheme() {
+        "http" => Some(UrlScheme::Http),
+        "https" => Some(UrlScheme::Https),
+        _ => None,
+    }
+}
+
+/// `Some(Finding)` when `evidenced`'s final URL scheme is `http`, `None`
+/// otherwise. Applicability differs from the HTML DOM SEO rules above:
+/// this applies to any successfully acquired page with an observed final
+/// URL (the seam already guarantees a `Page` was acquired to reach the
+/// analyzer at all) — status code and representation are irrelevant. No
+/// active probe, no second request: purely a read of the already-
+/// acquired final URL.
+pub fn security_https_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    let scheme = url_scheme(facts.final_url())?;
+    if scheme == UrlScheme::Https {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SECURITY_HTTPS_MISSING_RULE_ID,
+        SECURITY_HTTPS_MISSING_RULE_VERSION,
+        FindingCategory::Security,
+        FindingSeverity::High,
+        facts.final_url().to_string(),
+        FindingCondition::Scheme(UrlScheme::Http),
+        FindingCondition::Scheme(UrlScheme::Https),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s final URL is `https`, response
+/// headers were actually observed, and `Strict-Transport-Security` is
+/// absent from that observed set. When header observation itself is
+/// unknown (`response_headers()` is `None`), no Finding is produced —
+/// absence is never inferred from an observation surface that cannot
+/// prove it.
+pub fn security_hsts_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if url_scheme(facts.final_url()) != Some(UrlScheme::Https) {
+        return None;
+    }
+    let headers = facts.response_headers()?;
+    if headers.contains_key("strict-transport-security") {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SECURITY_HSTS_MISSING_RULE_ID,
+        SECURITY_HSTS_MISSING_RULE_VERSION,
+        FindingCategory::Security,
+        FindingSeverity::Medium,
+        facts.final_url().to_string(),
+        FindingCondition::Present(false),
+        FindingCondition::Present(true),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document,
+/// response headers were actually observed, and `Content-Security-Policy`
+/// is absent. `Content-Security-Policy-Report-Only` does **not** satisfy
+/// enforcement CSP presence for this rule. CSP directive quality is not
+/// evaluated — a separate future rule.
+pub fn security_csp_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    let headers = facts.response_headers()?;
+    if headers.contains_key("content-security-policy") {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SECURITY_CSP_MISSING_RULE_ID,
+        SECURITY_CSP_MISSING_RULE_VERSION,
+        FindingCategory::Security,
+        FindingSeverity::Medium,
+        facts.final_url().to_string(),
+        FindingCondition::Present(false),
+        FindingCondition::Present(true),
+        evidenced,
+    ))
+}
+
+/// `Some(Finding)` when `evidenced`'s page is a successful HTML document,
+/// response headers were actually observed, and
+/// `X-Content-Type-Options` is absent. Its value is not yet evaluated
+/// (whether it equals `nosniff`) — a separate future rule.
+pub fn security_x_content_type_options_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
+    let facts = evidenced.facts();
+    if !page_content_seo_applicable(facts) {
+        return None;
+    }
+    let headers = facts.response_headers()?;
+    if headers.contains_key("x-content-type-options") {
+        return None;
+    }
+    Some(single_evidence_finding(
+        SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_ID,
+        SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_VERSION,
+        FindingCategory::Security,
+        FindingSeverity::Low,
+        facts.final_url().to_string(),
+        FindingCondition::Present(false),
+        FindingCondition::Present(true),
+        evidenced,
+    ))
+}
+
+/// Every authorized production page rule, in stable, explicit
+/// declaration order — never `HashMap`/iteration-order-dependent. The
+/// sole rule registry: [`analyze_page`] and this module's own tests both
+/// enumerate exactly this list, never a separately maintained one.
+pub const PAGE_RULES: &[fn(&EvidencedPageFacts) -> Option<Finding>] = &[
+    seo_canonical_missing,
+    seo_title_missing,
+    seo_meta_description_missing,
+    seo_h1_missing,
+    seo_h1_multiple,
+    seo_html_lang_missing,
+    seo_image_alt_missing,
+    security_https_missing,
+    security_hsts_missing,
+    security_csp_missing,
+    security_x_content_type_options_missing,
+];
+
+/// Run every authorized production page rule over `evidenced`, purely
+/// and network-free, in [`PAGE_RULES`]'s deterministic order. No rule
+/// may fetch, record evidence, create another `Page`, call `Website`/
+/// `reqwest`/any search provider, or mutate persistence — every rule
+/// here is a pure function of already-derived facts.
+pub fn analyze_page(evidenced: &EvidencedPageFacts) -> Vec<Finding> {
+    PAGE_RULES
+        .iter()
+        .filter_map(|rule| rule(evidenced))
+        .collect()
 }
 
 /// Durably record `finding`, first verifying every `EvidenceRef` it
@@ -646,27 +1342,64 @@ pub async fn read_finding(
     }
 }
 
-/// The internal canonical audit execution seam:
-/// acquire exactly one page (through [`fetch_single_page`], the same
-/// one-shot primitive every other evidence-first caller uses) -> record
-/// its evidence -> derive [`PageFacts`] from that *exact same* `Page` ->
-/// run [`seo_canonical_missing`] -> persist any resulting [`Finding`].
-/// This is not a CLI/API/MCP/Web Console surface — see this module's doc
-/// comment.
-pub async fn audit_seo_canonical_missing(
+/// The smallest internal result proving one page audit's architecture:
+/// the exact [`EvidenceRef`] every returned [`Finding`] is linked to, and
+/// the deterministic Finding list itself. Not a shipping DTO — no API,
+/// UI, MCP, or CLI schema is authorized in this frontier.
+#[derive(Debug, Clone)]
+pub struct PageAuditResult {
+    evidence_ref: EvidenceRef,
+    findings: Vec<Finding>,
+}
+
+impl PageAuditResult {
+    /// The evidence every `Finding` in [`Self::findings`] is linked to —
+    /// always the exact evidence recorded for the one `Page` this audit
+    /// acquired.
+    pub fn evidence_ref(&self) -> EvidenceRef {
+        self.evidence_ref
+    }
+
+    /// Every persisted `Finding` produced by this audit, in
+    /// [`PAGE_RULES`]'s deterministic order.
+    pub fn findings(&self) -> &[Finding] {
+        &self.findings
+    }
+}
+
+/// The internal, generic canonical audit execution seam — the *only*
+/// production acquisition entrypoint in this module, reused by every
+/// current and future page rule (never one acquisition entrypoint per
+/// rule):
+/// acquire exactly one page ([`fetch_single_page`], the same one-shot
+/// primitive every other evidence-first caller uses) -> record its
+/// evidence and derive [`PageFacts`] from that *exact same* `Page`
+/// ([`EvidencedPageFacts::record`]) -> run every rule in [`PAGE_RULES`]
+/// ([`analyze_page`]) -> persist each resulting [`Finding`]
+/// ([`record_finding`]). Exactly one acquisition, exactly one evidence
+/// recording, per audited page — every returned `Finding` therefore
+/// shares [`PageAuditResult::evidence_ref`]. This is not a CLI/API/MCP/
+/// Web Console surface — see this module's doc comment.
+pub async fn audit_page(
     store: &DomainPersistence,
     url: &str,
-) -> Result<Option<Finding>, AuditError> {
+) -> Result<PageAuditResult, AuditError> {
     let page = fetch_single_page(url)
         .await
         .map_err(AuditError::Acquisition)?;
 
     let evidenced = EvidencedPageFacts::record(store, &page).await?;
+    let evidence_ref = evidenced.evidence_ref();
 
-    match seo_canonical_missing(&evidenced) {
-        Some(finding) => Ok(Some(record_finding(store, finding).await?)),
-        None => Ok(None),
+    let mut findings = Vec::new();
+    for finding in analyze_page(&evidenced) {
+        findings.push(record_finding(store, finding).await?);
     }
+
+    Ok(PageAuditResult {
+        evidence_ref,
+        findings,
+    })
 }
 
 #[cfg(test)]
@@ -675,15 +1408,56 @@ mod tests {
     use crate::page::build;
     use crate::utils::PageResponse;
 
-    fn page_with_html(url: &str, html: &str) -> Page {
+    /// A page with an explicit `Content-Type`, status, and (optionally)
+    /// extra response headers — the general-purpose fixture builder every
+    /// applicability/header test below uses.
+    fn page_with(
+        url: &str,
+        body: &str,
+        content_type: &str,
+        status: reqwest::StatusCode,
+        extra_headers: &[(&'static str, &str)],
+    ) -> Page {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_str(content_type).unwrap(),
+        );
+        for (name, value) in extra_headers {
+            headers.insert(
+                reqwest::header::HeaderName::from_static(name),
+                reqwest::header::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        build(
+            url,
+            PageResponse {
+                content: Some(body.as_bytes().to_vec()),
+                status_code: status,
+                headers: Some(headers),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// A page whose response never captured any headers at all —
+    /// `PageFacts::response_headers()` must be `None`, not `Some(empty)`.
+    fn page_with_no_headers(url: &str, html: &str) -> Page {
         build(
             url,
             PageResponse {
                 content: Some(html.as_bytes().to_vec()),
                 status_code: reqwest::StatusCode::OK,
+                headers: None,
                 ..Default::default()
             },
         )
+    }
+
+    /// A successful (`200 text/html`) page — the default shape almost
+    /// every rule/extraction test below builds on.
+    fn page_with_html(url: &str, html: &str) -> Page {
+        page_with(url, html, "text/html", reqwest::StatusCode::OK, &[])
     }
 
     async fn record(store: &DomainPersistence, page: &Page) -> EvidenceRef {
@@ -749,7 +1523,7 @@ mod tests {
             assert_eq!(resolved.requested_url.as_deref(), Some(page_a.get_url()));
             let content = resolved.content.unwrap();
             assert!(
-                extract_canonical_links(&content).is_empty(),
+                extract_html_facts(&content).canonical_links().is_empty(),
                 "resolved evidence must genuinely be Page A's own content"
             );
         }
@@ -805,22 +1579,22 @@ mod tests {
         }
     }
 
-    mod canonical_extraction {
+    mod html_fact_extraction {
         use super::*;
 
         #[test]
         fn extracts_a_present_canonical_link() {
             let html = r#"<html><head><link rel="canonical" href="https://example.test/product"></head></html>"#;
             assert_eq!(
-                extract_canonical_links(html),
-                vec!["https://example.test/product".to_string()]
+                extract_html_facts(html).canonical_links(),
+                &["https://example.test/product".to_string()]
             );
         }
 
         #[test]
         fn no_canonical_link_yields_empty() {
             let html = "<html><head><title>Example</title></head><body>hello</body></html>";
-            assert!(extract_canonical_links(html).is_empty());
+            assert!(extract_html_facts(html).canonical_links().is_empty());
         }
 
         #[test]
@@ -833,7 +1607,70 @@ mod tests {
                 <meta name="title" content="Example">
                 <link rel="alternate" href="https://example.test/rss">
             </head></html>"#;
-            assert!(extract_canonical_links(html).is_empty());
+            assert!(extract_html_facts(html).canonical_links().is_empty());
+        }
+
+        #[test]
+        fn title_present_only_with_non_whitespace_text() {
+            assert!(
+                extract_html_facts("<html><head><title>Example</title></head></html>")
+                    .title_present()
+            );
+            assert!(
+                !extract_html_facts("<html><head><title>   </title></head></html>").title_present()
+            );
+            assert!(!extract_html_facts("<html><head></head></html>").title_present());
+        }
+
+        #[test]
+        fn meta_description_present_only_with_non_whitespace_content() {
+            let present = r#"<html><head><meta name="description" content="A real description"></head></html>"#;
+            assert!(extract_html_facts(present).meta_description_present());
+            let empty = r#"<html><head><meta name="description" content="   "></head></html>"#;
+            assert!(!extract_html_facts(empty).meta_description_present());
+            let absent = "<html><head></head></html>";
+            assert!(!extract_html_facts(absent).meta_description_present());
+        }
+
+        #[test]
+        fn h1_count_is_exact() {
+            assert_eq!(
+                extract_html_facts("<html><body></body></html>").h1_count(),
+                0
+            );
+            assert_eq!(
+                extract_html_facts("<html><body><h1>One</h1></body></html>").h1_count(),
+                1
+            );
+            assert_eq!(
+                extract_html_facts("<html><body><h1>A</h1><h1>B</h1></body></html>").h1_count(),
+                2
+            );
+        }
+
+        #[test]
+        fn html_lang_present_only_with_non_empty_value() {
+            assert!(
+                extract_html_facts(r#"<html lang="en"><body></body></html>"#).html_lang_present()
+            );
+            assert!(
+                !extract_html_facts(r#"<html lang="  "><body></body></html>"#).html_lang_present()
+            );
+            assert!(!extract_html_facts("<html><body></body></html>").html_lang_present());
+        }
+
+        #[test]
+        fn image_alt_absent_attribute_counts_but_empty_alt_does_not() {
+            let facts = extract_html_facts(
+                r#"<html><body>
+                    <img src="/a.png">
+                    <img src="/b.png" alt="">
+                    <img src="/c.png" alt="a real description">
+                </body></html>"#,
+            );
+            assert_eq!(facts.image_count(), 3);
+            // Only the first image (no `alt` attribute at all) counts.
+            assert_eq!(facts.images_missing_alt(), 1);
         }
     }
 
@@ -854,6 +1691,74 @@ mod tests {
                 facts.canonical_links(),
                 &["https://example.test/c".to_string()]
             );
+            assert_eq!(facts.content_type(), Some("text/html"));
+            assert_eq!(facts.representation(), DocumentRepresentation::Html);
+            assert!(facts.html().is_some());
+        }
+
+        #[test]
+        fn header_observation_unavailable_is_none_not_empty_map() {
+            let page = page_with_no_headers("https://example.test/", "<html></html>");
+            let facts = PageFacts::from_page(&page);
+            assert_eq!(facts.response_headers(), None);
+        }
+
+        #[test]
+        fn header_observation_available_but_no_allowlisted_headers_is_some_empty() {
+            let page = page_with_html("https://example.test/", "<html></html>");
+            let facts = PageFacts::from_page(&page);
+            // page_with_html sets only Content-Type, which is not on the
+            // audit allowlist, so the observed set is legitimately empty
+            // — but it must be `Some(empty)`, distinguishable from
+            // `None` (observation unavailable).
+            assert_eq!(facts.response_headers(), Some(&BTreeMap::new()));
+        }
+
+        #[test]
+        fn representation_classification_matrix() {
+            for (content_type, expected) in [
+                ("text/html", DocumentRepresentation::Html),
+                ("text/html; charset=utf-8", DocumentRepresentation::Html),
+                ("TEXT/HTML", DocumentRepresentation::Html),
+                ("application/xhtml+xml", DocumentRepresentation::Html),
+                ("text/plain", DocumentRepresentation::NonHtml),
+                ("application/json", DocumentRepresentation::NonHtml),
+                ("image/png", DocumentRepresentation::NonHtml),
+            ] {
+                let page = page_with(
+                    "https://example.test/",
+                    "irrelevant",
+                    content_type,
+                    reqwest::StatusCode::OK,
+                    &[],
+                );
+                assert_eq!(
+                    PageFacts::from_page(&page).representation(),
+                    expected,
+                    "content_type={content_type}"
+                );
+            }
+        }
+
+        #[test]
+        fn missing_content_type_is_unknown_never_html() {
+            let page = page_with_no_headers("https://example.test/", "<html></html>");
+            assert_eq!(
+                PageFacts::from_page(&page).representation(),
+                DocumentRepresentation::Unknown
+            );
+        }
+
+        #[test]
+        fn non_html_representation_carries_no_html_facts() {
+            let page = page_with(
+                "https://example.test/",
+                "hello world",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            assert!(PageFacts::from_page(&page).html().is_none());
         }
     }
 
@@ -897,6 +1802,683 @@ mod tests {
             let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
 
             assert!(seo_canonical_missing(&evidenced).is_none());
+        }
+    }
+
+    // Phase 17/18: non-HTML and non-2xx-status negative matrices — no
+    // HTML DOM SEO rule may ever fire outside its stated applicability.
+    mod applicability_negative_matrix {
+        use super::*;
+
+        async fn evidenced(page: &Page) -> EvidencedPageFacts {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            EvidencedPageFacts::record(&store, page).await.unwrap()
+        }
+
+        fn html_seo_rules() -> Vec<fn(&EvidencedPageFacts) -> Option<Finding>> {
+            vec![
+                seo_canonical_missing,
+                seo_title_missing,
+                seo_meta_description_missing,
+                seo_h1_missing,
+                seo_h1_multiple,
+                seo_html_lang_missing,
+                seo_image_alt_missing,
+            ]
+        }
+
+        async fn assert_no_html_seo_findings(page: &Page) {
+            let evidenced = evidenced(page).await;
+            for rule in html_seo_rules() {
+                assert!(
+                    rule(&evidenced).is_none(),
+                    "no HTML DOM SEO rule may fire for {:?} ({:?}/{})",
+                    page.get_url(),
+                    evidenced.facts().representation(),
+                    evidenced.facts().effective_status()
+                );
+            }
+        }
+
+        // A: 200 text/plain.
+        #[tokio::test]
+        async fn text_plain_produces_no_html_seo_findings() {
+            let page = page_with(
+                "https://example.test/",
+                "hello world",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            assert_no_html_seo_findings(&page).await;
+        }
+
+        // B: 200 application/json.
+        #[tokio::test]
+        async fn json_produces_no_html_seo_findings() {
+            let page = page_with(
+                "https://example.test/",
+                r#"{"hello":"world"}"#,
+                "application/json",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            assert_no_html_seo_findings(&page).await;
+        }
+
+        // C: 200 image/png.
+        #[tokio::test]
+        async fn image_produces_no_html_seo_findings() {
+            let page = page_with(
+                "https://example.test/x.png",
+                "not really png bytes",
+                "image/png",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            assert_no_html_seo_findings(&page).await;
+        }
+
+        // D: unknown/missing Content-Type.
+        #[tokio::test]
+        async fn missing_content_type_produces_no_html_seo_findings() {
+            let page = page_with_no_headers(
+                "https://example.test/",
+                "<html><body>no content-type header at all</body></html>",
+            );
+            assert_no_html_seo_findings(&page).await;
+        }
+
+        // 404/500 text/html — an error document is never treated as a
+        // normal SEO content page merely because it contains HTML.
+        #[tokio::test]
+        async fn error_status_html_documents_produce_no_html_seo_findings() {
+            for status in [
+                reqwest::StatusCode::NOT_FOUND,
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            ] {
+                let page = page_with(
+                    "https://example.test/missing",
+                    "<html><body>not found</body></html>",
+                    "text/html",
+                    status,
+                    &[],
+                );
+                assert_no_html_seo_findings(&page).await;
+            }
+        }
+
+        // HTTPS/HSTS transport rules have their own, different
+        // applicability and may still legitimately apply even when HTML
+        // SEO rules do not.
+        #[tokio::test]
+        async fn transport_rules_remain_governed_by_their_own_applicability() {
+            let page = page_with(
+                "http://example.test/",
+                "hello world",
+                "text/plain",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = evidenced(&page).await;
+            // No HTML SEO finding for this non-HTML page...
+            for rule in html_seo_rules() {
+                assert!(rule(&evidenced).is_none());
+            }
+            // ...but the scheme-only https rule still legitimately
+            // applies regardless of representation.
+            assert!(security_https_missing(&evidenced).is_some());
+        }
+    }
+
+    // Phase 19: header-observation fidelity across every security rule.
+    mod header_fidelity_matrix {
+        use super::*;
+
+        async fn evidenced(page: &Page) -> EvidencedPageFacts {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            EvidencedPageFacts::record(&store, page).await.unwrap()
+        }
+
+        // A: Page.headers == None -> no HSTS/CSP/XCTO absence Finding.
+        #[tokio::test]
+        async fn headers_unavailable_produces_no_header_absence_findings() {
+            let page = page_with_no_headers("https://example.test/", "<html></html>");
+            let evidenced = evidenced(&page).await;
+            assert_eq!(evidenced.facts().response_headers(), None);
+            assert!(security_hsts_missing(&evidenced).is_none());
+            assert!(security_csp_missing(&evidenced).is_none());
+            assert!(security_x_content_type_options_missing(&evidenced).is_none());
+        }
+
+        // B: Page.headers == Some(empty relevant set) on an applicable
+        // page -> legitimate absence Findings.
+        #[tokio::test]
+        async fn headers_observed_empty_on_applicable_page_produces_absence_findings() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = evidenced(&page).await;
+            assert_eq!(evidenced.facts().response_headers(), Some(&BTreeMap::new()));
+            assert!(security_csp_missing(&evidenced).is_some());
+            assert!(security_x_content_type_options_missing(&evidenced).is_some());
+        }
+
+        // C: HSTS present -> no security.hsts.missing.
+        #[tokio::test]
+        async fn hsts_present_suppresses_the_rule() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[("strict-transport-security", "max-age=63072000")],
+            );
+            let evidenced = evidenced(&page).await;
+            assert!(security_hsts_missing(&evidenced).is_none());
+        }
+
+        // D: CSP present -> no security.csp.missing.
+        #[tokio::test]
+        async fn csp_present_suppresses_the_rule() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[("content-security-policy", "default-src 'self'")],
+            );
+            let evidenced = evidenced(&page).await;
+            assert!(security_csp_missing(&evidenced).is_none());
+        }
+
+        // E: only CSP-Report-Only present -> security.csp.missing still
+        // produced.
+        #[tokio::test]
+        async fn csp_report_only_alone_does_not_satisfy_enforcement_csp() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[("content-security-policy-report-only", "default-src 'self'")],
+            );
+            let evidenced = evidenced(&page).await;
+            assert!(security_csp_missing(&evidenced).is_some());
+        }
+
+        // F: X-Content-Type-Options present -> no missing rule.
+        #[tokio::test]
+        async fn x_content_type_options_present_suppresses_the_rule() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[("x-content-type-options", "nosniff")],
+            );
+            let evidenced = evidenced(&page).await;
+            assert!(security_x_content_type_options_missing(&evidenced).is_none());
+        }
+
+        // G: raw Set-Cookie values remain outside the audit header
+        // evidence model entirely (F-5/earlier frontier's own guarantee,
+        // reconfirmed at the PageFacts layer this frontier added).
+        #[tokio::test]
+        async fn set_cookie_raw_value_never_enters_page_facts() {
+            const SENTINEL: &str = "SUPER_SECRET_SESSION_SENTINEL";
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[(
+                    "set-cookie",
+                    &format!("session={SENTINEL}; Secure; HttpOnly"),
+                )],
+            );
+            let facts = PageFacts::from_page(&page);
+            let headers = facts.response_headers().expect("headers observed");
+            assert!(!headers.contains_key("set-cookie"));
+            for values in headers.values() {
+                for value in values {
+                    assert!(!value
+                        .windows(SENTINEL.len())
+                        .any(|w| w == SENTINEL.as_bytes()));
+                }
+            }
+        }
+
+        // H: multi-value retained-header semantics remain unchanged —
+        // every observed value for one allowlisted header name survives.
+        #[tokio::test]
+        async fn multi_value_header_semantics_are_preserved_through_page_facts() {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("text/html"),
+            );
+            headers.append(
+                reqwest::header::HeaderName::from_static("content-security-policy"),
+                reqwest::header::HeaderValue::from_static("default-src 'self'"),
+            );
+            headers.append(
+                reqwest::header::HeaderName::from_static("content-security-policy"),
+                reqwest::header::HeaderValue::from_static("report-uri /csp-report"),
+            );
+            let page = build(
+                "https://example.test/",
+                PageResponse {
+                    content: Some(b"<html></html>".to_vec()),
+                    status_code: reqwest::StatusCode::OK,
+                    headers: Some(headers),
+                    ..Default::default()
+                },
+            );
+            let facts = PageFacts::from_page(&page);
+            let observed = facts.response_headers().unwrap();
+            assert_eq!(
+                observed.get("content-security-policy"),
+                Some(&vec![
+                    b"default-src 'self'".to_vec(),
+                    b"report-uri /csp-report".to_vec(),
+                ])
+            );
+        }
+    }
+
+    // Phase 20: deterministic SEO fixture matrix.
+    mod seo_fixture_matrix {
+        use super::*;
+
+        async fn evidenced(page: &Page) -> EvidencedPageFacts {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            EvidencedPageFacts::record(&store, page).await.unwrap()
+        }
+
+        fn seo_rule_ids(findings: &[Finding]) -> Vec<&str> {
+            let mut ids: Vec<&str> = findings.iter().map(Finding::rule_id).collect();
+            ids.sort_unstable();
+            ids
+        }
+
+        #[tokio::test]
+        async fn healthy_page_produces_zero_seo_findings() {
+            let html = r#"<html lang="en"><head>
+                <title>A Healthy Page</title>
+                <meta name="description" content="A genuinely useful description.">
+                <link rel="canonical" href="https://example.test/healthy">
+            </head><body>
+                <h1>Welcome</h1>
+                <img src="/a.png" alt="a real photo">
+            </body></html>"#;
+            let page = page_with_html("https://example.test/healthy", html);
+            let evidenced = evidenced(&page).await;
+            let findings: Vec<Finding> = analyze_page(&evidenced)
+                .into_iter()
+                .filter(|f| f.category() == FindingCategory::Seo)
+                .collect();
+            assert!(findings.is_empty(), "unexpected SEO findings: {findings:?}");
+        }
+
+        #[tokio::test]
+        async fn broken_page_produces_every_applicable_seo_finding() {
+            let html = "<html><head></head><body><img src=\"/a.png\"></body></html>";
+            let page = page_with_html("https://example.test/broken", html);
+            let evidenced = evidenced(&page).await;
+            let findings = analyze_page(&evidenced);
+            let ids = seo_rule_ids(&findings);
+            assert!(ids.contains(&SEO_CANONICAL_MISSING_RULE_ID));
+            assert!(ids.contains(&SEO_TITLE_MISSING_RULE_ID));
+            assert!(ids.contains(&SEO_META_DESCRIPTION_MISSING_RULE_ID));
+            assert!(ids.contains(&SEO_H1_MISSING_RULE_ID));
+            assert!(ids.contains(&SEO_HTML_LANG_MISSING_RULE_ID));
+            assert!(ids.contains(&SEO_IMAGE_ALT_MISSING_RULE_ID));
+            assert!(!ids.contains(&SEO_H1_MULTIPLE_RULE_ID));
+        }
+
+        #[tokio::test]
+        async fn multi_h1_page_triggers_only_h1_multiple_among_heading_rules() {
+            let html = r#"<html lang="en"><head><title>T</title>
+                <meta name="description" content="d">
+                <link rel="canonical" href="https://example.test/multi">
+            </head><body><h1>One</h1><h1>Two</h1></body></html>"#;
+            let page = page_with_html("https://example.test/multi", html);
+            let evidenced = evidenced(&page).await;
+            assert!(seo_h1_multiple(&evidenced).is_some());
+            assert!(seo_h1_missing(&evidenced).is_none());
+        }
+
+        #[tokio::test]
+        async fn decorative_image_with_empty_alt_is_not_flagged() {
+            let html = r#"<html lang="en"><head><title>T</title>
+                <meta name="description" content="d">
+                <link rel="canonical" href="https://example.test/decorative">
+            </head><body><h1>H</h1><img src="/x.png" alt=""></body></html>"#;
+            let page = page_with_html("https://example.test/decorative", html);
+            let evidenced = evidenced(&page).await;
+            assert!(seo_image_alt_missing(&evidenced).is_none());
+        }
+
+        #[tokio::test]
+        async fn image_without_alt_is_flagged_with_exact_count() {
+            let html = r#"<html lang="en"><head><title>T</title>
+                <meta name="description" content="d">
+                <link rel="canonical" href="https://example.test/noalt">
+            </head><body><h1>H</h1><img src="/x.png"></body></html>"#;
+            let page = page_with_html("https://example.test/noalt", html);
+            let evidenced = evidenced(&page).await;
+            let finding = seo_image_alt_missing(&evidenced).expect("must flag");
+            assert_eq!(
+                finding.observed_condition(),
+                &FindingCondition::ImagesMissingAlt(1)
+            );
+        }
+    }
+
+    // Phase 10/16: passive security rule matrix.
+    mod security_rule_matrix {
+        use super::*;
+
+        async fn evidenced(page: &Page) -> EvidencedPageFacts {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            EvidencedPageFacts::record(&store, page).await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn http_scheme_triggers_https_missing() {
+            let page = page_with(
+                "http://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = evidenced(&page).await;
+            let finding = security_https_missing(&evidenced).expect("must flag http scheme");
+            assert_eq!(finding.category(), FindingCategory::Security);
+            assert_eq!(finding.severity(), FindingSeverity::High);
+            assert_eq!(
+                finding.observed_condition(),
+                &FindingCondition::Scheme(UrlScheme::Http)
+            );
+        }
+
+        #[tokio::test]
+        async fn https_scheme_does_not_trigger_https_missing() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = evidenced(&page).await;
+            assert!(security_https_missing(&evidenced).is_none());
+        }
+
+        #[tokio::test]
+        async fn hsts_rule_never_applies_to_http_scheme() {
+            let page = page_with(
+                "http://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = evidenced(&page).await;
+            // Headers were observed (Some(empty)) but scheme is http —
+            // HSTS applicability requires https specifically.
+            assert!(security_hsts_missing(&evidenced).is_none());
+        }
+
+        #[tokio::test]
+        async fn hsts_missing_on_https_with_observed_headers() {
+            let page = page_with(
+                "https://example.test/",
+                "<html></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = evidenced(&page).await;
+            let finding = security_hsts_missing(&evidenced).expect("must flag");
+            assert_eq!(finding.severity(), FindingSeverity::Medium);
+        }
+    }
+
+    // Phase 13/14/16: the generic analyzer and same-evidence invariant
+    // across multiple simultaneously-triggered rules.
+    mod same_evidence_across_rules {
+        use super::*;
+
+        #[tokio::test]
+        async fn multiple_rules_on_one_page_all_share_the_same_evidence_ref() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            // A page with unrelated, already-valid evidence in the same
+            // store beforehand — the same cross-page discipline the
+            // prior binding-correction frontier established.
+            let unrelated = page_with_html(
+                "https://unrelated.example/",
+                r#"<html lang="en"><head><title>T</title>
+                    <meta name="description" content="d">
+                    <link rel="canonical" href="https://unrelated.example/">
+                </head><body><h1>H</h1></body></html>"#,
+            );
+            let _unrelated_evidence = record(&store, &unrelated).await;
+
+            let html = "<html><head></head><body><img src=\"/a.png\"></body></html>";
+            let page = page_with_html("https://example.test/broken", html);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+            let findings = analyze_page(&evidenced);
+            assert!(findings.len() >= 3, "fixture should trigger several rules");
+
+            let expected_ref = evidenced.evidence_ref();
+            for finding in &findings {
+                assert_eq!(finding.evidence(), &[expected_ref]);
+            }
+
+            // Independently resolve and confirm it is genuinely this
+            // exact page's evidence, not the unrelated one.
+            let bundle = expected_ref.resolve(&store).await.unwrap().unwrap();
+            assert_eq!(
+                bundle.requested_url.as_deref(),
+                Some("https://example.test/broken")
+            );
+        }
+
+        #[tokio::test]
+        async fn audit_page_persists_every_finding_under_the_same_evidence_ref() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let mut buf = [0_u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let body = "<html><head></head><body><img src=\"/a.png\"></body></html>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body.as_bytes());
+                }
+            });
+            let url = format!("http://{addr}/");
+
+            let result = audit_page(&store, &url).await.unwrap();
+            assert!(result.findings().len() >= 3);
+            for finding in result.findings() {
+                assert_eq!(finding.evidence(), &[result.evidence_ref()]);
+                // Every persisted finding reads back identically.
+                let read_back = read_finding(&store, &finding.id()).await.unwrap().unwrap();
+                assert_eq!(&read_back, finding);
+            }
+        }
+    }
+
+    // Phase 21: determinism — repeated analysis of one already-recorded
+    // EvidencedPageFacts produces identical output every time.
+    mod determinism {
+        use super::*;
+
+        #[tokio::test]
+        async fn repeated_analysis_is_byte_identical() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let html = "<html><head></head><body><img src=\"/a.png\"></body></html>";
+            let page = page_with_html("https://example.test/broken", html);
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+
+            let first = analyze_page(&evidenced);
+            let second = analyze_page(&evidenced);
+
+            assert_eq!(first.len(), second.len());
+            for (a, b) in first.iter().zip(second.iter()) {
+                assert_eq!(a, b);
+                assert_eq!(a.id(), b.id());
+                assert_eq!(a.rule_id(), b.rule_id());
+                assert_eq!(a.rule_version(), b.rule_version());
+                assert_eq!(
+                    serde_json::to_string(a).unwrap(),
+                    serde_json::to_string(b).unwrap()
+                );
+            }
+            // Ordering itself is identical (PAGE_RULES declaration order,
+            // never HashMap iteration order).
+            let first_ids: Vec<&str> = first.iter().map(Finding::rule_id).collect();
+            let second_ids: Vec<&str> = second.iter().map(Finding::rule_id).collect();
+            assert_eq!(first_ids, second_ids);
+        }
+    }
+
+    // Phase 13/28: the generic rule registry itself.
+    mod generic_analyzer {
+        use super::*;
+
+        #[test]
+        fn exactly_eleven_production_rules_with_unique_ids() {
+            assert_eq!(PAGE_RULES.len(), 11);
+        }
+
+        #[tokio::test]
+        async fn production_rule_ids_are_unique() {
+            // Trigger every rule at once (an empty, http, plain page)
+            // and confirm the rule_ids on any findings produced are
+            // pairwise distinct — a structural uniqueness proof over the
+            // real registry, not a hardcoded literal list.
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let page = page_with(
+                "http://example.test/",
+                "<html><head></head><body><img src=\"/a.png\"></body></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+            let findings = analyze_page(&evidenced);
+            let mut ids: Vec<&str> = findings.iter().map(Finding::rule_id).collect();
+            let before = ids.len();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(
+                ids.len(),
+                before,
+                "duplicate rule_id among produced findings"
+            );
+        }
+
+        #[tokio::test]
+        async fn ordering_is_declaration_order_not_hashmap_dependent() {
+            // PAGE_RULES is a plain slice — iteration order is exactly
+            // declaration order by construction, never HashMap iteration
+            // order. Proven behaviorally (function-pointer equality
+            // comparison is not reliable — addresses are not guaranteed
+            // unique): a fixture that triggers every rule must yield
+            // findings in exactly this declared rule_id sequence, on
+            // every repeated run.
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let page = page_with(
+                "http://example.test/",
+                "<html><head></head><body><img src=\"/a.png\"></body></html>",
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[],
+            );
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+
+            let expected_order = [
+                SEO_CANONICAL_MISSING_RULE_ID,
+                SEO_TITLE_MISSING_RULE_ID,
+                SEO_META_DESCRIPTION_MISSING_RULE_ID,
+                SEO_H1_MISSING_RULE_ID,
+                SEO_HTML_LANG_MISSING_RULE_ID,
+                SEO_IMAGE_ALT_MISSING_RULE_ID,
+                SECURITY_HTTPS_MISSING_RULE_ID,
+                SECURITY_CSP_MISSING_RULE_ID,
+                SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_ID,
+            ];
+
+            for _ in 0..3 {
+                let findings = analyze_page(&evidenced);
+                let ids: Vec<&str> = findings.iter().map(Finding::rule_id).collect();
+                assert_eq!(ids, expected_order.to_vec());
+            }
+        }
+    }
+
+    // Phase 23: historical v1 canonical-missing compatibility. A golden,
+    // hand-verified FindingId for a fixed input using the pre-frontier
+    // `rule_version = 1` — this is a literal regression test: any
+    // accidental change to `FindingId::derive`'s formula or
+    // `FindingCondition::CanonicalLinkCount`/`CanonicalLinkCountAtLeast`'s
+    // `identity_repr()` wording would change this hardcoded value.
+    mod historical_compatibility {
+        use super::*;
+
+        #[test]
+        fn old_v1_canonical_missing_payload_still_deserializes_and_reproduces_its_id() {
+            // Exactly the shape SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_
+            // FRONTIER_001's original code would have serialized, with a
+            // fixed, deterministic EvidenceId wire string standing in for
+            // whatever real evidence a historical record referenced.
+            let historical_json = r#"{
+                "rule_id": "seo.canonical.missing",
+                "rule_version": 1,
+                "category": "Seo",
+                "severity": "Medium",
+                "target": "https://example.test/",
+                "observed_condition": { "CanonicalLinkCount": 0 },
+                "expected_condition": { "CanonicalLinkCountAtLeast": 1 },
+                "evidence": [{ "id": "evid_0123456789abcdef0123456789abcdef" }]
+            }"#;
+            let finding: Finding = serde_json::from_str(historical_json)
+                .expect("a genuine v1 payload must still deserialize");
+            assert_eq!(finding.rule_version(), 1);
+            assert_eq!(
+                finding.id().as_str(),
+                "finding_dea5b498b30162f5294a044db3bf73a04404021970973c1456a9269c1373048e",
+                "the identity formula for historical v1 canonical-missing \
+                 Findings must never change"
+            );
+        }
+
+        #[tokio::test]
+        async fn new_execution_uses_version_2_and_yields_a_different_identity() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let page = page_with_html(
+                "https://example.test/",
+                "<html><head><title>T</title></head></html>",
+            );
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+            let finding = seo_canonical_missing(&evidenced).unwrap();
+            assert_eq!(finding.rule_version(), 2);
+            assert_ne!(finding.rule_version(), 1);
         }
     }
 
@@ -995,7 +2577,7 @@ mod tests {
             let v1 = sample_finding(vec![reference]);
             let v2 = Finding::new(
                 SEO_CANONICAL_MISSING_RULE_ID,
-                2,
+                SEO_CANONICAL_MISSING_RULE_VERSION + 1,
                 FindingCategory::Seo,
                 FindingSeverity::Medium,
                 "https://example.test/",
@@ -1174,43 +2756,59 @@ mod tests {
             );
 
             // 1-2: acquire one HTML page, prove Page received (implicit
-            // in a successful, non-erroring seam call).
-            let finding = audit_seo_canonical_missing(&store, &url)
-                .await
-                .unwrap()
-                .expect("this fixture has no canonical link");
+            // in a successful, non-erroring seam call). This minimal
+            // fixture legitimately triggers several rules at once (no
+            // canonical, no meta description, no h1, no html lang, http
+            // scheme, no CSP, no X-Content-Type-Options) — only title is
+            // genuinely present.
+            let result = audit_page(&store, &url).await.unwrap();
+            assert!(!result.findings().is_empty());
+
+            let finding = result
+                .findings()
+                .iter()
+                .find(|f| f.rule_id() == SEO_CANONICAL_MISSING_RULE_ID)
+                .expect("this fixture has no canonical link")
+                .clone();
 
             // 9: read Finding back by FindingId.
             let id = finding.id();
             let read_back = read_finding(&store, &id).await.unwrap().unwrap();
             assert_eq!(read_back, finding);
 
-            // 10-12: resolve every Finding EvidenceRef, independently
-            // confirm it names the acquired page and that the persisted
-            // page material lacks a canonical link.
-            for reference in read_back.evidence() {
-                let bundle = reference
-                    .resolve(&store)
-                    .await
-                    .unwrap()
-                    .expect("evidence must resolve");
-                assert_eq!(bundle.requested_url.as_deref(), Some(url.as_str()));
-                let content = bundle.content.expect("acquired page content persisted");
-                assert!(extract_canonical_links(&content).is_empty());
+            // 16 / same-evidence invariant: every Finding from this one
+            // page audit shares the exact same EvidenceRef as the audit
+            // result itself.
+            for f in result.findings() {
+                assert_eq!(f.evidence(), &[result.evidence_ref()]);
             }
 
-            assert_eq!(finding.rule_id(), SEO_CANONICAL_MISSING_RULE_ID);
+            // 10-12: resolve the shared EvidenceRef, independently
+            // confirm it names the acquired page and that the persisted
+            // page material lacks a canonical link.
+            let bundle = result
+                .evidence_ref()
+                .resolve(&store)
+                .await
+                .unwrap()
+                .expect("evidence must resolve");
+            assert_eq!(bundle.requested_url.as_deref(), Some(url.as_str()));
+            let content = bundle.content.expect("acquired page content persisted");
+            assert!(extract_html_facts(&content).canonical_links().is_empty());
         }
 
         #[tokio::test]
-        async fn full_chain_with_a_canonical_link_produces_no_finding() {
+        async fn full_chain_with_a_canonical_link_produces_no_canonical_finding() {
             let store = DomainPersistence::open_in_memory().await.unwrap();
             let url = fixture_server(
                 r#"<html><head><link rel="canonical" href="https://example.test/product"></head></html>"#,
             );
 
-            let finding = audit_seo_canonical_missing(&store, &url).await.unwrap();
-            assert!(finding.is_none());
+            let result = audit_page(&store, &url).await.unwrap();
+            assert!(result
+                .findings()
+                .iter()
+                .all(|f| f.rule_id() != SEO_CANONICAL_MISSING_RULE_ID));
         }
     }
 

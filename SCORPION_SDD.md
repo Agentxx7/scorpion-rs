@@ -182,6 +182,7 @@ Forbidden:
 | Watch identity/state | `features/{identity,watch}.rs` | `define_watch()`, watch transitions/read seams | `WatchId`, `WatchDefinition`, `WatchState` |
 | Watch scheduling/execution | `features/watch_schedule.rs` | `define_watch_schedule()`, `execute_scheduled_watch_run()` | `WatchSchedule`, `ScheduledRunRecord` |
 | Watch change/health | `features/{change_detection,watch_health}.rs` | change recording/read and health assessment seams | `ChangeResult`, `ChangeEvent`, `WatchHealthReport` |
+| Deterministic page audit | `features/audit.rs` | `audit_page()` | `PageFacts`, `HtmlPageFacts`, `EvidencedPageFacts`, `Finding`, `ObservedTechnologyMarker`, `PageAuditResult` |
 
 ---
 
@@ -198,9 +199,26 @@ binding → execute → result
 ```
 
 Examples: `fetch_single_page_with_options`, `execute_streaming_request`,
-`artifact_download_execution::execute`, provider searches. They take an
-immutable input model, execute once, and return a result vocabulary. No
-identity, no persistence, no resume.
+`artifact_download_execution::execute`, provider searches,
+`audit_page()`. They take an immutable input model, execute once, and
+return a result vocabulary. No identity, no persistence, no resume.
+
+`audit_page()` durably records the `Finding`s it produces (through
+`DomainPersistence::append_history`, exactly like the evidence ledger,
+change detection, and transform lineage already do) and does not persist
+the `ObservedTechnologyMarker`s it produces at all — both facts are
+consistent with "stateless," not contradictions of it. Content-addressed,
+append-only derived-record persistence (evidence, change events, transform
+lineage, audit findings) does not, by itself, make an operation
+state-driven: the distinguishing test for §5.2 is identity + a mutable
+current state + explicit transitions between named states. `audit_page()`
+has none of these — no `AuditId`, no `AuditState`, no transition — it is a
+bounded `binding → execute → result` operation over one already-acquired
+page whose result happens to be durably, idempotently recorded underneath
+it. `AuditId`, `AuditSession`, `AuditState`, and independent
+technology-marker persistence remain unauthorized unless a future frontier
+proves an actual ownership requirement neither of the three CLOSED audit
+frontiers established.
 
 ### 5.2 State-driven capabilities
 
@@ -303,6 +321,16 @@ Interfaces must not:
   provider logic, or transport policy beyond parsing
 - define shadow domain models duplicating canonical types
 - decide between canonical and legacy execution paths
+- independently implement deterministic audit rule evaluation
+  (SEO/security-header rules or any future rule), technology-marker
+  extraction, applicability decisions, rule-version semantics, or
+  `FindingId`/marker identity derivation — a future MCP tool or Web
+  Console/API must call `audit_page()`/`PageAuditResult` (§4; see
+  `SCORPION_ARCHITECTURE.md` §3.19) as its sole source of audit truth,
+  never re-derive or approximate it, and must never reconstruct a
+  parallel evidence truth where a shared `EvidenceRef` already resolves
+  the same underlying evidence for both an AI-visible and a human-facing
+  consumer
 
 Current conformance: `spider_cli` and `spider_mcp` call canonical seams
 (`fetch_single_page_with_options`, `build_evidence`, `Website` crawl seam,

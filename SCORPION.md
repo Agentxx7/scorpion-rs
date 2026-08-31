@@ -41,7 +41,8 @@ the same MIT terms; this document does not change licensing.
 
 ## 2. Ownership Boundary
 
-Scorpion owns the full acquisition and evidence-production surface:
+Scorpion owns the full acquisition, evidence-production, and deterministic-
+analysis surface:
 
 - search / discovery
 - HTTP fetching
@@ -52,12 +53,38 @@ Scorpion owns the full acquisition and evidence-production surface:
 - evidence capture
 - transport / network policy
 - crawl provenance
+- explicitly specified, deterministic, versioned rule evaluation and
+  directly-observed-value extraction over already-evidenced facts (see
+  `SCORPION_ARCHITECTURE.md` §3.19 for the canonical implementation)
 
-**Scorpion returns evidence and facts. It does not make downstream domain
-judgments.** Anything that interprets, scores, or acts on what was
-crawled — including Nightstalker — is out of scope here and consumes
-Scorpion's output through the boundary described in §1, not by depending on
-its internal types.
+**Scorpion owns evidence, observed facts, and explicitly specified
+deterministic analyzers over those facts. Scorpion does not own open-ended
+semantic interpretation, probabilistic classification, AI judgment, or
+downstream action decisions.** Three distinct things must never be
+collapsed into one:
+
+- **Observation** — a fact directly present in one acquisition (HTTP status,
+  declared `Content-Type`, a response header's own literal value, a
+  `<meta name="generator">` value) or its truthful absence.
+- **Deterministic canonical rule evaluation** — a bounded, explicitly
+  specified, versioned, evidence-bound predicate over already-observed
+  facts, reproducible from the same facts every time, free of probabilistic
+  or AI inference (e.g. `security.csp.missing`, `seo.canonical.missing`).
+  This remains a Scorpion capability — not a domain judgment — precisely
+  because it is none of those things: it is fixed rule policy, not a
+  generated conclusion, and a rule's own version changes only when its
+  predicate does, never silently.
+- **Downstream interpretation** — an open-ended, probabilistic, or
+  judgment-bearing conclusion ("this site is insecure," "this organization
+  probably uses technology X," "this is a high-risk target," "this company
+  has poor security"). This remains categorically out of scope for
+  Scorpion's canonical engine, exactly as before this distinction was made
+  explicit.
+
+Anything that interprets, scores, classifies, or acts on crawled evidence,
+observed facts, or a deterministic rule's own result — including
+Nightstalker — is out of scope here and consumes Scorpion's output through
+the boundary described in §1, not by depending on its internal types.
 
 ---
 
@@ -424,8 +451,10 @@ optional subsequent fetch/browser/evidence capture, and MCP/API exposure of
 all of it. Scorpion does not own conversational presentation — a downstream
 consumer decides how discovered results are described or offered to a user
 ("I found a movie you may like," "here's a trailer," "here's where it's
-available"). That framing logic stays outside Scorpion, per §2's existing
-"Scorpion returns evidence and facts" rule.
+available"). That framing logic stays outside Scorpion, per §2's
+observation/deterministic-analysis/downstream-interpretation boundary —
+conversational framing is downstream interpretation, not an observation or
+a deterministic rule evaluation.
 
 ### 9.9 Search vs. fetch, and self-hosting
 

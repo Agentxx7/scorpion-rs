@@ -6627,12 +6627,18 @@ fn no_shipping_crate_references_the_audit_module() {
                     && !file.contents.contains("audit_page")
                     && !file.contents.contains("analyze_page")
                     && !file.contents.contains("extract_technology_markers")
-                    && !file.contents.contains("ObservedTechnologyMarker"),
-                "{name} ({}) must not reference the audit module — no \
-                 CLI/API/MCP/Web Console audit or technology-marker \
-                 surface is authorized in \
-                 SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001 or \
-                 SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001",
+                    && !file.contents.contains("ObservedTechnologyMarker")
+                    && !file.contents.contains("TechnologyMarkerSource")
+                    && !file.contents.contains("FindingId")
+                    && !file.contents.contains("EvidencedPageFacts")
+                    && !file.contents.contains("PageAuditResult"),
+                "{name} ({}) must not reference the audit module or its \
+                 canonical result vocabulary — no CLI/API/MCP/Web Console \
+                 audit or technology-marker surface, and no independent \
+                 reimplementation of Finding/marker identity, is \
+                 authorized in SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001, \
+                 SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001, or \
+                 SCORPION_CANONICAL_AUDIT_ARCHITECTURE_RECONCILIATION_001",
                 file.relative_path
             );
         }

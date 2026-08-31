@@ -516,6 +516,117 @@ identity. Durable result reopening is not deterministic replay: model requests,
 raw responses, exact prompts, selected bounded Markdown, provider snapshots,
 and network timing are deliberately not owned by this record.
 
+### 3.19 Deterministic Page Audit / Technology Observation
+
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Deterministic page audit | `spider/src/features/audit.rs` | `utils/evidence.rs` (`fetch_single_page`, `build_evidence`, `record_evidence`, `EvidenceRef`, `EvidenceBundle`, `audit_response_headers`), `features/domain_persistence.rs` (`disk` feature) | A second acquisition/transport path, `Website`/search-provider types, a technology-fingerprint/CVE database, AI, process execution/network scanning, a second evidence or HTML-parse path | `audit_page()` | None |
+
+**Clarification on `audit.rs`:** `SCORPION_AUDIT_FACTS_AND_FINDING_CONTRACT_FRONTIER_001`,
+`SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001`, and
+`SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001` are the three CLOSED
+frontiers that built this capability; this section (added by
+`SCORPION_CANONICAL_AUDIT_ARCHITECTURE_RECONCILIATION_001`) is the first
+time it is recorded here as canonical ownership, reconciling this document
+with production reality rather than describing new behavior.
+
+`audit_page(store, url)` is the single canonical execution seam and the
+*only* production acquisition entrypoint in this module: it calls
+`fetch_single_page` exactly once, records that one `Page`'s evidence and
+derives `PageFacts` from it via `EvidencedPageFacts::record` (the sole
+association constructor — no public seam pairs a caller-supplied
+`PageFacts` with a caller-supplied `EvidenceRef` independently), then runs
+every rule in `PAGE_RULES` (`analyze_page`) and every technology-marker
+extractor (`extract_technology_markers`) over that *same* value. Every
+`Finding` and every `ObservedTechnologyMarker` a single `audit_page` call
+produces therefore shares one `EvidenceRef` — the same evidence identity
+`utils/evidence.rs` already owns (§3.6); `audit.rs` mints no identity of
+its own for either. `PageFacts`/`HtmlPageFacts` (canonical link, title,
+meta description, H1, `html[lang]`, image/alt, and
+`<meta name="generator">` presence — one `lol_html` pass, never one parse
+per rule) are transient, network-free projections of one acquired `Page`,
+never persisted themselves; `EvidencedPageFacts` binds one `PageFacts` to
+its exact originating `EvidenceRef`.
+
+Two, and only two, result vocabularies exist, and they are not
+interchangeable:
+
+- **`Finding`** — a deterministic canonical rule evaluation: `rule_id`,
+  an explicit `rule_version` (independent of crate version; a predicate
+  change bumps only its own rule's version, never silently —
+  `seo.canonical.missing` v1 → v2 is the standing precedent), `category`
+  (`Seo`/`Security`), fixed-policy `severity`, `target`, an
+  `observed_condition`/`expected_condition` pair, and the `EvidenceRef`(s)
+  it was checked against. `FindingId` is content-addressed (SHA-256 over
+  every semantic field, mirroring `ChangeEventId`/`TransformLineageId`'s
+  own precedent) and deliberately lives in `audit.rs`, not
+  `features/identity.rs` — the same derived-record-vs-canonical-identity
+  split already established for those two ids. Persisted through
+  `DomainPersistence::append_history` only, fixed revision `1`, idempotent
+  on a duplicate identity — never `write_current`, since a `Finding` has
+  no current state to replace. A `Finding` is never itself `Evidence` and
+  is never recorded, read back, or serialized as an `EvidenceBundle`.
+- **`ObservedTechnologyMarker`** (`source: TechnologyMarkerSource`,
+  `value`) — a directly observed, technology-identifying value the remote
+  page itself exposed (`Server`/`X-Powered-By`/`X-Generator` response
+  headers, or `<meta name="generator">`'s literal `content`) — never an
+  inference, guess, confidence score, or fingerprint-database match. It
+  has no rule ID, no version, no severity, and no `EvidenceRef`/identity
+  field of its own. It is a pure, network-free function of one already
+  evidenced page's facts (`extract_technology_markers`) and is
+  deliberately **not** durably persisted as an independent record: it is a
+  re-derivable projection of the same already-persisted `Evidence` that
+  underlies it, exactly as `PageFacts`/`HtmlPageFacts` already are — no
+  `TechnologyMarkerId` or second persistence path exists. `MARKER_HEADER_NAMES`
+  is a fixed, closed, three-entry subset of
+  `AUDIT_RESPONSE_HEADER_ALLOWLIST` (§3.6) that structurally excludes
+  every credential/session-bearing header name; no active probe, hidden
+  endpoint request, version probe, DOM-structure/asset/favicon/TLS
+  fingerprint, or signature/vendor-classification catalog is implemented
+  or authorized.
+
+`PageAuditResult { evidence_ref, findings, technology_markers }` is the one
+canonical aggregate result `audit_page` returns — both result vocabularies,
+bound to the one shared `EvidenceRef`, in one value. It is explicitly *not*
+a shipping DTO: no CLI/API/MCP/Web Console schema is authorized by any of
+the three closed frontiers that built this capability, and none is
+authorized by this reconciliation frontier either (§7.7).
+
+**Human/AI interface boundary (future-facing, not implemented here):** a
+future MCP tool and a future Web Console/API must both eventually consume
+`audit_page`/`PageAuditResult` as their sole source of truth for audit
+results — never re-derive, re-implement, or approximate SEO rule
+evaluation, security-header rules, technology-marker extraction,
+applicability decisions, rule versions, or `FindingId` derivation
+independently (§7.6, §7.7). Both consumers observe the *same*
+`PageAuditResult`/evidence truth:
+
+```text
+                       AI
+                        │
+                       MCP
+                        │
+                        ▼
+                 canonical audit (audit_page / PageAuditResult)
+                        ▲
+                        │
+                 Web Console/API
+                        │
+                      human
+```
+
+**Human-in-the-loop evidence principle:** every AI-visible `Finding` or
+`ObservedTechnologyMarker` carries (directly, or via `PageAuditResult`'s
+shared `evidence_ref`) the exact `EvidenceRef` `utils/evidence.rs` already
+owns (§3.6) — the same identity a future human-facing interface resolves
+through `EvidenceRef::resolve` to inspect the identical underlying
+evidence an AI consumer saw. No new identity (`AuditId`, `TechnologyMarkerId`,
+or otherwise) is authorized merely to give a human interface its own
+parallel reference; `EvidenceRef`/`EvidenceId` is authoritative. A future
+Web Console must not reconstruct a parallel truth — inspecting "what the AI
+saw" and "what a human reviewer sees" must resolve to the same evidence
+record, not two independently derived ones.
+
 ---
 
 ## 4. Canonical Path Map
@@ -757,6 +868,16 @@ no interface may define its own health model, and no
 `DurableResearch*` DTOs are only defined in
 `spider/src/features/research_session.rs` (see §3.18); `spider_agent` remains
 provider-neutral and interfaces must not define a shadow session or result.
+`PageFacts`, `HtmlPageFacts`, `EvidencedPageFacts`, `Finding`, `FindingId`,
+`FindingCategory`, `FindingSeverity`, `FindingCondition`,
+`ObservedTechnologyMarker`, `TechnologyMarkerSource`, `PageAuditResult`, and
+`AuditError` are only defined in `spider/src/features/audit.rs` (see
+§3.19); `FindingId` deliberately does not live in `features/identity.rs`,
+matching `ChangeEventId`/`TransformLineageId`'s own established precedent
+for content-addressed derived-record identity — no interface may define
+its own audit rule, technology-marker, or `FindingId`-equivalent model, and
+no `AuditId`/`AuditSession`/`AuditState`/`TechnologyMarkerId` may be
+introduced anywhere.
 
 ### 7.7 THIN INTERFACES
 
@@ -1023,5 +1144,40 @@ The following are intentionally not refactored in this frontier:
   in `spider/src`, and `ProviderDescriptor` itself defines no `Health`
   field or method; and none of it is shadowed by `spider_cli`/
   `spider_mcp`
+
+- `PageFacts`/`HtmlPageFacts`/`EvidencedPageFacts`/`Finding`/`FindingId`/
+  `ObservedTechnologyMarker`/`TechnologyMarkerSource`/`PageAuditResult`
+  are each defined in exactly one canonical module
+  (`features/audit.rs`, gated `evidence`+`disk`); `audit.rs` never
+  imports `Website` or any search-provider type; `EvidencedPageFacts`
+  has exactly one public association seam (`record(store, page)`) and no
+  public constructor pairs a caller-supplied `PageFacts` with a
+  caller-supplied `EvidenceRef` independently; `audit_page` performs
+  exactly one `fetch_single_page` call in production code, and
+  `extract_technology_markers` is a pure `fn(&EvidencedPageFacts)` with
+  no acquisition/persistence parameter — no second acquisition exists
+  for either findings or technology markers; every HTML DOM SEO rule
+  checks one shared applicability predicate, and every security
+  header-absence rule requires `response_headers()` to be observed
+  (`Some(_)`) before it can fire; the eleven production rule ids are
+  unique, each carries an explicit version, and
+  `seo.canonical.missing`'s production version is exactly `2`;
+  `MARKER_HEADER_NAMES` is a closed, credential-free, three-entry
+  subset of `AUDIT_RESPONSE_HEADER_ALLOWLIST`, consumed only through
+  `PageFacts::response_headers()` (no independent/parallel header
+  capture), and technology-marker HTML extraction reuses the single
+  canonical `lol_html` parse pass (`rewrite_str` occurs exactly once in
+  production code); no `TechnologyMarkerId` or other independent
+  marker-identity type exists; `Finding` never becomes an
+  `EvidenceBundle`, and `FindingId` is not registered in
+  `features/identity.rs`; the module introduces no second persistence
+  backend, no network/process-execution capability, no AI dependency,
+  and no technology/CMS/framework/WAF fingerprinting vocabulary; and no
+  shipping crate (`spider_cli`/`spider_mcp`/`scorpion_app`) references
+  `features::audit`, `audit_page`, `analyze_page`,
+  `extract_technology_markers`, `ObservedTechnologyMarker`, `FindingId`,
+  `EvidencedPageFacts`, `PageAuditResult`, or `TechnologyMarkerSource` —
+  proving no parallel audit/technology-marker surface exists anywhere
+  outside `features/audit.rs`
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

@@ -211,6 +211,44 @@ no health, no event sourcing, and no generic Job/Operation persistence —
 it is a mechanism two future capabilities will call into, not a
 capability itself.
 
+| Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
+|---|---|---|---|---|---|
+| Domain persistence runtime binding | `spider/src/features/domain_runtime.rs` | `features/domain_persistence.rs` (`disk` feature) | Network, transport, `features/identity.rs`, `features/domain_state.rs`, any concrete domain/product-model type, a second persistence mechanism | `resolve_domain_database_path()`, `open_shared_domain_store()` | None |
+
+**Clarification on `domain_runtime.rs`
+(`SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001`):**
+`domain_persistence.rs` is mechanism-only — it never resolves a database
+*path* from operator configuration. Before this module, that resolution
+existed in exactly one place, `spider_cli::research`'s
+`RESEARCH_EVIDENCE_DB`, genuinely scoped to Research (its own module doc
+comment, its owning `ResearchService`/`RunParams` names) — not a
+documented cross-interface contract, and the prerequisite gap
+`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` found and BLOCKED on.
+This module is the resolved prerequisite: `SCORPION_DOMAIN_DB` is the new
+canonical, neutral variable every interface should set; the legacy
+`RESEARCH_EVIDENCE_DB` remains fully honored as an explicit, tested,
+lower-priority fallback (`resolve_domain_database_path`'s own priority
+order: explicit path argument, then `SCORPION_DOMAIN_DB`, then
+`RESEARCH_EVIDENCE_DB`) — reconciled in real, tested code
+(`spider_cli::research::configured_database` and
+`scorpion_app`'s `resolve_research_config_with`/`status` both now
+delegate to this seam rather than resolving the literal locally), not
+merely documented as a coincidence. Shared-store safety was proven, not
+assumed, by this same frontier: every canonical identity/derived-record
+prefix is pairwise distinct
+(`every_canonical_identity_prefix_is_pairwise_distinct`), two
+independently opened `DomainPersistence` handles against one real file
+observe each other's writes, evidence and `Finding`s recorded through one
+handle read back through another, and near-concurrent multi-handle use
+does not deadlock or corrupt — the last of these required hardening
+`DomainPersistence::open`'s connection configuration itself (WAL journal
+mode, an explicit busy timeout, `BEGIN IMMEDIATE` for `write_current`)
+against a real "database is locked" failure the prior configuration
+produced under contention, all within the one existing SQLite mechanism —
+no second persistence stack. No shipping interface may declare either env
+var's literal string locally
+(`domain_runtime_seam_owns_database_resolution_not_a_local_literal`).
+
 ### 3.12 Authenticated Session Lifecycle
 
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
@@ -877,7 +915,13 @@ matching `ChangeEventId`/`TransformLineageId`'s own established precedent
 for content-addressed derived-record identity — no interface may define
 its own audit rule, technology-marker, or `FindingId`-equivalent model, and
 no `AuditId`/`AuditSession`/`AuditState`/`TechnologyMarkerId` may be
-introduced anywhere.
+introduced anywhere. `DOMAIN_DATABASE_ENV`, `LEGACY_RESEARCH_DATABASE_ENV`,
+`resolve_domain_database_path`, `open_shared_domain_store`, and
+`DomainRuntimeError` are only defined in
+`spider/src/features/domain_runtime.rs` (see §3.11) — no interface may
+declare either environment variable's literal string locally or
+independently resolve a database path outside this seam
+(`domain_runtime_seam_owns_database_resolution_not_a_local_literal`).
 
 ### 7.7 THIN INTERFACES
 
@@ -1179,5 +1223,16 @@ The following are intentionally not refactored in this frontier:
   `EvidencedPageFacts`, `PageAuditResult`, or `TechnologyMarkerSource` —
   proving no parallel audit/technology-marker surface exists anywhere
   outside `features/audit.rs`
+
+- Every `pub const PREFIX: &'static str = "..."` declared anywhere in
+  `spider/src` (every canonical identity/derived-record-identity type's
+  own wire prefix) is pairwise distinct from every other one — proving
+  `DomainPersistence`'s flat, per-domain-namespace-free identity keying
+  is safe for every canonical identity type to share one store
+  (`every_canonical_identity_prefix_is_pairwise_distinct`); neither
+  `RESEARCH_EVIDENCE_DB` nor `SCORPION_DOMAIN_DB` appears as a raw string
+  literal in any shipping interface's production code outside
+  `features/domain_runtime.rs` itself
+  (`domain_runtime_seam_owns_database_resolution_not_a_local_literal`)
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

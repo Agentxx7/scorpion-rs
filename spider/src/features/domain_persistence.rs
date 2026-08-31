@@ -77,10 +77,11 @@
 //! persistence. This module is a mechanism two future capabilities will
 //! call into, not a capability itself.
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 use std::time::SystemTime;
 
 /// Failure from this seam. Every variant is storage-shaped — none names a
@@ -166,6 +167,28 @@ impl DomainPersistence {
     }
 
     async fn open_with_options(options: SqliteConnectOptions) -> Result<Self, PersistenceError> {
+        // WAL journal mode + an explicit busy timeout: SQLite's default
+        // rollback-journal mode returns `SQLITE_BUSY` ("database is
+        // locked") immediately on writer contention between two separate
+        // connections to the same file — proven empirically by
+        // `SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001`'s
+        // own multi-handle concurrency tests before this fix. WAL mode is
+        // the standard SQLite-recommended configuration for exactly this
+        // shape (multiple independently opened connections/processes
+        // against one file): readers never block a writer and vice versa,
+        // and a genuine writer/writer conflict then waits (retrying
+        // internally) up to `busy_timeout` instead of failing instantly.
+        // This is configuration of the existing single mechanism, not a
+        // second one — no new dependency, no new table, no new pool
+        // beyond the existing one-per-`DomainPersistence` cap this
+        // module's own compare-and-swap race-freedom already relies on.
+        // Harmless (and effectively a no-op journal-mode-wise) for
+        // `open_in_memory()` — SQLite always uses its own `MEMORY`
+        // journal mode for `:memory:` regardless of what is requested.
+        let options = options
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+
         // Capped at one connection deliberately — see the module-level
         // "Storage technology" doc section for why this is what makes
         // write_current's compare-and-swap race-free.
@@ -245,7 +268,25 @@ impl DomainPersistence {
         expected_revision: Option<u64>,
         new_state: &[u8],
     ) -> Result<u64, PersistenceError> {
-        let mut tx = self.pool.begin().await.map_err(PersistenceError::Backend)?;
+        // `BEGIN IMMEDIATE`, not a plain (deferred) `BEGIN`: this
+        // transaction reads before it writes, and a deferred transaction
+        // only acquires SQLite's write lock at the *first write*, not at
+        // `BEGIN` — so two concurrent deferred transactions from two
+        // separate connections (exactly the shape two independently
+        // opened `DomainPersistence` handles against one file produce)
+        // can each take the initial read lock, then both try to upgrade
+        // to a write lock at the same time. That specific upgrade
+        // conflict is a real SQLite deadlock, not an ordinary busy-wait —
+        // `busy_timeout` does not resolve it. `BEGIN IMMEDIATE` takes the
+        // write lock up front, so a second concurrent writer instead
+        // blocks (and correctly retries via `busy_timeout`) before ever
+        // starting its own read — proven by
+        // `concurrent_use_from_two_handles_against_the_same_file_does_not_deadlock_or_corrupt`.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(PersistenceError::Backend)?;
 
         let actual: Option<i64> = sqlx::query_scalar(
             "SELECT revision FROM scorpion_domain_current_state WHERE identity = ?",
@@ -513,6 +554,209 @@ mod tests {
         let (rev_b, state_b) = store.read_current("evid_b").await.unwrap().unwrap();
         assert_eq!((rev_a, state_a), (1, b"a1".to_vec()));
         assert_eq!((rev_b, state_b), (1, b"b1".to_vec()));
+    }
+
+    // --- SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001 ---
+    //
+    // Prerequisite reconnaissance for MCP audit shipping: prove two
+    // independently constructed `DomainPersistence` values (never the same
+    // Rust value, never sharing a `SqlitePool`) can safely observe the same
+    // real on-disk SQLite file, and that ordinary near-concurrent use does
+    // not reveal an architectural blocker. `open_in_memory()` is
+    // deliberately never used in this section — an in-memory store is
+    // process-local and cannot be shared across two handles at all, which
+    // is exactly the property under test.
+
+    fn shared_binding_test_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "scorpion-shared-binding-test-{}-{name}-{}.sqlite3",
+            std::process::id(),
+            // A monotonically increasing per-process counter, not just the
+            // PID, so multiple tests in this same file never race on one
+            // path even though `cargo test` runs them concurrently by
+            // default.
+            {
+                static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            }
+        ))
+    }
+
+    /// Gate 2: two independently opened `DomainPersistence` instances,
+    /// against the same real file, are not two separate stores — a write
+    /// through one is visible through the other for both `write_current`
+    /// and `append_history`.
+    #[tokio::test]
+    async fn two_independently_opened_handles_against_the_same_file_see_each_others_writes() {
+        let path = shared_binding_test_path("cross-handle-visibility");
+        let _ = std::fs::remove_file(&path);
+
+        let handle_a = DomainPersistence::open(&path).await.unwrap();
+        let handle_b = DomainPersistence::open(&path).await.unwrap();
+
+        // write_current through A, read through B.
+        handle_a
+            .write_current("watch_shared_test", None, b"from-a")
+            .await
+            .unwrap();
+        let (revision, state) = handle_b
+            .read_current("watch_shared_test")
+            .await
+            .unwrap()
+            .expect("handle_b must see handle_a's write_current");
+        assert_eq!(revision, 1);
+        assert_eq!(state, b"from-a");
+
+        // append_history through B, read through A.
+        let now = SystemTime::now();
+        handle_b
+            .append_history("evid_shared_test", 1, b"from-b", now)
+            .await
+            .unwrap();
+        let history = handle_a.read_history("evid_shared_test").await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].1, b"from-b");
+
+        // A second write_current on B (compare-and-swap against the
+        // revision A produced) round-trips correctly too — the CAS
+        // invariant holds across handles, not just within one.
+        handle_b
+            .write_current("watch_shared_test", Some(1), b"from-b-cas")
+            .await
+            .unwrap();
+        let (revision, state) = handle_a
+            .read_current("watch_shared_test")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision, 2);
+        assert_eq!(state, b"from-b-cas");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Gate 5: near-concurrent use from two independently opened handles
+    /// against the same file does not deadlock, corrupt data, or lose a
+    /// write — proven both for disjoint identities (no lock contention
+    /// expected) and for the same identity (real SQLite writer
+    /// contention, resolved by each handle's single-connection pool
+    /// serializing its own queries and SQLite's own file locking
+    /// serializing the two pools against each other).
+    #[tokio::test]
+    async fn concurrent_use_from_two_handles_against_the_same_file_does_not_deadlock_or_corrupt() {
+        let path = shared_binding_test_path("concurrent-use");
+        let _ = std::fs::remove_file(&path);
+
+        let handle_a = DomainPersistence::open(&path).await.unwrap();
+        let handle_b = DomainPersistence::open(&path).await.unwrap();
+
+        // Disjoint identities, concurrently, from two separate handles.
+        let (result_a, result_b) = tokio::join!(
+            handle_a.write_current("watch_concurrent_a", None, b"a-value"),
+            handle_b.write_current("watch_concurrent_b", None, b"b-value"),
+        );
+        result_a.unwrap();
+        result_b.unwrap();
+        assert_eq!(
+            handle_a
+                .read_current("watch_concurrent_a")
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            b"a-value"
+        );
+        assert_eq!(
+            handle_b
+                .read_current("watch_concurrent_b")
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            b"b-value"
+        );
+
+        // The same identity, from two handles, truly concurrently. SQLite
+        // serializes real writer contention at the file level; neither
+        // side may silently lose its write, corrupt the row, or hang.
+        // Exactly one of the two "first write" (`None`) attempts must
+        // succeed and the other must see a genuine
+        // `CurrentStateConflict` — never both succeeding (which would mean
+        // a lost update) and never both failing (which would mean the row
+        // was never written at all).
+        let (first, second) = tokio::join!(
+            handle_a.write_current("watch_contended", None, b"from-a"),
+            handle_b.write_current("watch_contended", None, b"from-b"),
+        );
+        let outcomes = [first, second];
+        let successes = outcomes.iter().filter(|result| result.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent first-write must win; got {outcomes:?}"
+        );
+        let (revision, state) = handle_a
+            .read_current("watch_contended")
+            .await
+            .unwrap()
+            .expect("the winning write must be durably visible");
+        assert_eq!(revision, 1);
+        assert!(state == b"from-a" || state == b"from-b");
+
+        // append_history to the same identity/revision from both handles
+        // concurrently: exactly one must win (HistoryAlreadyExists for the
+        // loser), and the winning record is never overwritten.
+        let now = SystemTime::now();
+        let (first, second) = tokio::join!(
+            handle_a.append_history("evid_contended", 1, b"from-a", now),
+            handle_b.append_history("evid_contended", 1, b"from-b", now),
+        );
+        let outcomes = [&first, &second];
+        let successes = outcomes.iter().filter(|result| result.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent history append must win"
+        );
+        let history = handle_b.read_history("evid_contended").await.unwrap();
+        assert_eq!(history.len(), 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Gate 2 (reopen variant): a `DomainPersistence` opened, dropped, and
+    /// reopened by a second, independent process-equivalent handle against
+    /// the same path sees everything the first handle durably wrote — the
+    /// scenario a short-lived MCP tool call (open → one write → drop)
+    /// followed by a later CLI/Web Console read actually looks like.
+    #[tokio::test]
+    async fn a_handle_opened_after_the_first_is_dropped_sees_everything_the_first_wrote() {
+        let path = shared_binding_test_path("reopen-after-drop");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let handle = DomainPersistence::open(&path).await.unwrap();
+            handle
+                .write_current("watch_reopen", None, b"durable")
+                .await
+                .unwrap();
+            handle
+                .append_history("evid_reopen", 1, b"durable-history", SystemTime::now())
+                .await
+                .unwrap();
+        } // handle dropped — its pool and connection are gone.
+
+        let reopened = DomainPersistence::open(&path).await.unwrap();
+        let (revision, state) = reopened
+            .read_current("watch_reopen")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(state, b"durable");
+        let history = reopened.read_history("evid_reopen").await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].1, b"durable-history");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

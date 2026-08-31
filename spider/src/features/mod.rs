@@ -154,6 +154,15 @@ pub mod discovery_target;
 /// `SCORPION_SDD.md` §5.2.
 #[cfg(feature = "disk")]
 pub mod domain_persistence;
+/// Canonical, neutral runtime binding to the one shared `DomainPersistence`
+/// store every Scorpion interface may open — `SCORPION_DOMAIN_DB`
+/// (preferred) / `RESEARCH_EVIDENCE_DB` (legacy fallback, explicitly
+/// reconciled, not silently aliased). Resolves a path and opens a handle;
+/// decides no domain semantics of its own. See
+/// `SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001` and
+/// `SCORPION_ARCHITECTURE.md`.
+#[cfg(feature = "disk")]
+pub mod domain_runtime;
 /// Canonical state/transition semantics for persisted Scorpion domain
 /// objects: `CurrentState`, `HistoryEntry`, `HistoryLog`, `Transition`.
 /// Semantics only — no persistence, no concrete state machine, no product

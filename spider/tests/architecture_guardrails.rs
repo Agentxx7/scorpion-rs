@@ -5499,7 +5499,13 @@ fn shipping_research_cli_is_a_thin_canonical_session_binding() {
         "async fn format_session(",
         "format_session(&store, &run.session, verbose)",
         "format_session(&store, &session, verbose)",
-        "RESEARCH_EVIDENCE_DB",
+        // Database-path resolution is delegated to the canonical, neutral
+        // seam (SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001)
+        // rather than the CLI resolving RESEARCH_EVIDENCE_DB locally — see
+        // `domain_runtime_seam_owns_database_resolution_not_a_local_literal`
+        // below for the guardrail proving neither this file nor any other
+        // interface reintroduces a local literal.
+        "domain_runtime::resolve_domain_database_path(",
         "OPENAI_COMPAT_API_KEY",
     ] {
         assert!(
@@ -6708,4 +6714,121 @@ fn canonical_missing_production_version_is_exactly_two() {
         "SEO_CANONICAL_MISSING_RULE_VERSION must be exactly 2 in production \
          code — see that constant's own doc comment for why"
     );
+}
+
+// ---------------------------------------------------------------------------
+// SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001
+// ---------------------------------------------------------------------------
+//
+// This frontier proved (via real multi-handle tests in
+// `domain_persistence.rs`/`evidence.rs`/`audit.rs`) that one shared,
+// operator-configured `DomainPersistence` SQLite file can safely be opened
+// by more than one independent interface process — the prerequisite MCP
+// audit shipping (and, later, a Web Console) needs. Gate 1 of that proof —
+// "identity namespaces are safe for one shared store" — is a static, purely
+// textual fact about every canonical identity type's own wire prefix, and
+// belongs here as a durable guardrail: every current and future canonical
+// identity/derived-record-identity type must declare a `PREFIX` distinct
+// from every other one, because `DomainPersistence`'s two tables key
+// entirely on the raw formatted identity string with no per-domain
+// namespace of their own (see that module's own doc comment) — a prefix
+// collision would be a genuine cross-domain identity collision risk, not
+// merely a style issue.
+
+/// Neither `RESEARCH_EVIDENCE_DB` nor `SCORPION_DOMAIN_DB` may appear as a
+/// raw string literal in any shipping interface's *production* code
+/// (`spider_cli/src`, `scorpion_app/src`, `spider_mcp/src`) — only in
+/// `spider/src/features/domain_runtime.rs`, where the two constants are
+/// canonically declared. An interface that re-typed either literal locally
+/// would be exactly the "silent aliasing"/parallel resolution
+/// `SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001`
+/// requires be avoided — every interface must delegate to
+/// `domain_runtime::resolve_domain_database_path`/`open_shared_domain_store`
+/// instead. Test code is exempt (fixture environment lookups legitimately
+/// name these strings) — this checks only the production half of each
+/// file.
+#[test]
+fn domain_runtime_seam_owns_database_resolution_not_a_local_literal() {
+    let canonical = read_src_file("features/domain_runtime.rs");
+    assert!(canonical.contains("\"SCORPION_DOMAIN_DB\""));
+    assert!(canonical.contains("\"RESEARCH_EVIDENCE_DB\""));
+
+    for (name, relative) in [
+        ("spider_cli", "spider_cli/src"),
+        ("scorpion_app", "scorpion_app/src"),
+        ("spider_mcp", "spider_mcp/src"),
+    ] {
+        let dir = workspace_root().join(relative);
+        if !dir.is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        collect_rust_files(&dir, &dir, &mut files);
+        for file in files {
+            let production = file
+                .contents
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(&file.contents);
+            for forbidden in ["\"RESEARCH_EVIDENCE_DB\"", "\"SCORPION_DOMAIN_DB\""] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{name} ({}) must not declare {forbidden} as a local \
+                     string literal in production code — delegate to \
+                     spider::features::domain_runtime instead",
+                    file.relative_path
+                );
+            }
+        }
+    }
+}
+
+/// Every `pub const PREFIX: &'static str = "..."` declared anywhere in
+/// `spider/src` — the wire prefix of one canonical identity or
+/// content-addressed derived-record identity type — is pairwise distinct
+/// from every other one, and no prefix is itself a leading substring of
+/// another. `DomainPersistence` stores every identity as an opaque `TEXT`
+/// primary key with no per-type namespace (see
+/// `features/domain_persistence.rs`'s own doc comment) — this is what
+/// makes it safe for every canonical identity type to share one store.
+#[test]
+fn every_canonical_identity_prefix_is_pairwise_distinct() {
+    let files = scan_spider_src();
+    let marker = "pub const PREFIX: &'static str = \"";
+    let mut prefixes: Vec<(String, String)> = Vec::new();
+    for file in &files {
+        let mut rest = file.contents.as_str();
+        while let Some(start) = rest.find(marker) {
+            let after = &rest[start + marker.len()..];
+            let end = after
+                .find('"')
+                .expect("PREFIX declaration must close its string literal");
+            let value = after[..end].to_string();
+            prefixes.push((value, file.relative_path.clone()));
+            rest = &after[end..];
+        }
+    }
+    assert!(
+        prefixes.len() >= 7,
+        "expected at least the 7 canonical prefixes known at this frontier \
+         (evid_, research_, watch_, auth_, finding_, change_, lineage_), \
+         found {prefixes:?} — the PREFIX-declaration pattern this test \
+         scans for may have changed"
+    );
+    for i in 0..prefixes.len() {
+        for j in (i + 1)..prefixes.len() {
+            let (prefix_a, file_a) = &prefixes[i];
+            let (prefix_b, file_b) = &prefixes[j];
+            assert!(
+                prefix_a != prefix_b
+                    && !prefix_a.starts_with(prefix_b.as_str())
+                    && !prefix_b.starts_with(prefix_a.as_str()),
+                "canonical identity prefix collision: {prefix_a:?} \
+                 ({file_a}) vs {prefix_b:?} ({file_b}) — two different \
+                 identity types must never be able to produce the same \
+                 formatted wire string when they may share one \
+                 DomainPersistence store"
+            );
+        }
+    }
 }

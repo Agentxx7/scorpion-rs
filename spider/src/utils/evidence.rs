@@ -1456,5 +1456,41 @@ mod tests {
             let evidence_ref = EvidenceRef::new(EvidenceId::new());
             assert!(evidence_ref.resolve(&store).await.unwrap().is_none());
         }
+
+        // SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001
+        // Gate 3: evidence written through one `DomainPersistence` handle
+        // resolves truthfully through a second, independently opened
+        // handle against the same real on-disk file — the exact shape a
+        // future MCP process (open, record, respond) and a later
+        // CLI/Web Console read (open again, resolve) actually take.
+        #[tokio::test]
+        async fn evidence_recorded_through_one_handle_resolves_through_a_second_handle_on_the_same_file(
+        ) {
+            let path = std::env::temp_dir().join(format!(
+                "scorpion-shared-binding-evidence-test-{}-{}.sqlite3",
+                std::process::id(),
+                EvidenceId::new()
+            ));
+            let _ = std::fs::remove_file(&path);
+
+            let writer = DomainPersistence::open(&path).await.unwrap();
+            let recorded = record_evidence(&writer, sample_bundle()).await.unwrap();
+            let evidence_ref = EvidenceRef::new(recorded.id.unwrap());
+            drop(writer);
+
+            // A genuinely separate handle, opened independently against
+            // the same path — never the same `DomainPersistence` value.
+            let reader = DomainPersistence::open(&path).await.unwrap();
+            let resolved = evidence_ref
+                .resolve(&reader)
+                .await
+                .unwrap()
+                .expect("evidence recorded by one handle must resolve through another");
+            assert_eq!(resolved.id, Some(evidence_ref.id()));
+            assert_eq!(resolved.requested_url, recorded.requested_url);
+            assert_eq!(resolved.content, recorded.content);
+
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

@@ -3055,6 +3055,45 @@ mod tests {
                 assert_eq!(bundle.response_body_hash, None);
             }
         }
+
+        // SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001
+        // Gate 4: a Finding recorded through one `DomainPersistence`
+        // handle is readable, byte-for-byte, through a second,
+        // independently opened handle against the same real file — the
+        // same cross-handle durability `audit_page` will rely on once a
+        // production interface (MCP, and later a Web Console) opens its
+        // own handle against the shared canonical store rather than the
+        // exact handle that wrote it.
+        #[tokio::test]
+        async fn finding_recorded_through_one_handle_is_readable_through_a_second_handle_on_the_same_file(
+        ) {
+            let path = std::env::temp_dir().join(format!(
+                "scorpion-shared-binding-finding-test-{}-{}.sqlite3",
+                std::process::id(),
+                crate::features::identity::EvidenceId::new()
+            ));
+            let _ = std::fs::remove_file(&path);
+
+            let writer = DomainPersistence::open(&path).await.unwrap();
+            let page = page_with_html(
+                "https://example.test/",
+                "<html><head></head><body>hello</body></html>",
+            );
+            let evidenced = EvidencedPageFacts::record(&writer, &page).await.unwrap();
+            let finding = seo_canonical_missing(&evidenced).unwrap();
+            let id = finding.id();
+            record_finding(&writer, finding.clone()).await.unwrap();
+            drop(writer);
+
+            let reader = DomainPersistence::open(&path).await.unwrap();
+            let read_back = read_finding(&reader, &id)
+                .await
+                .unwrap()
+                .expect("a Finding recorded by one handle must read back through another");
+            assert_eq!(read_back, finding);
+
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     // Phase 16: full local-fixture end-to-end proof.

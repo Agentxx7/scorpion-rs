@@ -14,7 +14,6 @@ use spider::features::search::resolve_search_provider;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const DATABASE_ENV: &str = "RESEARCH_EVIDENCE_DB";
 const SEARXNG_ENV: &str = "SEARXNG_BASE_URL";
 const SEARCH_PROVIDER_ENV: &str = "SEARCH_PROVIDER";
 const BRAVE_ENV: &str = "BRAVE_API_KEY";
@@ -81,9 +80,15 @@ fn configured_database(
     cli: Option<PathBuf>,
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<PathBuf, String> {
-    cli.filter(|path| !path.as_os_str().is_empty())
-        .or_else(|| lookup(DATABASE_ENV).and_then(nonempty).map(PathBuf::from))
-        .ok_or_else(|| format!("missing required research configuration: {DATABASE_ENV}"))
+    // Delegates to the canonical, neutral resolver
+    // (`SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001`)
+    // rather than resolving `RESEARCH_EVIDENCE_DB` locally:
+    // `SCORPION_DOMAIN_DB` now takes priority when set, and
+    // `RESEARCH_EVIDENCE_DB` remains fully honored as an explicit,
+    // tested fallback — an operator with only the legacy variable set
+    // keeps working unmodified. See
+    // `spider::features::domain_runtime`'s own doc comment.
+    spider::features::domain_runtime::resolve_domain_database_path(cli, lookup)
 }
 
 fn resolve_run_config(
@@ -392,6 +397,7 @@ pub async fn execute(request: Request, verbose: bool) -> Result<CommandOutput, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spider::features::domain_runtime::LEGACY_RESEARCH_DATABASE_ENV as DATABASE_ENV;
     use spider::features::identity::EvidenceId;
     use spider::features::research_session::{
         DurableResearchExtraction, DurableResearchResult, ResearchSessionCounts,
@@ -454,7 +460,7 @@ mod tests {
         assert_eq!(config.database, PathBuf::from("env.sqlite"));
 
         for missing in [
-            DATABASE_ENV,
+            DATABASE_ENV, // == LEGACY_RESEARCH_DATABASE_ENV
             SEARXNG_ENV,
             OPENAI_BASE_ENV,
             MODEL_ENV,
@@ -469,6 +475,31 @@ mod tests {
             .unwrap_err();
             assert!(error.contains(missing), "{error}");
         }
+    }
+
+    // SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001:
+    // explicit reconciliation proven at this exact call site, not just
+    // inside `domain_runtime`'s own tests — `configured_database` really
+    // does delegate, and the new neutral variable really does take
+    // priority over the legacy Research-specific one when both are set.
+    #[test]
+    fn neutral_scorpion_domain_db_takes_priority_over_legacy_research_evidence_db() {
+        let values = HashMap::from([
+            (
+                spider::features::domain_runtime::DOMAIN_DATABASE_ENV,
+                "neutral.sqlite",
+            ),
+            (DATABASE_ENV, "legacy.sqlite"),
+            (SEARXNG_ENV, "https://env-search"),
+            (OPENAI_BASE_ENV, "https://env-model/v1"),
+            (MODEL_ENV, "env-model"),
+            (API_KEY_ENV, "secret"),
+        ]);
+        let config = resolve_run_config(&run_params(), &|name| {
+            values.get(name).map(ToString::to_string)
+        })
+        .unwrap();
+        assert_eq!(config.database, PathBuf::from("neutral.sqlite"));
     }
 
     #[tokio::test]

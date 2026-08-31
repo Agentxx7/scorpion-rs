@@ -448,7 +448,11 @@ impl ResearchService {
         let id: ResearchId = raw_id
             .parse()
             .map_err(|_| ResearchError::InvalidRequest("invalid research id".into()))?;
-        let database = PathBuf::from(required_env("RESEARCH_EVIDENCE_DB")?);
+        let database =
+            spider::features::domain_runtime::resolve_domain_database_path(None, &|name| {
+                std::env::var(name).ok()
+            })
+            .map_err(|_| ResearchError::NotConfigured)?;
         let store = DomainPersistence::open(&database)
             .await
             .map_err(|_| ResearchError::Unavailable)?;
@@ -469,14 +473,16 @@ fn required_config(
         .ok_or(ResearchError::NotConfigured)
 }
 
-fn required_env(name: &str) -> Result<String, ResearchError> {
-    required_config(name, &|name| std::env::var(name).ok())
-}
-
 fn resolve_research_config_with(
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<ResearchRuntimeConfig, ResearchError> {
-    let database = PathBuf::from(required_config("RESEARCH_EVIDENCE_DB", lookup)?);
+    // Canonical, neutral resolver
+    // (`SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001`):
+    // `SCORPION_DOMAIN_DB` takes priority when set; `RESEARCH_EVIDENCE_DB`
+    // remains fully honored as an explicit, tested fallback — an operator
+    // with only the legacy variable set keeps working unmodified.
+    let database = spider::features::domain_runtime::resolve_domain_database_path(None, lookup)
+        .map_err(|_| ResearchError::NotConfigured)?;
     let openai_base_url = required_config("OPENAI_COMPAT_BASE_URL", lookup)?;
     let model = required_config("OPENAI_COMPAT_MODEL", lookup)?;
     let api_key = required_config("OPENAI_COMPAT_API_KEY", lookup)?;
@@ -671,6 +677,25 @@ mod tests {
             );
             assert!(resolve_research_config_with(&incomplete).is_err());
         }
+    }
+
+    // SCORPION_CANONICAL_SHARED_DOMAIN_PERSISTENCE_RUNTIME_BINDING_001:
+    // explicit reconciliation proven at this call site too — the neutral
+    // SCORPION_DOMAIN_DB variable takes priority over the legacy
+    // RESEARCH_EVIDENCE_DB when both are set.
+    #[test]
+    fn resolve_research_config_prefers_the_neutral_domain_database_variable() {
+        let configured = |name: &str| match name {
+            "SCORPION_DOMAIN_DB" => Some("/tmp/neutral.sqlite".to_string()),
+            "RESEARCH_EVIDENCE_DB" => Some("/tmp/legacy.sqlite".to_string()),
+            "SEARXNG_BASE_URL" => Some("http://127.0.0.1:8080".to_string()),
+            "OPENAI_COMPAT_BASE_URL" => Some("http://127.0.0.1:11434/v1".to_string()),
+            "OPENAI_COMPAT_MODEL" => Some("operator-model".to_string()),
+            "OPENAI_COMPAT_API_KEY" => Some("operator-key".to_string()),
+            _ => None,
+        };
+        let config = resolve_research_config_with(&configured).unwrap();
+        assert_eq!(config.database, PathBuf::from("/tmp/neutral.sqlite"));
     }
 
     #[test]

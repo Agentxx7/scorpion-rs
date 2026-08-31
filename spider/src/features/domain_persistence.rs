@@ -144,9 +144,36 @@ pub struct DomainPersistence {
     pool: SqlitePool,
 }
 
+/// `true` only for a raw `SQLITE_BUSY` (extended result code `5`) —
+/// "database is locked" — surfaced through this module's own
+/// [`PersistenceError::Backend`] wrapping. Never matches any other error
+/// (a genuine I/O failure, a malformed path, corruption); [`DomainPersistence::open`]'s
+/// retry loop must fail fast on anything else.
+fn is_sqlite_busy(error: &PersistenceError) -> bool {
+    let PersistenceError::Backend(sqlx::Error::Database(db_error)) = error else {
+        return false;
+    };
+    db_error.code().as_deref() == Some("5")
+}
+
 impl DomainPersistence {
     /// Open (creating if absent) a SQLite-backed persistence store at
     /// `path`, creating its two tables if they do not already exist.
+    ///
+    /// Retries a bounded number of times, with a short backoff, on a raw
+    /// `SQLITE_BUSY` ("database is locked") specifically — proven
+    /// necessary, not merely theoretical, by
+    /// `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`'s own
+    /// concurrent-`open()`-against-a-fresh-file tests: converting a
+    /// brand-new file to WAL journal mode is a one-time operation SQLite
+    /// performs during connection setup, and two connections racing to
+    /// perform that conversion on the *same not-yet-existing* file can
+    /// both observe `SQLITE_BUSY` there — before this module's own
+    /// `BEGIN IMMEDIATE`-guarded table creation ever runs, so that fix
+    /// alone does not cover this earlier, narrower race. This retry is
+    /// scoped to file-backed opens only (never `open_in_memory`, which
+    /// creates a private, never-shared, never-racing database) and stops
+    /// retrying immediately on any other error.
     pub async fn open(path: &Path) -> Result<Self, PersistenceError> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -156,7 +183,19 @@ impl DomainPersistence {
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))
             .map_err(PersistenceError::Backend)?
             .create_if_missing(true);
-        Self::open_with_options(options).await
+
+        const MAX_ATTEMPTS: u32 = 5;
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            match Self::open_with_options(options.clone()).await {
+                Ok(store) => return Ok(store),
+                Err(error) if attempt < MAX_ATTEMPTS && is_sqlite_busy(&error) => {
+                    tokio::time::sleep(Duration::from_millis(20 * u64::from(attempt))).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Open a private, in-memory persistence store — every table lives
@@ -198,6 +237,28 @@ impl DomainPersistence {
             .await
             .map_err(PersistenceError::Backend)?;
 
+        // `BEGIN IMMEDIATE`, matching `write_current`'s own fix and for
+        // exactly the same reason: two independently constructed
+        // `DomainPersistence` values racing to `open()` the *same
+        // not-yet-existing* file each get their own connection, and each
+        // connection issuing these two `CREATE TABLE IF NOT EXISTS`
+        // statements as separate, ordinary (deferred) auto-commit
+        // statements let two concurrent openers race on first table
+        // creation — proven empirically by
+        // `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`'s own
+        // concurrent-`spider_audit_page`-calls-against-a-fresh-store test
+        // (a scenario the prerequisite frontier's own concurrency tests
+        // never exercised: those opened both handles sequentially, before
+        // testing concurrent *writes* — never concurrent *first opens*).
+        // Taking the write lock immediately, before either statement
+        // runs, makes a second concurrent opener wait and retry via
+        // `busy_timeout` instead of failing instantly, exactly like
+        // `write_current`.
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(PersistenceError::Backend)?;
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS scorpion_domain_current_state (
                 identity TEXT PRIMARY KEY,
@@ -205,7 +266,7 @@ impl DomainPersistence {
                 state BLOB NOT NULL
             )",
         )
-        .execute(&pool)
+        .execute(&mut *tx)
         .await
         .map_err(PersistenceError::Backend)?;
 
@@ -218,9 +279,11 @@ impl DomainPersistence {
                 PRIMARY KEY (identity, revision)
             )",
         )
-        .execute(&pool)
+        .execute(&mut *tx)
         .await
         .map_err(PersistenceError::Backend)?;
+
+        tx.commit().await.map_err(PersistenceError::Backend)?;
 
         Ok(Self { pool })
     }
@@ -755,6 +818,44 @@ mod tests {
         let history = reopened.read_history("evid_reopen").await.unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].1, b"durable-history");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`: two concurrent
+    /// `DomainPersistence::open()` calls against the *same not-yet-existing*
+    /// file — the scenario two `spider_audit_page` MCP calls arriving at
+    /// nearly the same moment against a fresh `SCORPION_DOMAIN_DB` produce.
+    /// Distinct from, and initially not covered by, the concurrent-*write*
+    /// proof above (which opens both handles sequentially first). Without
+    /// `open_with_options`'s own `BEGIN IMMEDIATE` fix, this genuinely
+    /// failed with a real "database is locked" error — both connections
+    /// racing to run `CREATE TABLE IF NOT EXISTS` as separate deferred
+    /// auto-commit statements.
+    #[tokio::test]
+    async fn concurrent_first_open_of_the_same_not_yet_existing_file_does_not_fail() {
+        let path = shared_binding_test_path("concurrent-first-open");
+        let _ = std::fs::remove_file(&path);
+        assert!(!path.exists());
+
+        let (first, second) = tokio::join!(
+            DomainPersistence::open(&path),
+            DomainPersistence::open(&path)
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        first
+            .write_current("watch_concurrent_open", None, b"from-first")
+            .await
+            .unwrap();
+        let (revision, state) = second
+            .read_current("watch_concurrent_open")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(state, b"from-first");
 
         let _ = std::fs::remove_file(&path);
     }

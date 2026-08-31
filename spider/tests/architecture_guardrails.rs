@@ -6612,10 +6612,71 @@ fn audit_module_never_shells_out_or_invokes_a_network_scanner() {
     }
 }
 
-/// No shipping surface (CLI/API/MCP/Web Console) references the audit
-/// module yet.
+/// Precise allowed-consumer boundary for the canonical audit module,
+/// updated by `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` from a
+/// blanket "no shipping crate may reference audit at all" prohibition
+/// (correct before any shipping frontier existed) to what is true now:
+/// exactly one shipping file — the `spider_audit_page` MCP tool — is
+/// authorized to call the aggregate seam and reuse the canonical result
+/// vocabulary needed to serialize it. This is a narrowing of the
+/// boundary, not a broad weakening: two invariants are checked
+/// independently.
+///
+/// 1. **Universally forbidden, with no exception anywhere, including the
+///    one authorized file**: every internal assembly primitive
+///    `audit_page` itself calls — the individual rule functions,
+///    `PageFacts::from_page`, `EvidencedPageFacts::record`,
+///    `extract_technology_markers`/its two header/HTML sub-extractors,
+///    `FindingId::derive`, `record_finding`, `analyze_page`. An interface
+///    calls the aggregate seam; it never assembles the capability
+///    itself.
+/// 2. **Authorized only inside `spider_mcp/src/tools/audit.rs`**: the
+///    aggregate seam and result vocabulary
+///    (`features::audit`/`audit_page`/`Finding`/`ObservedTechnologyMarker`/
+///    `TechnologyMarkerSource`/`FindingId`/`EvidencedPageFacts`/
+///    `PageAuditResult`). Every other shipping file, in every shipping
+///    crate — `spider_cli`, `scorpion_app`, and every other file in
+///    `spider_mcp` — remains under the original blanket prohibition.
 #[test]
-fn no_shipping_crate_references_the_audit_module() {
+fn audit_module_has_a_precise_allowed_consumer_boundary() {
+    let forbidden_internals = [
+        "PAGE_RULES",
+        "seo_canonical_missing(",
+        "seo_title_missing(",
+        "seo_meta_description_missing(",
+        "seo_h1_missing(",
+        "seo_h1_multiple(",
+        "seo_html_lang_missing(",
+        "seo_image_alt_missing(",
+        "security_https_missing(",
+        "security_hsts_missing(",
+        "security_csp_missing(",
+        "security_x_content_type_options_missing(",
+        "PageFacts::from_page",
+        "EvidencedPageFacts::record",
+        "extract_technology_markers(",
+        "extract_response_header_technology_markers",
+        "extract_html_generator_technology_markers",
+        "FindingId::derive",
+        "record_finding(",
+        "analyze_page(",
+    ];
+    let result_vocabulary = [
+        "features::audit",
+        // A call `audit_page(...)`, not a bare substring — the
+        // authorized MCP tool's own wire-facing name
+        // (`"spider_audit_page"`, in server.rs's `#[tool(name = ...)]`)
+        // legitimately contains "audit_page" as a substring without
+        // referencing the canonical function at all.
+        "audit_page(",
+        "ObservedTechnologyMarker",
+        "TechnologyMarkerSource",
+        "FindingId",
+        "EvidencedPageFacts",
+        "PageAuditResult",
+    ];
+    let allowed_consumer_files = [("spider_mcp", "tools/audit.rs")];
+
     for (name, relative) in [
         ("spider_cli", "spider_cli/src"),
         ("spider_mcp", "spider_mcp/src"),
@@ -6628,25 +6689,42 @@ fn no_shipping_crate_references_the_audit_module() {
         let mut files = Vec::new();
         collect_rust_files(&dir, &dir, &mut files);
         for file in files {
-            assert!(
-                !file.contents.contains("features::audit")
-                    && !file.contents.contains("audit_page")
-                    && !file.contents.contains("analyze_page")
-                    && !file.contents.contains("extract_technology_markers")
-                    && !file.contents.contains("ObservedTechnologyMarker")
-                    && !file.contents.contains("TechnologyMarkerSource")
-                    && !file.contents.contains("FindingId")
-                    && !file.contents.contains("EvidencedPageFacts")
-                    && !file.contents.contains("PageAuditResult"),
-                "{name} ({}) must not reference the audit module or its \
-                 canonical result vocabulary — no CLI/API/MCP/Web Console \
-                 audit or technology-marker surface, and no independent \
-                 reimplementation of Finding/marker identity, is \
-                 authorized in SCORPION_AUDIT_DETERMINISTIC_PAGE_ANALYZERS_001, \
-                 SCORPION_AUDIT_OBSERVED_TECHNOLOGY_MARKERS_001, or \
-                 SCORPION_CANONICAL_AUDIT_ARCHITECTURE_RECONCILIATION_001",
-                file.relative_path
-            );
+            let production = file
+                .contents
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(&file.contents);
+
+            for forbidden in forbidden_internals {
+                assert!(
+                    !production.contains(forbidden),
+                    "{name} ({}) must not assemble the audit capability \
+                     itself — found internal primitive {forbidden:?}; an \
+                     interface calls the aggregate audit_page seam, it \
+                     never reimplements the rules/extraction/persistence \
+                     underneath it",
+                    file.relative_path
+                );
+            }
+
+            let is_allowed_consumer = allowed_consumer_files.iter().any(|(crate_name, path)| {
+                *crate_name == name && file.relative_path.replace('\\', "/") == *path
+            });
+            if is_allowed_consumer {
+                continue;
+            }
+
+            for forbidden in result_vocabulary {
+                assert!(
+                    !production.contains(forbidden),
+                    "{name} ({}) must not reference the audit module or \
+                     its canonical result vocabulary — only \
+                     spider_mcp/src/tools/audit.rs is authorized to \
+                     consume the aggregate audit_page seam \
+                     (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001)",
+                    file.relative_path
+                );
+            }
         }
     }
 }

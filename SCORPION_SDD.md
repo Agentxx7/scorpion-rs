@@ -325,19 +325,24 @@ Interfaces must not:
 - independently implement deterministic audit rule evaluation
   (SEO/security-header rules or any future rule), technology-marker
   extraction, applicability decisions, rule-version semantics, or
-  `FindingId`/marker identity derivation — a future MCP tool or Web
+  `FindingId`/marker identity derivation — the `spider_audit_page` MCP
+  tool (`spider_mcp/src/tools/audit.rs`, realized by
+  `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`) and, in future, a Web
   Console/API must call `audit_page()`/`PageAuditResult` (§4; see
-  `SCORPION_ARCHITECTURE.md` §3.19) as its sole source of audit truth,
+  `SCORPION_ARCHITECTURE.md` §3.19) as their sole source of audit truth,
   never re-derive or approximate it, and must never reconstruct a
   parallel evidence truth where a shared `EvidenceRef` already resolves
   the same underlying evidence for both an AI-visible and a human-facing
-  consumer
+  consumer — no other file, in any shipping crate, may reference the
+  audit module's result vocabulary at all
 
 Current conformance: `spider_cli` and `spider_mcp` call canonical seams
 (`fetch_single_page_with_options`, `build_evidence`, `Website` crawl seam,
-search providers) and hold no duplicate domain models. `spider_cli::oauth`
-constructs an HTTP client as a documented authentication-flow exception —
-not an acquisition path.
+search providers, and — `spider_mcp` only, through the one authorized
+file above — `audit_page()`/`domain_runtime::open_shared_domain_store()`)
+and hold no duplicate domain models. `spider_cli::oauth` constructs an
+HTTP client as a documented authentication-flow exception — not an
+acquisition path.
 
 ---
 

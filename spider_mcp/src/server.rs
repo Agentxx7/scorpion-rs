@@ -12,9 +12,9 @@ use crate::tools::robots_sitemap::RobotsSitemapReadParams;
 #[cfg(feature = "sitemap")]
 use crate::tools::sitemap::SitemapReadParams;
 use crate::tools::{
-    crawl::CrawlParams, crawl_status::CrawlStatusParams, links::LinksParams,
-    media_search::MediaSearchParams, news_search::NewsSearchParams, scrape::ScrapeParams,
-    search::SearchParams, transform::TransformParams,
+    audit::AuditPageParams, crawl::CrawlParams, crawl_status::CrawlStatusParams,
+    links::LinksParams, media_search::MediaSearchParams, news_search::NewsSearchParams,
+    scrape::ScrapeParams, search::SearchParams, transform::TransformParams,
 };
 
 #[derive(Clone)]
@@ -169,6 +169,17 @@ impl SpiderMcpServer {
         Parameters(params): Parameters<NewsSearchParams>,
     ) -> Result<String, String> {
         crate::tools::news_search::run(params).await
+    }
+
+    #[tool(
+        name = "spider_audit_page",
+        description = "Deterministically audit exactly one page: acquire it once, then run Scorpion's fixed, versioned, evidence-bound rule set over the observed facts (SEO structural checks and passive security-header checks) and extract directly-observed technology markers (Server/X-Powered-By/X-Generator response headers, <meta name=\"generator\">). Returns the canonical evidence_ref, every deterministic finding (rule_id, rule_version, category, severity, condition, evidence), and every observed technology marker — never an inferred, probabilistic, or AI-generated judgment. Not a vulnerability scanner, not a technology-fingerprinting/CMS-detection tool, and not an active prober — it reports only what the target explicitly exposed in one acquisition."
+    )]
+    async fn audit_page_tool(
+        &self,
+        Parameters(params): Parameters<AuditPageParams>,
+    ) -> Result<String, String> {
+        crate::tools::audit::run(params).await
     }
 }
 
@@ -350,6 +361,51 @@ mod tests {
             "required": ["query", "provider"]
         });
         assert_eq!(actual, expected);
+    }
+
+    /// Phase 15 (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001): the
+    /// real server router — not a standalone `run()` helper — actually
+    /// advertises `spider_audit_page` with exactly one authorized
+    /// property (`url`, required), and its description makes no
+    /// AI-analysis/vulnerability-scanning/active-probing claim.
+    #[test]
+    fn spider_audit_page_tool_is_registered_with_exact_input_schema() {
+        let router = SpiderMcpServer::tool_router();
+        let tools = router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "spider_audit_page")
+            .expect("spider_audit_page must be registered in the tool router");
+        let actual = serde_json::Value::Object((*tool.input_schema).clone());
+        let expected = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "url": {"description": "The URL to audit", "type": "string"}
+            },
+            "required": ["url"]
+        });
+        assert_eq!(actual, expected);
+
+        let description = tool
+            .description
+            .as_deref()
+            .expect("spider_audit_page must have a description");
+        assert!(description.contains("deterministic"));
+        assert!(description.contains("evidence"));
+        // Explicit truthful disclaimers ("Not a vulnerability scanner...")
+        // are exactly what this tool should say — checked for presence,
+        // not absence.
+        assert!(description.contains("Not a vulnerability scanner"));
+        assert!(description.contains("not an active prober"));
+        for forbidden in ["confidence score", "risk score", "AI-generated summary"] {
+            assert!(
+                !description
+                    .to_lowercase()
+                    .contains(&forbidden.to_lowercase()),
+                "spider_audit_page description must not claim {forbidden:?}: {description:?}"
+            );
+        }
     }
 
     /// Section L (blocker-fix frontier): the full `transport` field

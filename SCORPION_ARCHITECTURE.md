@@ -124,7 +124,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
 | CLI | `spider_cli` | canonical Spider public seams, including `run_durable_research`, `read_research_session`, and `EvidenceRef::resolve` | `Agent::research`, `CanonicalPageAcquirer` construction, identity minting, parallel persistence, independent domain logic | `scorpion` binary, including `scorpion research` / `research show` | None |
-| MCP | `spider_mcp` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers` | `reqwest::Client` construction, independent domain logic | `serve_stdio()` | `spider_mcp::evidence` shim |
+| MCP | `spider_mcp` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers`, `spider::features::audit`/`domain_runtime` (`spider_mcp/src/tools/audit.rs` only — see §3.19) | `reqwest::Client` construction, independent domain logic, independent audit rule/technology-marker assembly | `serve_stdio()` | `spider_mcp::evidence` shim |
 | Agent types | `spider_agent_types` | Pure data | `spider`, `spider_agent` | Data types | None |
 | Agent HTML | `spider_agent_html` | `lol_html` | `spider`, `spider_agent` | `clean_html*()` | None |
 
@@ -625,33 +625,61 @@ interchangeable:
 
 `PageAuditResult { evidence_ref, findings, technology_markers }` is the one
 canonical aggregate result `audit_page` returns — both result vocabularies,
-bound to the one shared `EvidenceRef`, in one value. It is explicitly *not*
-a shipping DTO: no CLI/API/MCP/Web Console schema is authorized by any of
-the three closed frontiers that built this capability, and none is
-authorized by this reconciliation frontier either (§7.7).
+bound to the one shared `EvidenceRef`, in one value. It is not itself
+`Serialize`; the one authorized shipping DTO that projects it onto a wire
+shape is described immediately below (still not a second model — see its
+own doc comment).
 
-**Human/AI interface boundary (future-facing, not implemented here):** a
-future MCP tool and a future Web Console/API must both eventually consume
-`audit_page`/`PageAuditResult` as their sole source of truth for audit
-results — never re-derive, re-implement, or approximate SEO rule
-evaluation, security-header rules, technology-marker extraction,
-applicability decisions, rule versions, or `FindingId` derivation
-independently (§7.6, §7.7). Both consumers observe the *same*
+**Human/AI interface boundary — MCP realized by
+`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`, Web Console still
+future:** `spider_mcp/src/tools/audit.rs` is the single authorized MCP
+consumer — the `spider_audit_page` tool — of `audit_page`/
+`PageAuditResult` (§7.6, §7.7); every other shipping file, in every
+shipping crate, remains forbidden from referencing the audit module or
+its result vocabulary at all
+(`audit_module_has_a_precise_allowed_consumer_boundary`, which also keeps
+every internal assembly primitive — the individual rule functions,
+`PageFacts::from_page`, `EvidencedPageFacts::record`,
+`extract_technology_markers` and its two sub-extractors, `FindingId::derive`,
+`record_finding` — universally forbidden, with no exception even inside
+that one authorized file: an interface calls the aggregate seam, it never
+assembles the capability itself). A future Web Console/API must consume
+the identical seam the same way — never re-derive, re-implement, or
+approximate SEO rule evaluation, security-header rules, technology-marker
+extraction, applicability decisions, rule versions, or `FindingId`
+derivation independently. Both consumers observe the *same*
 `PageAuditResult`/evidence truth:
 
 ```text
                        AI
                         │
-                       MCP
+                       MCP (spider_mcp/src/tools/audit.rs, realized)
                         │
                         ▼
                  canonical audit (audit_page / PageAuditResult)
                         ▲
                         │
-                 Web Console/API
+                 Web Console/API (still future)
                         │
                       human
 ```
+
+**Persistence binding, realized:** the MCP tool obtains its durable store
+exclusively through `domain_runtime::open_shared_domain_store` (§3.11),
+resolved fresh on every call — never a server-owned eagerly-opened
+handle, and never `DomainPersistence::open_in_memory` — so
+`SpiderMcpServer::new()` keeps starting, and every unrelated tool keeps
+working, with no durable-audit configuration present at all; audit
+persistence configuration is that one tool's own fail-closed concern.
+Concurrent `spider_audit_page` calls against a shared, possibly-fresh
+store are safe (`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` found and
+fixed one further narrow gap this usage pattern newly exposed — two
+connections racing to convert a *not-yet-existing* file to WAL during
+`DomainPersistence::open` itself, distinct from the writer/writer
+contention the prerequisite frontier had already hardened — with a
+bounded, `SQLITE_BUSY`-scoped retry in `DomainPersistence::open`, and the
+same `BEGIN IMMEDIATE` discipline extended to that module's own table
+creation).
 
 **Human-in-the-loop evidence principle:** every AI-visible `Finding` or
 `ObservedTechnologyMarker` carries (directly, or via `PageAuditResult`'s
@@ -660,10 +688,17 @@ owns (§3.6) — the same identity a future human-facing interface resolves
 through `EvidenceRef::resolve` to inspect the identical underlying
 evidence an AI consumer saw. No new identity (`AuditId`, `TechnologyMarkerId`,
 or otherwise) is authorized merely to give a human interface its own
-parallel reference; `EvidenceRef`/`EvidenceId` is authoritative. A future
-Web Console must not reconstruct a parallel truth — inspecting "what the AI
-saw" and "what a human reviewer sees" must resolve to the same evidence
-record, not two independently derived ones.
+parallel reference; `EvidenceRef`/`EvidenceId` is authoritative — the MCP
+tool's own wire response carries `evidence_ref` as that exact `EvidenceId`'s
+own canonical string form, never minted, hashed, or translated, and
+production-reality tests prove it resolves from a process wholly distinct
+from the one that wrote it. A future Web Console must not reconstruct a
+parallel truth — inspecting "what the AI saw" and "what a human reviewer
+sees" must resolve to the same evidence record, not two independently
+derived ones. MCP exposes no generic `EvidenceRef -> EvidenceBundle` read
+capability yet (deferred candidate:
+`SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) — the audit response itself
+does not need to embed the full evidence bundle.
 
 ---
 
@@ -1216,13 +1251,24 @@ The following are intentionally not refactored in this frontier:
   `EvidenceBundle`, and `FindingId` is not registered in
   `features/identity.rs`; the module introduces no second persistence
   backend, no network/process-execution capability, no AI dependency,
-  and no technology/CMS/framework/WAF fingerprinting vocabulary; and no
-  shipping crate (`spider_cli`/`spider_mcp`/`scorpion_app`) references
-  `features::audit`, `audit_page`, `analyze_page`,
-  `extract_technology_markers`, `ObservedTechnologyMarker`, `FindingId`,
-  `EvidencedPageFacts`, `PageAuditResult`, or `TechnologyMarkerSource` —
-  proving no parallel audit/technology-marker surface exists anywhere
-  outside `features/audit.rs`
+  and no technology/CMS/framework/WAF fingerprinting vocabulary; and the
+  audit module's result vocabulary (`features::audit`, `audit_page(`,
+  `ObservedTechnologyMarker`, `TechnologyMarkerSource`, `FindingId`,
+  `EvidencedPageFacts`, `PageAuditResult`) is referenced by exactly one
+  shipping file — `spider_mcp/src/tools/audit.rs`, the authorized
+  `spider_audit_page` MCP tool
+  (`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`) — and by no other
+  file in `spider_cli`, `spider_mcp`, or `scorpion_app`
+  (`audit_module_has_a_precise_allowed_consumer_boundary`), while every
+  internal assembly primitive (the individual rule functions,
+  `PageFacts::from_page`, `EvidencedPageFacts::record`,
+  `extract_technology_markers` and its two sub-extractors,
+  `FindingId::derive`, `record_finding`, `analyze_page`) remains
+  universally forbidden with no exception, including inside that one
+  authorized file — proving no parallel audit/technology-marker surface
+  exists anywhere outside `features/audit.rs`, and that the one
+  authorized MCP consumer calls the aggregate seam rather than
+  assembling the capability itself
 
 - Every `pub const PREFIX: &'static str = "..."` declared anywhere in
   `spider/src` (every canonical identity/derived-record-identity type's

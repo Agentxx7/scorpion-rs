@@ -244,14 +244,35 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
 # shipping_manifests` both still pass unchanged.
+# Re-bound again, to the current 663c8213, for the same reason as both
+# prior re-binds: SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001 added
+# "disk" to spider_mcp/Cargo.toml's `[dependencies.spider]` features
+# list (one word on one existing line, no line added/removed) —
+# unrelated to CAPTCHA/chrome, but spider_mcp/Cargo.toml is itself one
+# of this capability's own closure_relevant_files (cited for the same
+# `default = [...]`/chrome-feature facts `verdict_evidence` above
+# names), so that byte change alone invalidated 5223110f's binding
+# here too. Every fact `verdict_evidence` cites about
+# spider_mcp/Cargo.toml (the `default = [...]` line, its line number)
+# is unchanged — confirmed by inspection, not merely assumed — and
+# every other closure_relevant_file (spider/tests/closure_harness*.rs,
+# spider/Cargo.toml, spider_cli/Cargo.toml, every other known shipping
+# artifact's Cargo.toml, spider/src/website.rs, spider/src/page.rs,
+# spider_mcp/src/tools/mod.rs) remained untouched. No CAPTCHA
+# detection, solving, provider routing, frame/OOPIF handling, or CI
+# evidence this capability cites changed at all — confirmed empirically
+# by re-running this harness itself:
+# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
+# source` and `production_reachable_claims_are_grep_verified_against_
+# shipping_manifests` both still pass unchanged.
 # reviewed_commit below is the current, authoritative binding
-# (5223110f); 8d8173f2 remains accurate as the prior attestation point
-# in this history, not as the present claim.
+# (663c8213); 5223110f and 8d8173f2 remain accurate as prior
+# attestation points in this history, not as the present claim.
 # Re-enumerated every CLOSED capability binding rust.yml before the
 # 8d8173f2 re-bind (grep across every docs/frontier/ledger/*.toml for
 # `ci_workflow_file`/`[stages.CLOSED]`): CAPTCHA is the only one that
 # exists in this repository.
-reviewed_commit = "5223110fcbb54fc46089e8092c74c5ee5d4f2eca"
+reviewed_commit = "663c8213915afe6d2d913f0aae900e8a10e079b3"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -300,8 +321,8 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # .github/workflows/rust.yml; this capability's own CAPTCHA pre-build
 # step and CI-enforced step were both byte-for-byte unchanged in that
 # diff.
-# Later re-bound again, to the current 5223110f, for the same reason
-# reviewed_commit above was: commit 5223110f added one line to
+# Later re-bound again, to 5223110f, for the same reason reviewed_commit
+# above was at that time: commit 5223110f added one line to
 # spider_cli/Cargo.toml's `research` feature list (`"spider/search"`)
 # — unrelated to CAPTCHA/chrome, but spider_cli/Cargo.toml is itself
 # one of this capability's own closure_relevant_files, so that byte
@@ -312,7 +333,13 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # file, spider/src/website.rs, spider/src/page.rs) remained untouched
 # across both re-binds. No CAPTCHA detection, solving, provider
 # routing, frame/OOPIF handling, or CI evidence this capability cites
-# changed at all. closed_commit below is the current, authoritative
-# binding (5223110f); 8d8173f2 remains accurate as the prior
-# attestation point in this history, not as the present claim.
-closed_commit = "5223110fcbb54fc46089e8092c74c5ee5d4f2eca"
+# changed at all.
+# Re-bound a third time, to the current 663c8213, for the same reason
+# reviewed_commit above was — see that field's own comment
+# (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001 added "disk" to
+# spider_mcp/Cargo.toml's spider-dependency features list; every
+# CAPTCHA-relevant fact and every other closure_relevant_file remained
+# untouched). closed_commit below is the current, authoritative
+# binding (663c8213); 5223110f and 8d8173f2 remain accurate as prior
+# attestation points in this history, not as the present claim.
+closed_commit = "663c8213915afe6d2d913f0aae900e8a10e079b3"

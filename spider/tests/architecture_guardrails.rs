@@ -6919,18 +6919,25 @@ fn every_canonical_identity_prefix_is_pairwise_distinct() {
 /// analogous to audit's own boundary
 /// (`audit_module_has_a_precise_allowed_consumer_boundary`).
 /// `read_evidence`/`EvidenceRef::resolve(` — the persistence-touching
-/// evidence-read operations — are authorized in exactly one shipping
-/// file: `spider_mcp/src/tools/evidence_read.rs`. `EvidenceBundle`/
-/// `build_evidence` remain broadly usable everywhere they already are
-/// (construction from a freshly acquired page — already used by
-/// `spider_scrape`/`spider_crawl`'s own `evidence: true` opt-in) — this
-/// guardrail narrows only the read/resolve seam, which touches durable
-/// persistence and, before this frontier, no shipping interface used at
-/// all.
+/// evidence-read operations — are authorized in exactly two shipping
+/// files, MCP and Web Console, peer interfaces over the same canonical
+/// core that never call each other:
+/// `spider_mcp/src/tools/evidence_read.rs` (the `spider_evidence_read`
+/// MCP tool, `SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) and
+/// `scorpion_app/src/evidence.rs` (the Web Console's HTTP evidence-read
+/// boundary, `SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`,
+/// added second). `EvidenceBundle`/`build_evidence` remain broadly usable
+/// everywhere they already are (construction from a freshly acquired
+/// page — already used by `spider_scrape`/`spider_crawl`'s own
+/// `evidence: true` opt-in) — this guardrail narrows only the
+/// read/resolve seam, which touches durable persistence.
 #[test]
 fn evidence_read_tool_has_a_precise_allowed_consumer_boundary() {
     let forbidden_calls = ["read_evidence(", "EvidenceRef::resolve("];
-    let allowed_consumer_files = [("spider_mcp", "tools/evidence_read.rs")];
+    let allowed_consumer_files = [
+        ("spider_mcp", "tools/evidence_read.rs"),
+        ("scorpion_app", "evidence.rs"),
+    ];
 
     for (name, relative) in [
         ("spider_cli", "spider_cli/src"),
@@ -6961,9 +6968,11 @@ fn evidence_read_tool_has_a_precise_allowed_consumer_boundary() {
                 assert!(
                     !production.contains(forbidden),
                     "{name} ({}) must not call {forbidden:?} — only \
-                     spider_mcp/src/tools/evidence_read.rs is authorized \
-                     to resolve durable evidence \
-                     (SCORPION_MCP_CANONICAL_EVIDENCE_READ_001)",
+                     spider_mcp/src/tools/evidence_read.rs and \
+                     scorpion_app/src/evidence.rs are authorized to \
+                     resolve durable evidence \
+                     (SCORPION_MCP_CANONICAL_EVIDENCE_READ_001, \
+                     SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001)",
                     file.relative_path
                 );
             }
@@ -7006,6 +7015,86 @@ fn evidence_read_tool_has_zero_acquisition_or_audit_capability() {
              {forbidden:?} in production code — this tool reads existing \
              durable evidence only, it never acquires, audits, or \
              mutates (SCORPION_MCP_CANONICAL_EVIDENCE_READ_001)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001
+// ---------------------------------------------------------------------------
+
+/// `scorpion_app/src/evidence.rs`'s production code has zero
+/// target-acquisition and zero audit capability of its own, and never
+/// opens its own persistence handle with a locally selected
+/// configuration — "read means read," the Web Console's own peer of
+/// `evidence_read_tool_has_zero_acquisition_or_audit_capability`.
+/// Structural proof the module never imports or calls any
+/// acquisition/audit/search/mutation/local-open primitive; see this
+/// module's own tests for the behavioral proof (repeated reads leave
+/// history unchanged) and `scorpion_app/tests/*` for the real-fixture,
+/// zero-network proof. `DomainPersistence::open(` is forbidden here even
+/// though `scorpion_app/src/lib.rs` legitimately calls it for Research
+/// (a pre-existing, unrelated capability this frontier does not touch) —
+/// this check is scoped to `evidence.rs` alone, which must obtain its
+/// handle exclusively through `open_shared_domain_store`.
+#[test]
+fn scorpion_app_evidence_seam_has_zero_acquisition_or_audit_capability() {
+    let full_source = fs::read_to_string(workspace_root().join("scorpion_app/src/evidence.rs"))
+        .expect("failed to read scorpion_app/src/evidence.rs");
+    let production = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    for forbidden in [
+        "fetch_single_page",
+        "Website",
+        "reqwest::Client",
+        "audit_page(",
+        "record_evidence(",
+        "append_history(",
+        "write_current(",
+        "record_finding(",
+        "DomainPersistence::open(",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "scorpion_app/src/evidence.rs must not reference {forbidden:?} \
+             in production code — this Web Console seam reads existing \
+             durable evidence only, through open_shared_domain_store, \
+             it never acquires, audits, mutates, or opens its own \
+             locally configured persistence handle \
+             (SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001)"
+        );
+    }
+}
+
+/// The Web Console's rendering source (`scorpion_app/src/main.rs`, which
+/// embeds the entire `INDEX_HTML` page including the Evidence Inspector's
+/// script) never uses an unsafe HTML-injection primitive anywhere —
+/// target-controlled evidence content must always render as inert text.
+/// `scorpion_app/src/main.rs` has no `#[cfg(test)]` module, so the whole
+/// file is production code; this is therefore already the precise
+/// evidence-rendering boundary, not a repository-wide ban (no other file
+/// in this crate renders HTML at all).
+#[test]
+fn web_console_never_uses_unsafe_dom_injection_primitives() {
+    let main_source = fs::read_to_string(workspace_root().join("scorpion_app/src/main.rs"))
+        .expect("failed to read scorpion_app/src/main.rs");
+    for forbidden in [
+        "innerHTML",
+        "outerHTML",
+        "insertAdjacentHTML",
+        "document.write",
+        "eval(",
+        "new Function",
+    ] {
+        assert!(
+            !main_source.contains(forbidden),
+            "scorpion_app/src/main.rs must not reference {forbidden:?} — \
+             the Evidence Inspector renders target-controlled evidence \
+             content, which must always be inserted as inert text \
+             (createTextNode/textContent-equivalent), never interpreted \
+             as markup (SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001)"
         );
     }
 }

@@ -335,13 +335,24 @@ Interfaces must not:
   the same underlying evidence for both an AI-visible and a human-facing
   consumer — no other file, in any shipping crate, may reference the
   audit module's result vocabulary at all
-- independently resolve/reconstruct durable evidence — the
-  `spider_evidence_read` MCP tool (`spider_mcp/src/tools/evidence_read.rs`,
-  realized by `SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) is the sole
-  authorized shipping consumer of the persistence-touching
-  `EvidenceRef::resolve`/`read_evidence` seam, and returns the canonical
-  `EvidenceBundle` exactly as persisted — no re-fetch, no recalculated
-  hash, no reconstructed provenance, no normalization; "read means read"
+- independently resolve/reconstruct durable evidence — exactly two
+  shipping files are authorized consumers of the persistence-touching
+  `EvidenceRef::resolve`/`read_evidence` seam, peer interfaces that never
+  call each other: the `spider_evidence_read` MCP tool
+  (`spider_mcp/src/tools/evidence_read.rs`, realized by
+  `SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`) and the Web Console's HTTP
+  evidence-read boundary (`scorpion_app/src/evidence.rs`, `GET
+  /api/evidence/{evidence_ref}`, realized by
+  `SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`). Both return
+  the canonical `EvidenceBundle` exactly as persisted — no re-fetch, no
+  recalculated hash, no reconstructed provenance, no normalization;
+  "read means read." Neither reconstructs a parallel evidence truth: the
+  same `EvidenceRef`, passed with zero translation, resolves to a
+  semantically identical `EvidenceBundle` through either interface
+  (`scorpion_app/tests/cross_interface_evidence.rs`). Web Console audit
+  *execution* (a URL input, "Run Audit," `/api/audit`, Findings UI) is a
+  separate, still-future frontier — this boundary covers evidence
+  *inspection* of an already-existing `EvidenceRef` only.
 
 Current conformance: `spider_cli` and `spider_mcp` call canonical seams
 (`fetch_single_page_with_options`, `build_evidence`, `Website` crawl seam,
@@ -350,6 +361,11 @@ files above — `audit_page()`/`EvidenceRef::resolve()`/
 `domain_runtime::open_shared_domain_store()`) and hold no duplicate
 domain models. `spider_cli::oauth` constructs an HTTP client as a
 documented authentication-flow exception — not an acquisition path.
+`scorpion_app` calls canonical seams too (`resolve_search_provider`,
+`AgentBuilder`/`claim_durable_research`, `domain_runtime::
+open_shared_domain_store`, and — through `scorpion_app/src/evidence.rs`
+only — `EvidenceRef::resolve()`) and holds no duplicate domain model or
+second persistence mechanism of its own.
 
 ---
 

@@ -1,3 +1,4 @@
+use scorpion_app::evidence::{evidence, evidence_error_json, evidence_error_status};
 use scorpion_app::{
     error_json, error_status, research_availability, research_error_json, research_error_status,
     search, ResearchAvailability, ResearchError, ResearchRequest, ResearchService, SearchError,
@@ -93,6 +94,21 @@ async fn handle(
         return write_json(&mut stream, 200, r#"{"status":"ok"}"#)
             .await
             .map_err(Into::into);
+    }
+    if method == "GET" && path.starts_with("/api/evidence/") {
+        let raw_ref = &path["/api/evidence/".len()..];
+        return match evidence(raw_ref).await {
+            Ok(bundle) => write_json(&mut stream, 200, &serde_json::to_string(&bundle)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                evidence_error_status(&error),
+                &evidence_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
     }
     if method == "GET" && path.starts_with("/api/research/") {
         let raw_id = &path["/api/research/".len()..];
@@ -240,7 +256,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .url { color: #536170; font-size: .85rem; overflow-wrap: anywhere; }
     .snippet { margin: .3rem 0; }
     .meta { color: #536170; font-size: .85rem; }
-    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } }
+    .evidence-field { margin: .2rem 0; overflow-wrap: anywhere; }
+    #evidence-result pre { background: #eef1f5; border: 1px solid #d6dce3; border-radius: .4rem; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre { background: #1b222c; border-color: #536170; } }
   </style>
 </head>
 <body>
@@ -265,6 +283,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </form>
       <div id="research-status" role="status" aria-live="polite"></div>
       <div id="research-result"></div>
+    </section>
+    <section aria-labelledby="evidence-heading">
+      <h2 id="evidence-heading">Evidence Inspector</h2>
+      <p class="tagline">Inspect the exact canonical evidence record an AI resolved through MCP — no re-fetch, no reconstruction.</p>
+      <form id="evidence-form">
+        <label for="evidence-ref" hidden>Evidence reference</label>
+        <input id="evidence-ref" name="evidence_ref" type="text" placeholder="evid_..." autocomplete="off" required>
+        <button id="evidence-button" type="submit">Inspect evidence</button>
+      </form>
+      <div id="evidence-status" role="status" aria-live="polite"></div>
+      <div id="evidence-result"></div>
     </section>
   </main>
   <script>
@@ -396,6 +425,106 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } catch (_) {
         if (generation === researchGeneration) renderResearchError('Research is unavailable.');
         researchButton.disabled = false;
+      }
+    });
+
+    // Evidence Inspector — fact inspection only. Every persisted value is
+    // target-controlled and MUST be treated as inert text, never markup:
+    // this section uses only the same createTextNode-based `text()`
+    // helper already used above, never a raw-markup DOM-injection
+    // primitive anywhere in this file. A stored value containing
+    // "<script>...</script>" or "<img onerror=...>" must render as
+    // literal, inert text — see spider/tests/architecture_guardrails.rs.
+    const evidenceForm = document.getElementById('evidence-form');
+    const evidenceRefInput = document.getElementById('evidence-ref');
+    const evidenceButton = document.getElementById('evidence-button');
+    const evidenceStatus = document.getElementById('evidence-status');
+    const evidenceResult = document.getElementById('evidence-result');
+    function renderEvidenceError(message) {
+      evidenceStatus.className = 'error';
+      evidenceStatus.replaceChildren(text(message));
+      evidenceResult.replaceChildren();
+    }
+    function evidenceLabel(label) {
+      const h = document.createElement('h3');
+      h.appendChild(text(label));
+      return h;
+    }
+    function evidenceField(label, value) {
+      const row = document.createElement('div');
+      row.className = 'evidence-field';
+      const term = document.createElement('strong');
+      term.appendChild(text(label + ': '));
+      row.append(term, text(value === null || value === undefined ? '(absent)' : String(value)));
+      return row;
+    }
+    function evidencePre(contents) {
+      const pre = document.createElement('pre');
+      pre.appendChild(text(contents));
+      return pre;
+    }
+    function renderEvidence(bundle) {
+      evidenceStatus.className = '';
+      evidenceStatus.replaceChildren(text('Evidence found.'));
+      const container = document.createElement('div');
+      container.append(
+        evidenceField('Evidence ID', bundle.id),
+        evidenceField('Requested URL', bundle.requested_url),
+        evidenceField('Final URL', bundle.final_url),
+        evidenceField('Retrieved at', bundle.retrieved_at),
+        evidenceField('Effective status', bundle.status_code),
+        evidenceField('Observed HTTP status', bundle.observed_status_code),
+        evidenceField('Declared content type', bundle.content_type),
+        evidenceField('Detected content type', bundle.detected_content_type),
+        evidenceField('Transport', bundle.transport),
+        evidenceField('DNS mode', bundle.dns),
+        evidenceField('Backend provenance', bundle.backend_provenance),
+        evidenceField('Response origin', bundle.response_origin),
+        evidenceField('Response body hash', bundle.response_body_hash),
+        evidenceField('Transformed content hash', bundle.transformed_content_hash),
+      );
+      if (bundle.response_headers) {
+        container.append(evidenceLabel('Response headers'), evidencePre(JSON.stringify(bundle.response_headers, null, 2)));
+      }
+      if (bundle.links) {
+        container.append(evidenceLabel('Links'), evidencePre(bundle.links.join('\n')));
+      }
+      if (bundle.content !== null && bundle.content !== undefined) {
+        container.append(evidenceLabel('Content (inert text — never executed)'), evidencePre(bundle.content));
+      }
+      if (bundle.metadata) {
+        container.append(evidenceLabel('Metadata'), evidencePre(JSON.stringify(bundle.metadata, null, 2)));
+      }
+      if (bundle.screenshot) {
+        container.append(
+          evidenceField('Screenshot hash', bundle.screenshot_hash),
+          evidenceLabel('Screenshot (raw base64 — no rendered preview in this frontier)'),
+          evidencePre(bundle.screenshot),
+        );
+      }
+      container.append(evidenceLabel('Raw canonical evidence (complete stored value)'), evidencePre(JSON.stringify(bundle, null, 2)));
+      evidenceResult.replaceChildren(container);
+    }
+    evidenceForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const ref = evidenceRefInput.value.trim();
+      if (!ref) { renderEvidenceError('Enter an evidence reference.'); return; }
+      evidenceButton.disabled = true;
+      evidenceStatus.className = '';
+      evidenceStatus.replaceChildren(text('Inspecting evidence…'));
+      evidenceResult.replaceChildren();
+      try {
+        const response = await fetch(`/api/evidence/${encodeURIComponent(ref)}`);
+        const payload = await response.json();
+        if (!response.ok) {
+          renderEvidenceError(payload?.error?.message || 'Evidence is unavailable.');
+          return;
+        }
+        renderEvidence(payload);
+      } catch (_) {
+        renderEvidenceError('Evidence inspection is temporarily unavailable.');
+      } finally {
+        evidenceButton.disabled = false;
       }
     });
   </script>

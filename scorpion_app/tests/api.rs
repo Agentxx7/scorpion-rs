@@ -568,3 +568,313 @@ fn provider_runtime_failure_never_leaks_operator_configuration_sentinels() {
         "{response}"
     );
 }
+
+// ---------------------------------------------------------------------
+// SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001
+//
+// GET /api/evidence/{evidence_ref} acceptance matrix (Phase 20) against
+// the real, compiled `scorpion-api` binary. Evidence is seeded directly
+// through the canonical `spider::utils::evidence::record_evidence` seam
+// against a real on-disk SQLite file — never through the HTTP API itself
+// (there is no write path here to seed through) — then resolved purely
+// over HTTP, proving the same canonical `EvidenceBundle` a durable write
+// produced is exactly what the read boundary returns.
+// ---------------------------------------------------------------------
+
+fn evidence_db_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "scorpion-api-evidence-route-test-{}-{name}.sqlite3",
+        std::process::id()
+    ))
+}
+
+/// Record one representative `EvidenceBundle` directly through the
+/// canonical seam (not through HTTP) and return its assigned `EvidenceId`
+/// string. Uses a brand-new tokio runtime since `tests/api.rs` itself is
+/// not an async test file.
+fn seed_evidence(path: &std::path::Path) -> String {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let store = spider::features::domain_persistence::DomainPersistence::open(path)
+            .await
+            .unwrap();
+        let mut response_headers = std::collections::BTreeMap::new();
+        response_headers.insert("server".to_string(), vec![b"nginx/fixture".to_vec()]);
+        let bundle = spider::utils::evidence::EvidenceBundle {
+            requested_url: Some("https://example.test/evidence-route".to_string()),
+            final_url: Some("https://example.test/evidence-route".to_string()),
+            retrieved_at: Some(1_700_000_000_000),
+            status_code: Some(200),
+            observed_status_code: Some(200),
+            content_type: Some("text/html; charset=utf-8".to_string()),
+            content: Some("<html><body>hello evidence route</body></html>".to_string()),
+            transport: Some("default".to_string()),
+            backend_provenance: Some("reqwest".to_string()),
+            response_origin: Some("network".to_string()),
+            response_headers: Some(response_headers),
+            ..Default::default()
+        };
+        let recorded = spider::utils::evidence::record_evidence(&store, bundle)
+            .await
+            .unwrap();
+        recorded.id.unwrap().to_string()
+    })
+}
+
+fn evidence_env(db_path: &std::path::Path) -> Vec<(&'static str, String)> {
+    vec![("SCORPION_DOMAIN_DB", db_path.to_string_lossy().to_string())]
+}
+
+#[test]
+fn valid_evidence_ref_returns_the_exact_canonical_bundle() {
+    let path = evidence_db_path("valid");
+    let _ = std::fs::remove_file(&path);
+    let evidence_ref = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, &format!("/api/evidence/{evidence_ref}"));
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        response.contains(&format!("\"id\":\"{evidence_ref}\"")),
+        "{response}"
+    );
+    assert!(response.contains("evidence-route"));
+    assert!(response.contains("hello evidence route"));
+    assert!(response.contains("\"backend_provenance\":\"reqwest\""));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn malformed_evidence_ref_is_400() {
+    let path = evidence_db_path("malformed");
+    let _ = std::fs::remove_file(&path);
+    let _ = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, "/api/evidence/not-a-real-evidence-ref");
+    child.kill().unwrap();
+
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"invalid_evidence_reference\""));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn valid_but_absent_evidence_ref_is_404() {
+    let path = evidence_db_path("absent");
+    let _ = std::fs::remove_file(&path);
+    let _ = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, "/api/evidence/evid_0123456789abcdef0123456789abcdef");
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+    assert!(response.contains("\"code\":\"evidence_not_found\""));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn evidence_store_not_configured_is_deterministic_503() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/api/evidence/evid_0123456789abcdef0123456789abcdef");
+    child.kill().unwrap();
+
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"evidence_store_not_configured\""));
+    // No filesystem/persistence diagnostic leakage.
+    assert!(!response.contains(".sqlite"));
+}
+
+#[test]
+fn evidence_store_unavailable_is_deterministic_and_does_not_leak_the_path() {
+    let dir = std::env::temp_dir().join(format!(
+        "scorpion-api-evidence-route-unopenable-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let dir_string = dir.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &dir_string)]);
+    let response = get(&base, "/api/evidence/evid_0123456789abcdef0123456789abcdef");
+    child.kill().unwrap();
+
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"evidence_store_unavailable\""));
+    assert!(!response.contains(&dir_string));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn two_sequential_reads_return_identical_results_and_never_mutate_history() {
+    let path = evidence_db_path("sequential");
+    let _ = std::fs::remove_file(&path);
+    let evidence_ref = seed_evidence(&path);
+
+    let history_before = {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let store = spider::features::domain_persistence::DomainPersistence::open(&path)
+                .await
+                .unwrap();
+            store.read_history(&evidence_ref).await.unwrap()
+        })
+    };
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let first = get(&base, &format!("/api/evidence/{evidence_ref}"));
+    let second = get(&base, &format!("/api/evidence/{evidence_ref}"));
+    child.kill().unwrap();
+
+    assert!(first.starts_with("HTTP/1.1 200 OK"), "{first}");
+    assert_eq!(first, second, "repeated reads must return identical output");
+
+    let history_after = {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let store = spider::features::domain_persistence::DomainPersistence::open(&path)
+                .await
+                .unwrap();
+            store.read_history(&evidence_ref).await.unwrap()
+        })
+    };
+    assert_eq!(
+        history_before, history_after,
+        "reading evidence over HTTP must never mutate persisted history"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn concurrent_evidence_reads_both_succeed() {
+    let path = evidence_db_path("concurrent");
+    let _ = std::fs::remove_file(&path);
+    let evidence_ref = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+
+    let base_a = base.clone();
+    let ref_a = evidence_ref.clone();
+    let handle_a = thread::spawn(move || get(&base_a, &format!("/api/evidence/{ref_a}")));
+    let base_b = base.clone();
+    let ref_b = evidence_ref.clone();
+    let handle_b = thread::spawn(move || get(&base_b, &format!("/api/evidence/{ref_b}")));
+
+    let response_a = handle_a.join().unwrap();
+    let response_b = handle_b.join().unwrap();
+    child.kill().unwrap();
+
+    assert!(response_a.starts_with("HTTP/1.1 200 OK"), "{response_a}");
+    assert!(response_b.starts_with("HTTP/1.1 200 OK"), "{response_b}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The one canonical route that names durable evidence must never be
+/// confused with an unrelated 404. This mirrors the F-4/F-5 discipline
+/// already established for search/research error classes: none of the
+/// evidence error codes should ever collapse into the generic
+/// `not_found` route-miss response the un-matched-route fallback uses.
+#[test]
+fn evidence_route_error_codes_never_collide_with_the_generic_route_not_found_code() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/api/evidence/evid_0123456789abcdef0123456789abcdef");
+    child.kill().unwrap();
+    assert!(!response.contains("\"code\":\"not_found\""), "{response}");
+}
+
+#[test]
+fn console_serves_the_evidence_inspector_section() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("id=\"evidence-heading\""));
+    assert!(response.contains("id=\"evidence-form\""));
+    assert!(response.contains("id=\"evidence-ref\""));
+    assert!(response.contains("id=\"evidence-button\" type=\"submit\">Inspect evidence</button>"));
+    assert!(response.contains("fetch(`/api/evidence/"));
+    // The evidence UI must never require Search/Research configuration —
+    // it is always rendered, independent of ResearchAvailability (Phase 17).
+    assert!(response.contains("Evidence Inspector"));
+}
+
+/// Phase 12/21 XSS-firewall proof, HTTP half: hostile stored evidence
+/// content survives the read path completely unmodified — the server
+/// never strips, escapes, or otherwise interprets it as markup. JSON
+/// string encoding is not HTML-escaping (the literal bytes
+/// `<script>...`/`<img onerror=...>` appear verbatim inside the quoted
+/// JSON string value); the guarantee that the browser never executes
+/// them comes from the structural proof that the console's own
+/// rendering script contains no unsafe DOM-injection primitive at all
+/// (`spider/tests/architecture_guardrails.rs`'s
+/// `web_console_never_uses_unsafe_dom_injection_primitives`) — together
+/// these two proofs cover both ends of the inert-rendering contract.
+#[test]
+fn hostile_stored_content_survives_the_read_path_completely_unmodified() {
+    let path = evidence_db_path("hostile");
+    let _ = std::fs::remove_file(&path);
+
+    const HOSTILE: &str = "<script>alert(\"scorpion-xss\")</script><img src=x onerror=alert(1)>";
+    let evidence_ref = {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let store = spider::features::domain_persistence::DomainPersistence::open(&path)
+                .await
+                .unwrap();
+            let bundle = spider::utils::evidence::EvidenceBundle {
+                requested_url: Some("https://example.test/hostile".to_string()),
+                status_code: Some(200),
+                content: Some(HOSTILE.to_string()),
+                ..Default::default()
+            };
+            let recorded = spider::utils::evidence::record_evidence(&store, bundle)
+                .await
+                .unwrap();
+            recorded.id.unwrap().to_string()
+        })
+    };
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, &format!("/api/evidence/{evidence_ref}"));
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    // Verbatim survival — not stripped, not neutered, not re-encoded.
+    assert!(
+        response.contains("<script>alert(\\\"scorpion-xss\\\")</script>")
+            || response.contains(HOSTILE),
+        "{response}"
+    );
+    assert!(response.contains("onerror=alert(1)"), "{response}");
+
+    let _ = std::fs::remove_file(&path);
+}

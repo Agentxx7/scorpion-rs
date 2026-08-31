@@ -1,8 +1,14 @@
-//! Thin server-side application boundary for a future Scorpion Web Console.
+//! Thin server-side application boundary for the Scorpion Web Console.
 //!
 //! This crate owns request/response DTOs and HTTP mapping only. Search,
 //! provider requests, parsing, and result normalization remain owned by the
 //! canonical `spider_search` capability through Spider's public façade.
+//! Durable evidence inspection (`evidence`) is owned by the same canonical
+//! `spider::utils::evidence`/`spider::features::domain_runtime` seams
+//! `spider_mcp`'s own `spider_evidence_read` MCP tool uses — see that
+//! module's own doc comment.
+
+pub mod evidence;
 
 use serde::{Deserialize, Serialize};
 use spider::agent::{AgentBuilder, ResearchOptions};

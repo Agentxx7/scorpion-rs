@@ -433,7 +433,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     // this section uses only the same createTextNode-based `text()`
     // helper already used above, never a raw-markup DOM-injection
     // primitive anywhere in this file. A stored value containing
-    // "<script>...</script>" or "<img onerror=...>" must render as
+    // "<script>...<\/script>" or "<img onerror=...>" must render as
     // literal, inert text — see spider/tests/architecture_guardrails.rs.
     const evidenceForm = document.getElementById('evidence-form');
     const evidenceRefInput = document.getElementById('evidence-ref');

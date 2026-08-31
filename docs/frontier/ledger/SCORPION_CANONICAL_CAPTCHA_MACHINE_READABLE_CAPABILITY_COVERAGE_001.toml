@@ -212,7 +212,7 @@ siblings = [
 ]
 siblings_note = "spider_cli and spider_mcp are the only known shipping artifacts whose default feature set both enables chrome and whose own source calls Website::crawl directly. spider_worker does not qualify under either its default (no chrome) or an optional chrome build (different call path, Page::new_page_streaming, not Website::crawl)."
 verdict = "MET"
-verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line 62) and spider_cli/src/main.rs:crawl_with_mode calls website.crawl().await under #[cfg(feature = \"chrome\")] when headless is requested — the shipping binary's own default build. spider_mcp/Cargo.toml default = [\"chrome\", ...] (line 54) and spider_mcp/src/tools/mod.rs:spawn_crawl_task calls website.crawl().await under the same #[cfg(feature = \"chrome\")] guard when use_headless is true, via a real `use spider::website::Website;` import (spider_mcp/src/tools/mod.rs:19) binding to the canonical external-artifact spelling."
+verdict_evidence = "spider_cli/Cargo.toml default = [..., \"chrome\", ...] (line 62) and spider_cli/src/main.rs:crawl_with_mode calls website.crawl().await under #[cfg(feature = \"chrome\")] when headless is requested — the shipping binary's own default build. spider_mcp/Cargo.toml default = [\"chrome\", ...] (line 54) and spider_mcp/src/tools/mod.rs:spawn_crawl_task calls website.crawl().await under the same #[cfg(feature = \"chrome\")] guard when use_headless is true, via a real `use spider::website::Website;` import in spider_mcp/src/tools/mod.rs binding to the canonical external-artifact spelling (deliberately cited without a line number: that import has already shifted twice, 19 -> 20 -> 21, purely from unrelated sibling `pub mod` additions to the same file across SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001 and SCORPION_MCP_CANONICAL_EVIDENCE_READ_001, and pinning a line number this file's own normal growth keeps invalidating was never load-bearing for the verdict — the import's existence and spawn_crawl_task's real, unchanged use of it are)."
 
 [stages.ADVERSARIALLY_VERIFIED]
 capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE_001"
@@ -265,14 +265,46 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
 # shipping_manifests` both still pass unchanged.
-# reviewed_commit below is the current, authoritative binding
-# (663c8213); 5223110f and 8d8173f2 remain accurate as prior
-# attestation points in this history, not as the present claim.
+# Re-bound a fourth time (content fix, not a pure pointer/comment
+# update like the prior three): SCORPION_MCP_CANONICAL_EVIDENCE_READ_001
+# (commit 67fc92b5) added one line (`pub mod evidence_read;`) to
+# spider_mcp/src/tools/mod.rs — unrelated to CAPTCHA/chrome, but that
+# file is itself one of this capability's own closure_relevant_files
+# (cited for the exact `use spider::website::Website;` import
+# verdict_evidence above names), so that byte change alone invalidated
+# 663c8213's binding here too. Unlike the prior three re-binds, the
+# fact verdict_evidence cited had genuinely gone stale (the import's
+# line shifted 19 -> 21 across two unrelated frontiers), so this time
+# verdict_evidence's own text was corrected — dropping the fragile
+# line-number citation entirely rather than re-pinning it to another
+# number this file's own ordinary growth would just invalidate again.
+# Because that is a real, non-attestation-only field change, it could
+# not be folded into a single re-bind commit citing itself (a commit
+# cannot cite its own not-yet-computed hash — see this table's own
+# opening comment); it was made as two commits: first the content fix
+# alone (67fc92b5's immediate child, verdict_evidence corrected,
+# reviewed_commit/closed_commit left temporarily stale — those fields
+# are attestation-only and do not gate that intermediate commit's own
+# validity), then this commit, which re-points reviewed_commit/
+# closed_commit at that content-fix commit now that its hash is known.
+# Every other closure_relevant_file (spider_mcp/Cargo.toml, spider/
+# tests/closure_harness*.rs, spider/Cargo.toml, spider_cli/Cargo.toml,
+# every other known shipping artifact's Cargo.toml, spider/src/
+# website.rs, spider/src/page.rs) remained untouched throughout. No
+# CAPTCHA detection, solving, provider routing, frame/OOPIF handling,
+# or CI evidence this capability cites changed at all — confirmed
+# empirically by re-running this harness itself:
+# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
+# source` and `production_reachable_claims_are_grep_verified_against_
+# shipping_manifests` both still pass unchanged.
+# reviewed_commit below is the current, authoritative binding; 663c8213,
+# 5223110f, and 8d8173f2 remain accurate as prior attestation points in
+# this history, not as the present claim.
 # Re-enumerated every CLOSED capability binding rust.yml before the
 # 8d8173f2 re-bind (grep across every docs/frontier/ledger/*.toml for
 # `ci_workflow_file`/`[stages.CLOSED]`): CAPTCHA is the only one that
 # exists in this repository.
-reviewed_commit = "663c8213915afe6d2d913f0aae900e8a10e079b3"
+reviewed_commit = "PLACEHOLDER_CONTENT_FIX_COMMIT"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -334,12 +366,23 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # across both re-binds. No CAPTCHA detection, solving, provider
 # routing, frame/OOPIF handling, or CI evidence this capability cites
 # changed at all.
-# Re-bound a third time, to the current 663c8213, for the same reason
-# reviewed_commit above was — see that field's own comment
-# (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001 added "disk" to
-# spider_mcp/Cargo.toml's spider-dependency features list; every
-# CAPTCHA-relevant fact and every other closure_relevant_file remained
-# untouched). closed_commit below is the current, authoritative
-# binding (663c8213); 5223110f and 8d8173f2 remain accurate as prior
-# attestation points in this history, not as the present claim.
-closed_commit = "663c8213915afe6d2d913f0aae900e8a10e079b3"
+# Re-bound a third time, to 663c8213, for the same reason
+# reviewed_commit above was at that time (SCORPION_MCP_CANONICAL_
+# PAGE_AUDIT_SHIPPING_001 added "disk" to spider_mcp/Cargo.toml's
+# spider-dependency features list; every CAPTCHA-relevant fact and
+# every other closure_relevant_file remained untouched).
+# Re-bound a fourth time, for the same reason reviewed_commit above
+# was — see that field's own comment in full (SCORPION_MCP_CANONICAL_
+# EVIDENCE_READ_001's commit 67fc92b5 shifted the cited `use
+# spider::website::Website;` import from line 19 to line 21, which was
+# a genuine, non-attestation-only content change to verdict_evidence
+# rather than a pure pointer/comment update, so it required two
+# commits: a content-fix commit correcting verdict_evidence — dropping
+# the fragile line-number citation — followed by this commit, which
+# re-points reviewed_commit/closed_commit at that content-fix commit.
+# Every CAPTCHA-relevant fact and every other closure_relevant_file
+# remained untouched throughout). closed_commit below is the current,
+# authoritative binding; 663c8213, 5223110f, and 8d8173f2 remain
+# accurate as prior attestation points in this history, not as the
+# present claim.
+closed_commit = "PLACEHOLDER_CONTENT_FIX_COMMIT"

@@ -223,6 +223,21 @@ fn http_get(base: &str, path: &str) -> String {
     response
 }
 
+fn http_post(base: &str, path: &str, body: &str) -> String {
+    use std::net::TcpStream;
+    let url = base.strip_prefix("http://").unwrap();
+    let mut stream = TcpStream::connect(url).unwrap();
+    write!(
+        stream,
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
 fn http_body_json(response: &str) -> Value {
     let split = response.split("\r\n\r\n").nth(1).unwrap_or_default();
     serde_json::from_str(split)
@@ -404,6 +419,172 @@ fn console_stays_healthy_and_evidence_inspector_resolves_the_same_id_after_repea
     assert!(first.starts_with("HTTP/1.1 200 OK"), "{first}");
     assert!(second.starts_with("HTTP/1.1 200 OK"), "{second}");
     assert!(health.contains("\"status\":\"ok\""));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------
+// SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001 — Phase 18
+// ---------------------------------------------------------------------
+
+/// A Web-created audit's own `EvidenceRef` resolves through MCP's
+/// `spider_evidence_read` — the reverse-direction proof of this
+/// frontier's own required symmetry: previously only "MCP creates
+/// evidence -> Web reads it" was proven; this proves "Web creates
+/// evidence -> MCP reads it," against the exact same canonical
+/// `SCORPION_DOMAIN_DB` file, with the identical `EvidenceBundle` either
+/// way.
+#[test]
+fn web_created_audit_evidence_resolves_through_mcp_spider_evidence_read() {
+    let path = db_path("web-audit-mcp-read");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditFixture::start();
+
+    // Process A: real scorpion-api, POST /api/audit.
+    let (mut api, base) = spawn_scorpion_api(&path);
+    let audit_response = http_post(
+        &base,
+        "/api/audit",
+        &format!("{{\"url\":\"{}\"}}", fixture.url()),
+    );
+    assert!(
+        audit_response.starts_with("HTTP/1.1 200 OK"),
+        "{audit_response}"
+    );
+    let audit_body = http_body_json(&audit_response);
+    let evidence_ref = audit_body["evidence_ref"]
+        .as_str()
+        .expect("audit response must contain evidence_ref")
+        .to_string();
+    assert_eq!(fixture.hit_count(), 1);
+
+    // Cross-check via the Web Console's own evidence route first.
+    let web_evidence_response = http_get(&base, &format!("/api/evidence/{evidence_ref}"));
+    assert!(
+        web_evidence_response.starts_with("HTTP/1.1 200 OK"),
+        "{web_evidence_response}"
+    );
+    let web_bundle = http_body_json(&web_evidence_response);
+    api.kill().unwrap();
+
+    // Process B: a wholly separate real spider-mcp process, resolving
+    // the identical Web-created EvidenceRef purely through MCP.
+    let mut mcp = McpClient::spawn(&path);
+    mcp.initialize();
+    let read_response = mcp.call(
+        "spider_evidence_read",
+        json!({ "evidence_ref": evidence_ref.clone() }),
+    );
+    assert_eq!(
+        read_response["result"]["isError"], false,
+        "{read_response:?}"
+    );
+    let mcp_bundle = content_payload(&read_response);
+
+    for field in [
+        "id",
+        "requested_url",
+        "final_url",
+        "retrieved_at",
+        "status_code",
+        "observed_status_code",
+        "content_type",
+        "content",
+        "transport",
+        "backend_provenance",
+        "response_origin",
+    ] {
+        assert_eq!(
+            web_bundle.get(field),
+            mcp_bundle.get(field),
+            "field {field:?} diverged between Web-audit-then-Web-read and \
+             Web-audit-then-MCP-read: web={:?} mcp={:?}",
+            web_bundle.get(field),
+            mcp_bundle.get(field)
+        );
+    }
+    assert_eq!(mcp_bundle["id"], Value::String(evidence_ref));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Two independent acquisitions of the exact same target — one through
+/// the Web Console's `POST /api/audit`, one through MCP's
+/// `spider_audit_page` — must produce distinct `EvidenceRef`s (they are
+/// genuinely separate acquisitions) but semantically identical
+/// deterministic audit output: the same rule IDs, versions, categories,
+/// severities, targets, observed/expected conditions, and Finding order,
+/// and the same technology-marker sources/values/order. Never falsely
+/// requires identical `EvidenceId`s across independent acquisitions.
+#[test]
+fn web_and_mcp_audits_of_the_same_target_produce_deterministic_semantic_parity() {
+    let path = db_path("web-mcp-parity");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditFixture::start();
+
+    let (mut api, base) = spawn_scorpion_api(&path);
+    let web_response = http_post(
+        &base,
+        "/api/audit",
+        &format!("{{\"url\":\"{}\"}}", fixture.url()),
+    );
+    assert!(
+        web_response.starts_with("HTTP/1.1 200 OK"),
+        "{web_response}"
+    );
+    let web_audit = http_body_json(&web_response);
+    api.kill().unwrap();
+
+    let mut mcp = McpClient::spawn(&path);
+    mcp.initialize();
+    let mcp_response = mcp.call("spider_audit_page", json!({ "url": fixture.url() }));
+    assert_eq!(mcp_response["result"]["isError"], false, "{mcp_response:?}");
+    let mcp_audit = content_payload(&mcp_response);
+
+    // Independent acquisitions -> genuinely distinct EvidenceRefs.
+    assert_ne!(web_audit["evidence_ref"], mcp_audit["evidence_ref"]);
+
+    let web_findings = web_audit["findings"].as_array().unwrap();
+    let mcp_findings = mcp_audit["findings"].as_array().unwrap();
+    assert_eq!(web_findings.len(), mcp_findings.len());
+    assert!(
+        !web_findings.is_empty(),
+        "the fixture must produce real findings"
+    );
+    for (web_finding, mcp_finding) in web_findings.iter().zip(mcp_findings.iter()) {
+        for field in [
+            "rule_id",
+            "rule_version",
+            "category",
+            "severity",
+            "target",
+            "observed_condition",
+            "expected_condition",
+        ] {
+            assert_eq!(
+                web_finding.get(field),
+                mcp_finding.get(field),
+                "Finding field {field:?} diverged between Web and MCP audits \
+                 of the same target: web={:?} mcp={:?}",
+                web_finding.get(field),
+                mcp_finding.get(field)
+            );
+        }
+        // The evidence each finding references differs (separate
+        // acquisitions) but is structurally the same shape.
+        assert_ne!(web_finding["evidence"], mcp_finding["evidence"]);
+    }
+
+    let web_markers = web_audit["technology_markers"].as_array().unwrap();
+    let mcp_markers = mcp_audit["technology_markers"].as_array().unwrap();
+    assert_eq!(web_markers.len(), mcp_markers.len());
+    for (web_marker, mcp_marker) in web_markers.iter().zip(mcp_markers.iter()) {
+        assert_eq!(web_marker["source"], mcp_marker["source"]);
+        assert_eq!(web_marker["value"], mcp_marker["value"]);
+    }
+
+    // Both acquisitions genuinely hit the fixture independently.
+    assert_eq!(fixture.hit_count(), 2);
 
     let _ = std::fs::remove_file(&path);
 }

@@ -5,9 +5,12 @@
 //! canonical `spider_search` capability through Spider's public façade.
 //! Durable evidence inspection (`evidence`) is owned by the same canonical
 //! `spider::utils::evidence`/`spider::features::domain_runtime` seams
-//! `spider_mcp`'s own `spider_evidence_read` MCP tool uses — see that
+//! `spider_mcp`'s own `spider_evidence_read` MCP tool uses; canonical page
+//! audit execution (`audit`) is owned by the same canonical audit engine
+//! `spider_mcp`'s own `spider_audit_page` MCP tool uses — see each
 //! module's own doc comment.
 
+pub mod audit;
 pub mod evidence;
 
 use serde::{Deserialize, Serialize};

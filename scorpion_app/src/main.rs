@@ -1,3 +1,4 @@
+use scorpion_app::audit::{audit_error_json, audit_error_status, run_audit, AuditRequest};
 use scorpion_app::evidence::{evidence, evidence_error_json, evidence_error_status};
 use scorpion_app::{
     error_json, error_status, research_availability, research_error_json, research_error_status,
@@ -155,6 +156,38 @@ async fn handle(
             .map_err(Into::into),
         };
     }
+    if method == "POST" && path == "/api/audit" {
+        let body = bytes
+            .get(body_offset..body_offset + content_length)
+            .unwrap_or_default();
+        let input: AuditRequest = match serde_json::from_slice(body) {
+            Ok(input) => input,
+            Err(error) => {
+                let failure = scorpion_app::audit::AuditError::InvalidRequest(format!(
+                    "invalid JSON body: {error}"
+                ));
+                return write_json(
+                    &mut stream,
+                    audit_error_status(&failure),
+                    &audit_error_json(&failure),
+                )
+                .await
+                .map_err(Into::into);
+            }
+        };
+        return match run_audit(input).await {
+            Ok(response) => write_json(&mut stream, 200, &serde_json::to_string(&response)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                audit_error_status(&error),
+                &audit_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
     if method != "POST" || path != "/api/search" {
         return write_json(
             &mut stream,
@@ -258,7 +291,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .meta { color: #536170; font-size: .85rem; }
     .evidence-field { margin: .2rem 0; overflow-wrap: anywhere; }
     #evidence-result pre { background: #eef1f5; border: 1px solid #d6dce3; border-radius: .4rem; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre { background: #1b222c; border-color: #536170; } }
+    .audit-field { margin: .2rem 0; overflow-wrap: anywhere; }
+    .audit-finding { margin: 0 0 1rem; padding: .6rem 0 .6rem .8rem; border-left: 3px solid #d6dce3; }
+    #audit-result pre { background: #eef1f5; border: 1px solid #d6dce3; border-radius: .4rem; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre, #audit-result pre { background: #1b222c; border-color: #536170; } .audit-finding { border-left-color: #536170; } }
   </style>
 </head>
 <body>
@@ -294,6 +330,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </form>
       <div id="evidence-status" role="status" aria-live="polite"></div>
       <div id="evidence-result"></div>
+    </section>
+    <section aria-labelledby="audit-heading">
+      <h2 id="audit-heading">Page Audit</h2>
+      <p class="tagline">Run the canonical deterministic page audit — the same rules and technology observations an AI runs through MCP.</p>
+      <form id="audit-form">
+        <label for="audit-url" hidden>Audit URL</label>
+        <input id="audit-url" name="url" type="url" placeholder="https://..." autocomplete="off" required>
+        <button id="audit-button" type="submit">Run audit</button>
+      </form>
+      <div id="audit-status" role="status" aria-live="polite"></div>
+      <div id="audit-result"></div>
     </section>
   </main>
   <script>
@@ -507,9 +554,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       container.append(evidenceLabel('Raw canonical evidence (complete stored value)'), evidencePre(JSON.stringify(bundle, null, 2)));
       evidenceResult.replaceChildren(container);
     }
-    evidenceForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const ref = evidenceRefInput.value.trim();
+    // Shared by the Evidence Inspector's own form submit below and by
+    // Page Audit's "Inspect evidence" action (Phase 14: the audit result
+    // populates and triggers this existing flow — it never renders a
+    // second evidence view of its own).
+    async function inspectEvidenceRef(ref) {
       if (!ref) { renderEvidenceError('Enter an evidence reference.'); return; }
       evidenceButton.disabled = true;
       evidenceStatus.className = '';
@@ -527,6 +576,134 @@ const INDEX_HTML: &str = r#"<!doctype html>
         renderEvidenceError('Evidence inspection is temporarily unavailable.');
       } finally {
         evidenceButton.disabled = false;
+      }
+    }
+    evidenceForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      await inspectEvidenceRef(evidenceRefInput.value.trim());
+    });
+
+    // Page Audit — runs the canonical deterministic page audit. Findings
+    // and technology markers are deterministic rule evaluations/direct
+    // observations only: no score, grade, summary, or interpretation is
+    // ever rendered here. Every target-controlled value (URL, Finding
+    // target/observed/expected conditions, technology marker values,
+    // EvidenceRef, errors) is inserted as inert text via the same
+    // createTextNode-based text() helper used throughout this file —
+    // never a raw-markup DOM-injection primitive.
+    const auditForm = document.getElementById('audit-form');
+    const auditUrlInput = document.getElementById('audit-url');
+    const auditButton = document.getElementById('audit-button');
+    const auditStatus = document.getElementById('audit-status');
+    const auditResult = document.getElementById('audit-result');
+    function renderAuditError(message) {
+      auditStatus.className = 'error';
+      auditStatus.replaceChildren(text(message));
+      auditResult.replaceChildren();
+    }
+    function auditLabel(label) {
+      const h = document.createElement('h4');
+      h.appendChild(text(label));
+      return h;
+    }
+    function auditField(label, value) {
+      const row = document.createElement('div');
+      row.className = 'audit-field';
+      const term = document.createElement('strong');
+      term.appendChild(text(label + ': '));
+      row.append(term, text(value === null || value === undefined ? '(absent)' : String(value)));
+      return row;
+    }
+    function auditPre(contents) {
+      const pre = document.createElement('pre');
+      pre.appendChild(text(contents));
+      return pre;
+    }
+    function renderFinding(finding) {
+      const item = document.createElement('li');
+      item.className = 'audit-finding';
+      item.append(
+        auditField('Rule ID', finding.rule_id),
+        auditField('Rule version', finding.rule_version),
+        auditField('Category', finding.category),
+        auditField('Severity', finding.severity),
+        auditField('Target', finding.target),
+        auditField('Observed condition', JSON.stringify(finding.observed_condition)),
+        auditField('Expected condition', JSON.stringify(finding.expected_condition)),
+        auditField('Evidence references', (finding.evidence || []).map((e) => e.id).join(', ')),
+      );
+      return item;
+    }
+    function renderTechnologyMarker(marker) {
+      const item = document.createElement('li');
+      item.append(
+        auditField('Source', JSON.stringify(marker.source)),
+        auditField('Value', marker.value),
+      );
+      return item;
+    }
+    function renderAuditResult(payload) {
+      auditStatus.className = '';
+      auditStatus.replaceChildren(text('Audit complete.'));
+      const container = document.createElement('div');
+
+      const refRow = document.createElement('div');
+      refRow.className = 'audit-field';
+      const refTerm = document.createElement('strong');
+      refTerm.appendChild(text('Evidence reference: '));
+      const inspectButton = document.createElement('button');
+      inspectButton.type = 'button';
+      inspectButton.appendChild(text('Inspect evidence'));
+      inspectButton.addEventListener('click', () => {
+        evidenceRefInput.value = payload.evidence_ref;
+        inspectEvidenceRef(payload.evidence_ref);
+        const heading = document.getElementById('evidence-heading');
+        if (heading) heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      refRow.append(refTerm, text(payload.evidence_ref), text(' '), inspectButton);
+      container.append(refRow);
+
+      container.append(auditLabel(`Findings (${payload.findings.length})`));
+      const findingsList = document.createElement('ol');
+      for (const finding of payload.findings) {
+        findingsList.appendChild(renderFinding(finding));
+      }
+      container.append(findingsList);
+
+      container.append(auditLabel(`Technology markers (${payload.technology_markers.length})`));
+      const markerList = document.createElement('ul');
+      for (const marker of payload.technology_markers) {
+        markerList.appendChild(renderTechnologyMarker(marker));
+      }
+      container.append(markerList);
+
+      container.append(auditLabel('Raw canonical audit result (complete)'), auditPre(JSON.stringify(payload, null, 2)));
+      auditResult.replaceChildren(container);
+    }
+    auditForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const url = auditUrlInput.value.trim();
+      if (!url) { renderAuditError('Enter a URL to audit.'); return; }
+      auditButton.disabled = true;
+      auditStatus.className = '';
+      auditStatus.replaceChildren(text('Running audit…'));
+      auditResult.replaceChildren();
+      try {
+        const response = await fetch('/api/audit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          renderAuditError(payload?.error?.message || 'Audit is unavailable.');
+          return;
+        }
+        renderAuditResult(payload);
+      } catch (_) {
+        renderAuditError('Audit is temporarily unavailable.');
+      } finally {
+        auditButton.disabled = false;
       }
     });
   </script>

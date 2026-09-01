@@ -6615,28 +6615,32 @@ fn audit_module_never_shells_out_or_invokes_a_network_scanner() {
 /// Precise allowed-consumer boundary for the canonical audit module,
 /// updated by `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` from a
 /// blanket "no shipping crate may reference audit at all" prohibition
-/// (correct before any shipping frontier existed) to what is true now:
-/// exactly one shipping file — the `spider_audit_page` MCP tool — is
-/// authorized to call the aggregate seam and reuse the canonical result
-/// vocabulary needed to serialize it. This is a narrowing of the
-/// boundary, not a broad weakening: two invariants are checked
-/// independently.
+/// (correct before any shipping frontier existed) to a single authorized
+/// MCP file, and widened again by
+/// `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001` to exactly
+/// two shipping files, peer interfaces that never call each other:
+/// `spider_mcp/src/tools/audit.rs` (the `spider_audit_page` MCP tool) and
+/// `scorpion_app/src/audit.rs` (the Web Console's `POST /api/audit`
+/// boundary). This is a narrowing of the original boundary, not a broad
+/// weakening: two invariants are checked independently.
 ///
-/// 1. **Universally forbidden, with no exception anywhere, including the
-///    one authorized file**: every internal assembly primitive
+/// 1. **Universally forbidden, with no exception anywhere, including
+///    both authorized files**: every internal assembly primitive
 ///    `audit_page` itself calls — the individual rule functions,
 ///    `PageFacts::from_page`, `EvidencedPageFacts::record`,
 ///    `extract_technology_markers`/its two header/HTML sub-extractors,
 ///    `FindingId::derive`, `record_finding`, `analyze_page`. An interface
 ///    calls the aggregate seam; it never assembles the capability
 ///    itself.
-/// 2. **Authorized only inside `spider_mcp/src/tools/audit.rs`**: the
-///    aggregate seam and result vocabulary
+/// 2. **Authorized only inside `spider_mcp/src/tools/audit.rs` and
+///    `scorpion_app/src/audit.rs`**: the aggregate seam and result
+///    vocabulary
 ///    (`features::audit`/`audit_page`/`Finding`/`ObservedTechnologyMarker`/
 ///    `TechnologyMarkerSource`/`FindingId`/`EvidencedPageFacts`/
 ///    `PageAuditResult`). Every other shipping file, in every shipping
-///    crate — `spider_cli`, `scorpion_app`, and every other file in
-///    `spider_mcp` — remains under the original blanket prohibition.
+///    crate — `spider_cli`, every other file in `scorpion_app`, and every
+///    other file in `spider_mcp` — remains under the original blanket
+///    prohibition.
 #[test]
 fn audit_module_has_a_precise_allowed_consumer_boundary() {
     let forbidden_internals = [
@@ -6675,7 +6679,10 @@ fn audit_module_has_a_precise_allowed_consumer_boundary() {
         "EvidencedPageFacts",
         "PageAuditResult",
     ];
-    let allowed_consumer_files = [("spider_mcp", "tools/audit.rs")];
+    let allowed_consumer_files = [
+        ("spider_mcp", "tools/audit.rs"),
+        ("scorpion_app", "audit.rs"),
+    ];
 
     for (name, relative) in [
         ("spider_cli", "spider_cli/src"),
@@ -6719,13 +6726,46 @@ fn audit_module_has_a_precise_allowed_consumer_boundary() {
                     !production.contains(forbidden),
                     "{name} ({}) must not reference the audit module or \
                      its canonical result vocabulary — only \
-                     spider_mcp/src/tools/audit.rs is authorized to \
-                     consume the aggregate audit_page seam \
-                     (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001)",
+                     spider_mcp/src/tools/audit.rs and \
+                     scorpion_app/src/audit.rs are authorized to consume \
+                     the aggregate audit_page seam \
+                     (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001, \
+                     SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001)",
                     file.relative_path
                 );
             }
         }
+    }
+}
+
+/// `scorpion_app/src/audit.rs`'s production code performs no independent
+/// audit assembly of its own — the Web Console's own peer of the
+/// universal `forbidden_internals` check
+/// `audit_module_has_a_precise_allowed_consumer_boundary` already applies
+/// (that check covers every shipping file, including this one), plus one
+/// invariant that check cannot express: `fetch_single_page` is forbidden
+/// here specifically, even though it is *not* forbidden crate-wide (it is
+/// `spider_cli/src/discovery.rs`'s own legitimate direct acquisition
+/// primitive, unrelated to audit assembly) — a Web audit boundary must
+/// never independently re-acquire a target itself; the one acquisition
+/// per audit happens exclusively inside `audit_page`.
+#[test]
+fn scorpion_app_audit_seam_has_no_independent_audit_assembly() {
+    let full_source = fs::read_to_string(workspace_root().join("scorpion_app/src/audit.rs"))
+        .expect("failed to read scorpion_app/src/audit.rs");
+    let production = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    for forbidden in ["fetch_single_page", "lol_html", "reqwest::Client"] {
+        assert!(
+            !production.contains(forbidden),
+            "scorpion_app/src/audit.rs must not reference {forbidden:?} \
+             in production code — this Web Console seam calls audit_page \
+             for its one acquisition; it never independently re-acquires \
+             a target or independently parses HTML/headers \
+             (SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001)"
+        );
     }
 }
 
@@ -7198,13 +7238,41 @@ fn web_console_inline_script_body_contains_no_script_tag_sentinels() {
     );
 }
 
+/// The Evidence Inspector's submit-handler contract, as literal markers
+/// that must appear — in this exact order — within the Web Console's one
+/// real `<script>` element's HTML-parser content. Shared by
+/// [`web_console_script_body_reaches_the_evidence_submit_handler_before_closing`]
+/// (hand-rolled extraction) and
+/// [`web_console_script_element_is_html5_tokenizer_verified_to_reach_the_handler`]
+/// (independent `lol_html` tokenizer extraction) so the two proofs can
+/// never silently drift out of sync with each other.
+///
+/// `inspectEvidenceRef` is a shared function (also called by Page Audit's
+/// own "Inspect evidence" action, `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`)
+/// rather than inline code directly inside the submit handler — so its
+/// own definition (containing the real `fetch` call) necessarily precedes
+/// `evidenceForm`'s `addEventListener` registration in source order; this
+/// ordering reflects that real, legitimate structure, not a relaxation of
+/// the invariant. What is actually proved is unchanged: the submit
+/// handler exists, calls `preventDefault()`, and its own body reaches the
+/// function that performs the real `fetch` — never merely that these
+/// strings exist somewhere in the file.
+const EVIDENCE_SUBMIT_HANDLER_MARKERS_IN_ORDER: [&str; 5] = [
+    "const evidenceForm =",
+    "async function inspectEvidenceRef(ref) {",
+    "fetch(`/api/evidence/${encodeURIComponent(ref)}`)",
+    "evidenceForm.addEventListener('submit'",
+    "event.preventDefault()",
+];
+
 /// Stronger structural proof that the Web Console's one real `<script>`
 /// element's HTML-parser content — [`extract_web_console_script_body`]'s
 /// extracted bytes, the exact shape a browser's HTML parser sees, not
 /// merely "the source file contains this text somewhere" — actually
 /// reaches the Evidence Inspector's submit handler, its
-/// `preventDefault`/`fetch` contract, and that these appear in the
-/// expected order. Together with
+/// `preventDefault`/`fetch` contract
+/// ([`EVIDENCE_SUBMIT_HANDLER_MARKERS_IN_ORDER`]), and that these appear
+/// in the expected order. Together with
 /// `web_console_inline_script_body_contains_no_script_tag_sentinels`
 /// above, this proves the specific defect two real owner browser
 /// observations caught (native form GET submission because the handler
@@ -7217,14 +7285,8 @@ fn web_console_script_body_reaches_the_evidence_submit_handler_before_closing() 
         .expect("failed to read scorpion_app/src/main.rs");
     let script_body = extract_web_console_script_body(&main_source);
 
-    let required_in_order = [
-        "const evidenceForm =",
-        "evidenceForm.addEventListener('submit'",
-        "event.preventDefault()",
-        "fetch(`/api/evidence/${encodeURIComponent(ref)}`)",
-    ];
     let mut cursor = 0usize;
-    for marker in required_in_order {
+    for marker in EVIDENCE_SUBMIT_HANDLER_MARKERS_IN_ORDER {
         let found_at = script_body[cursor..].find(marker).unwrap_or_else(|| {
             panic!(
                 "the inline <script> element's own HTML-parser content \
@@ -7321,14 +7383,8 @@ fn web_console_script_element_is_html5_tokenizer_verified_to_reach_the_handler()
     );
 
     let observed = script_text.borrow();
-    let markers = [
-        "const evidenceForm =",
-        "evidenceForm.addEventListener('submit'",
-        "event.preventDefault()",
-        "fetch(`/api/evidence/${encodeURIComponent(ref)}`)",
-    ];
     let mut cursor = 0usize;
-    for marker in markers {
+    for marker in EVIDENCE_SUBMIT_HANDLER_MARKERS_IN_ORDER {
         let found_at = observed[cursor..].find(marker).unwrap_or_else(|| {
             panic!(
                 "a real HTML5 tokenizer's own observed <script> element \

@@ -878,3 +878,340 @@ fn hostile_stored_content_survives_the_read_path_completely_unmodified() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------
+// SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001
+//
+// POST /api/audit acceptance matrix (Phase 17) against the real,
+// compiled `scorpion-api` binary. Unlike the evidence-route tests
+// above, audit execution genuinely acquires its own target through a
+// real local fixture — there is no separate seeding step.
+// ---------------------------------------------------------------------
+
+fn audit_db_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "scorpion-api-audit-route-test-{}-{name}.sqlite3",
+        std::process::id()
+    ))
+}
+
+/// A tiny blocking local HTTP fixture for audit acceptance tests —
+/// counts every accepted request, and can serve a fixed status/
+/// content-type/body/extra-headers combination.
+struct AuditRouteFixture {
+    addr: std::net::SocketAddr,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl AuditRouteFixture {
+    fn start(
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+        extra_headers: &'static str,
+    ) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_thread = hits.clone();
+        thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = [0_u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    hits_thread.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        });
+        Self { addr, hits }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}/", self.addr)
+    }
+
+    fn hit_count(&self) -> usize {
+        self.hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+const AUDIT_MINIMAL_HTML: &str =
+    "<html><head><title>t</title></head><body><h1>hi</h1></body></html>";
+
+fn post_audit(base: &str, url: &str) -> String {
+    post_path(base, "/api/audit", &format!("{{\"url\":\"{url}\"}}"))
+}
+
+#[test]
+fn valid_html_audit_returns_200_with_canonical_findings_and_ref() {
+    let path = audit_db_path("valid");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", AUDIT_MINIMAL_HTML, "");
+
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, &fixture.url());
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"evidence_ref\":\"evid_"));
+    assert!(response.contains("\"findings\":["));
+    assert!(response.contains("\"technology_markers\":["));
+    assert_eq!(fixture.hit_count(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn empty_audit_url_is_400() {
+    let path = audit_db_path("empty-url");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, "");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"invalid_request\""));
+}
+
+#[test]
+fn whitespace_audit_url_is_400() {
+    let path = audit_db_path("ws-url");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, "   ");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+}
+
+#[test]
+fn malformed_audit_url_fails_deterministically() {
+    let path = audit_db_path("malformed-url");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, "not a url");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 502 Bad Gateway"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"audit_acquisition_failed\""));
+}
+
+#[test]
+fn missing_domain_store_config_fails_closed_but_server_still_starts() {
+    let (mut child, base) = api_server(None);
+    let index = get(&base, "/");
+    assert!(
+        index.starts_with("HTTP/1.1 200 OK"),
+        "server must still start: {index}"
+    );
+    let response = post_audit(&base, "http://127.0.0.1:1/");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"audit_store_not_configured\""));
+}
+
+#[test]
+fn unavailable_audit_store_is_sanitized_and_does_not_leak_the_path() {
+    let dir = std::env::temp_dir().join(format!(
+        "scorpion-api-audit-route-unopenable-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_string = dir.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &dir_string)]);
+    let response = post_audit(&base, "http://127.0.0.1:1/");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"audit_store_unavailable\""));
+    assert!(!response.contains(&dir_string));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn declared_text_plain_yields_no_html_only_seo_findings_or_generator_marker() {
+    let path = audit_db_path("text-plain");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start(
+        "200 OK",
+        "text/plain",
+        "<html><head><title>t</title><meta name=\"generator\" content=\"WordPress\"></head><body><h1>hi</h1></body></html>",
+        "",
+    );
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, &fixture.url());
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    // No SEO findings that require HTML representation (title/canonical/
+    // h1/etc.) may fire against a declared text/plain body.
+    assert!(!response.contains("seo.title.missing"));
+    assert!(!response.contains("seo.canonical.missing"));
+    assert!(!response.contains("HtmlMetaGenerator"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn non_2xx_html_response_follows_canonical_audit_applicability() {
+    let path = audit_db_path("404-html");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("404 Not Found", "text/html", AUDIT_MINIMAL_HTML, "");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, &fixture.url());
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    // 2xx-gated SEO applicability rules (e.g. canonical-missing) must not
+    // fire against a non-2xx response — matches canonical audit_page's
+    // own applicability semantics exactly (never re-derived here).
+    assert!(!response.contains("seo.canonical.missing"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn wp_content_url_alone_infers_zero_technology() {
+    let path = audit_db_path("wp-content-url");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", AUDIT_MINIMAL_HTML, "");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    // The request path itself contains "/wp-content/" but the response
+    // carries no technology-identifying header/meta value.
+    let target = format!("{}wp-content/", fixture.url());
+    let response = post_audit(&base, &target);
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"technology_markers\":[]"), "{response}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn php_url_alone_infers_zero_technology() {
+    let path = audit_db_path("php-url");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", AUDIT_MINIMAL_HTML, "");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let target = format!("{}index.php", fixture.url());
+    let response = post_audit(&base, &target);
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"technology_markers\":[]"), "{response}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn set_cookie_never_leaks_into_the_public_audit_response() {
+    let path = audit_db_path("set-cookie");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start(
+        "200 OK",
+        "text/html",
+        AUDIT_MINIMAL_HTML,
+        "Set-Cookie: session=SUPER_SECRET_SENTINEL; Secure; HttpOnly\r\n",
+    );
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, &fixture.url());
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(!response.to_lowercase().contains("set-cookie"));
+    assert!(!response.contains("SUPER_SECRET_SENTINEL"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn one_web_audit_causes_exactly_one_target_hit() {
+    let path = audit_db_path("one-hit");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", AUDIT_MINIMAL_HTML, "");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, &fixture.url());
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_eq!(fixture.hit_count(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn console_serves_the_page_audit_section() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("id=\"audit-heading\""));
+    assert!(response.contains("id=\"audit-form\""));
+    assert!(response.contains("id=\"audit-url\""));
+    assert!(response.contains("id=\"audit-button\" type=\"submit\">Run audit</button>"));
+    assert!(response.contains("fetch('/api/audit'"));
+    assert!(response.contains("Page Audit"));
+}
+
+/// Phase 18 (partial, HTTP-only half): a Web-created audit's own
+/// `evidence_ref` resolves through the Web Console's own
+/// `GET /api/evidence/{ref}` — proving the Web audit boundary wrote
+/// through the identical canonical store the Evidence Inspector already
+/// reads from, with no translation. The MCP half of Phase 18 (spawning a
+/// real spider-mcp process) lives in `cross_interface_evidence.rs`.
+#[test]
+fn web_created_audit_evidence_resolves_through_the_web_evidence_route() {
+    let path = audit_db_path("web-audit-then-web-evidence");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", AUDIT_MINIMAL_HTML, "");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let audit_response = post_audit(&base, &fixture.url());
+    assert!(
+        audit_response.starts_with("HTTP/1.1 200 OK"),
+        "{audit_response}"
+    );
+    let audit_body = audit_response.split("\r\n\r\n").nth(1).unwrap();
+    let evidence_ref = audit_body
+        .split("\"evidence_ref\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("audit response must contain evidence_ref");
+
+    let evidence_response = get(&base, &format!("/api/evidence/{evidence_ref}"));
+    child.kill().unwrap();
+    assert!(
+        evidence_response.starts_with("HTTP/1.1 200 OK"),
+        "{evidence_response}"
+    );
+    assert!(evidence_response.contains(&format!("\"id\":\"{evidence_ref}\"")));
+    assert!(evidence_response.contains(&fixture.addr.to_string()));
+
+    let _ = std::fs::remove_file(&path);
+}

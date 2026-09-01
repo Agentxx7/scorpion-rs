@@ -5538,7 +5538,7 @@ fn shipping_research_cli_is_a_thin_canonical_session_binding() {
     assert!(!main.contains("read_research_session"));
 
     let manifest = fs::read_to_string(workspace_root().join("spider_cli/Cargo.toml")).unwrap();
-    assert!(manifest.contains("\"search_searxng\", \"research\", \"mcp\""));
+    assert!(manifest.contains("\"search_searxng\", \"research\", \"audit\", \"mcp\""));
     for feature in [
         "spider/agent_acquisition",
         "spider/agent_openai",
@@ -6616,31 +6616,32 @@ fn audit_module_never_shells_out_or_invokes_a_network_scanner() {
 /// updated by `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` from a
 /// blanket "no shipping crate may reference audit at all" prohibition
 /// (correct before any shipping frontier existed) to a single authorized
-/// MCP file, and widened again by
-/// `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001` to exactly
-/// two shipping files, peer interfaces that never call each other:
-/// `spider_mcp/src/tools/audit.rs` (the `spider_audit_page` MCP tool) and
-/// `scorpion_app/src/audit.rs` (the Web Console's `POST /api/audit`
-/// boundary). This is a narrowing of the original boundary, not a broad
-/// weakening: two invariants are checked independently.
+/// MCP file, widened by
+/// `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001` to two, and
+/// widened a third time by `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`
+/// to exactly three shipping files, peer interfaces that never call each
+/// other: `spider_mcp/src/tools/audit.rs` (the `spider_audit_page` MCP
+/// tool), `scorpion_app/src/audit.rs` (the Web Console's `POST
+/// /api/audit` boundary), and `spider_cli/src/audit.rs` (the `scorpion
+/// audit <url>` command). This is a narrowing of the original boundary,
+/// not a broad weakening: two invariants are checked independently.
 ///
 /// 1. **Universally forbidden, with no exception anywhere, including
-///    both authorized files**: every internal assembly primitive
+///    all three authorized files**: every internal assembly primitive
 ///    `audit_page` itself calls — the individual rule functions,
 ///    `PageFacts::from_page`, `EvidencedPageFacts::record`,
 ///    `extract_technology_markers`/its two header/HTML sub-extractors,
 ///    `FindingId::derive`, `record_finding`, `analyze_page`. An interface
 ///    calls the aggregate seam; it never assembles the capability
 ///    itself.
-/// 2. **Authorized only inside `spider_mcp/src/tools/audit.rs` and
-///    `scorpion_app/src/audit.rs`**: the aggregate seam and result
-///    vocabulary
+/// 2. **Authorized only inside `spider_mcp/src/tools/audit.rs`,
+///    `scorpion_app/src/audit.rs`, and `spider_cli/src/audit.rs`**: the
+///    aggregate seam and result vocabulary
 ///    (`features::audit`/`audit_page`/`Finding`/`ObservedTechnologyMarker`/
 ///    `TechnologyMarkerSource`/`FindingId`/`EvidencedPageFacts`/
 ///    `PageAuditResult`). Every other shipping file, in every shipping
-///    crate — `spider_cli`, every other file in `scorpion_app`, and every
-///    other file in `spider_mcp` — remains under the original blanket
-///    prohibition.
+///    crate — every other file in `spider_cli`, `scorpion_app`, and
+///    `spider_mcp` — remains under the original blanket prohibition.
 #[test]
 fn audit_module_has_a_precise_allowed_consumer_boundary() {
     let forbidden_internals = [
@@ -6682,6 +6683,7 @@ fn audit_module_has_a_precise_allowed_consumer_boundary() {
     let allowed_consumer_files = [
         ("spider_mcp", "tools/audit.rs"),
         ("scorpion_app", "audit.rs"),
+        ("spider_cli", "audit.rs"),
     ];
 
     for (name, relative) in [
@@ -6726,11 +6728,13 @@ fn audit_module_has_a_precise_allowed_consumer_boundary() {
                     !production.contains(forbidden),
                     "{name} ({}) must not reference the audit module or \
                      its canonical result vocabulary — only \
-                     spider_mcp/src/tools/audit.rs and \
-                     scorpion_app/src/audit.rs are authorized to consume \
+                     spider_mcp/src/tools/audit.rs, \
+                     scorpion_app/src/audit.rs, and \
+                     spider_cli/src/audit.rs are authorized to consume \
                      the aggregate audit_page seam \
                      (SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001, \
-                     SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001)",
+                     SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001, \
+                     SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001)",
                     file.relative_path
                 );
             }
@@ -6765,6 +6769,35 @@ fn scorpion_app_audit_seam_has_no_independent_audit_assembly() {
              for its one acquisition; it never independently re-acquires \
              a target or independently parses HTML/headers \
              (SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001)"
+        );
+    }
+}
+
+/// `spider_cli/src/audit.rs`'s production code performs no independent
+/// audit assembly of its own — the CLI's own peer of
+/// `scorpion_app_audit_seam_has_no_independent_audit_assembly`.
+/// `fetch_single_page` is forbidden here specifically, even though it is
+/// *not* forbidden crate-wide (it is `spider_cli/src/discovery.rs`'s own
+/// legitimate direct acquisition primitive for FETCH/FEED/SITEMAP/
+/// NEWS_SITEMAP/ROBOTS_SITEMAP, unrelated to audit assembly) — a CLI
+/// audit boundary must never independently re-acquire a target itself;
+/// the one acquisition per audit happens exclusively inside `audit_page`.
+#[test]
+fn spider_cli_audit_seam_has_no_independent_audit_assembly() {
+    let full_source = fs::read_to_string(workspace_root().join("spider_cli/src/audit.rs"))
+        .expect("failed to read spider_cli/src/audit.rs");
+    let production = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    for forbidden in ["fetch_single_page", "lol_html", "reqwest::Client"] {
+        assert!(
+            !production.contains(forbidden),
+            "spider_cli/src/audit.rs must not reference {forbidden:?} \
+             in production code — this CLI seam calls audit_page for its \
+             one acquisition; it never independently re-acquires a \
+             target or independently parses HTML/headers \
+             (SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001)"
         );
     }
 }

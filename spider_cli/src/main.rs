@@ -23,6 +23,8 @@ extern crate env_logger;
 extern crate serde_json;
 extern crate spider;
 
+#[cfg(feature = "audit")]
+pub mod audit;
 pub mod build_folders;
 #[cfg(any(
     feature = "fetch",
@@ -256,6 +258,7 @@ fn spawn_crawl_task(
 /// JSON itself (`parse_error`), so it always reaches the `Ok` branch.
 #[cfg(any(
     feature = "fetch",
+    feature = "audit",
     feature = "feed",
     feature = "sitemap",
     feature = "news_sitemap",
@@ -457,6 +460,7 @@ async fn main() {
     // `Website` (no crawl following, no browser).
     #[cfg(any(
         feature = "fetch",
+        feature = "audit",
         feature = "feed",
         feature = "sitemap",
         feature = "news_sitemap",
@@ -478,6 +482,11 @@ async fn main() {
                 Err(message) => Err(message),
             };
             return print_fetch_result(result).await;
+        }
+        #[cfg(feature = "audit")]
+        if let Some(Commands::AUDIT { url, database }) = &cli.command {
+            let result = audit::run_audit(url, database.clone()).await;
+            return print_discovery_result(result).await;
         }
         #[cfg(feature = "feed")]
         if let Some(Commands::FEED {

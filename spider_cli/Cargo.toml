@@ -59,9 +59,14 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap", "search_searxng", "research", "mcp", "transport_tor"]
+default = ["status_code", "chrome", "warc", "spider_cloud", "fetch", "feed", "sitemap", "news_sitemap", "robots_sitemap", "search_searxng", "research", "audit", "mcp", "transport_tor"]
 # Evidence-first single-resource acquisition (`spider fetch <url>`).
 fetch = ["spider/evidence"]
+# Canonical deterministic page audit (`scorpion audit <url>`) — the same
+# audit_page() engine spider_mcp's spider_audit_page tool and
+# scorpion_app's POST /api/audit route call. Requires disk (durable
+# evidence/finding persistence) in addition to evidence.
+audit = ["spider/evidence", "spider/disk"]
 feed = ["spider/feed", "spider/evidence"]
 sitemap = ["spider/sitemap", "spider/evidence"]
 news_sitemap = ["spider/news_sitemap", "spider/evidence"]

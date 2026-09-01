@@ -152,6 +152,20 @@ pub enum Commands {
         #[clap(flatten)]
         transport_args: TransportArgs,
     },
+    /// Run Scorpion's canonical deterministic page audit and print the
+    /// resulting Findings, technology markers, and evidence identity as
+    /// JSON. Calls the same canonical audit engine spider_audit_page
+    /// (MCP) and POST /api/audit (Web Console) call — one audit engine,
+    /// three peer adapters, never a duplicated rule/analyzer.
+    #[cfg(feature = "audit")]
+    AUDIT {
+        /// The URL to audit.
+        url: String,
+        /// Canonical evidence/domain database path. Falls back to
+        /// SCORPION_DOMAIN_DB, then RESEARCH_EVIDENCE_DB.
+        #[clap(long)]
+        database: Option<std::path::PathBuf>,
+    },
     /// Read exactly one RSS or Atom feed and print its normalized entries
     /// plus retrieval evidence as JSON. Does not fetch any entry's URL.
     #[cfg(feature = "feed")]

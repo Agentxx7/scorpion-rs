@@ -7099,116 +7099,248 @@ fn web_console_never_uses_unsafe_dom_injection_primitives() {
     }
 }
 
+/// Extract the HTML-parser content of `scorpion_app/src/main.rs`'s one
+/// intended inline `<script>` element — the bytes strictly between its
+/// real opening and closing tags, located by their own exact, anchored
+/// markup lines (each appears alone on its own 2-space-indented line:
+/// `"\n  <script>\n"` / `"\n  </script>\n"`) rather than a bare
+/// `"<script>"`/`"</script>"` substring match, which would also match
+/// this same file's security-documentation comment's own textual
+/// mentions of hostile `<script`/`</script` example payloads — those are
+/// neither real tags nor defects. Shared by every guardrail in this
+/// section so the extraction logic is defined exactly once.
+fn extract_web_console_script_body(main_source: &str) -> &str {
+    let open_line = "\n  <script>\n";
+    let open_positions: Vec<_> = main_source.match_indices(open_line).collect();
+    assert_eq!(
+        open_positions.len(),
+        1,
+        "expected exactly one inline <script> element's own opening \
+         markup line in scorpion_app/src/main.rs, found {}",
+        open_positions.len()
+    );
+    let after_open = &main_source[open_positions[0].0 + open_line.len()..];
+
+    let close_line = "\n  </script>\n";
+    let close_positions: Vec<_> = after_open.match_indices(close_line).collect();
+    assert_eq!(
+        close_positions.len(),
+        1,
+        "expected exactly one inline <script> element's own closing \
+         markup line following its opening tag in \
+         scorpion_app/src/main.rs, found {}",
+        close_positions.len()
+    );
+    &after_open[..close_positions[0].0]
+}
+
 /// A distinct, HTML-*parser*-level invariant from the JavaScript-level
 /// one `web_console_never_uses_unsafe_dom_injection_primitives` checks
-/// above — and one that guardrail cannot catch. HTML's script-data
-/// tokenizer recognizes a case-insensitive `</script` byte sequence as
-/// ending the enclosing `<script>` element the instant it appears in the
-/// raw markup, with zero awareness of JavaScript syntax: a comment,
-/// string, or template literal that happens to contain a literal
-/// `</script...` sentinel silently truncates the script exactly as if a
-/// real closing tag had been written there, even though no JavaScript
-/// parser would ever consider it one — everything after it becomes inert
-/// HTML text, never executed. This exact defect shipped in
-/// `SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`'s own first
-/// commit — a security-documentation comment literally read
-/// `"<script>...</script>"` — and was caught only by a real owner
-/// browser observation (the Evidence Inspector's submit handler was
-/// never registered, so the browser performed the form's native GET
-/// submission instead), not by any automated test at the time. This
-/// guardrail is the structural fix: `scorpion_app/src/main.rs`'s one
-/// inline `<script>` element must contain exactly one case-insensitive
-/// `</script` sequence — the one real, intentional closing tag.
+/// above — and one no earlier guardrail fully protected. HTML's script
+/// data tokenizer treats case-insensitive `<script`/`</script` byte
+/// sequences specially the instant they appear inside an already-open
+/// `<script>` element's raw content, with zero awareness of JavaScript
+/// syntax, comments, or string boundaries. Two real defects shipped in
+/// `SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`'s history,
+/// both caught only by real owner Firefox observation, not by any
+/// automated test at the time:
+///
+/// 1. The frontier's own first commit: a security-documentation comment
+///    literally read `"<script>...</script>"` (both sentinels) —
+///    truncating the script at the closing sentinel, so the Evidence
+///    Inspector's submit handler was never registered.
+/// 2. Its first corrective commit (d609db25) escaped only the closing
+///    half (`"<script>...<\/script>"`), leaving the raw *opening*
+///    sentinel `<script>` in place — a real, independent second owner
+///    observation proved that remnant alone still broke real browser
+///    parsing. The prior, closing-only-modeled guardrail
+///    (`web_console_inline_script_has_exactly_one_closing_sentinel`,
+///    since removed) passed throughout, because it never checked for a
+///    stray *opening* sentinel at all — it protected only one of the
+///    two directions a real browser's tokenizer is sensitive to.
+///
+/// The invariant this guardrail actually enforces: inside
+/// [`extract_web_console_script_body`]'s extracted content — which
+/// excludes the element's own real opening/closing delimiters by
+/// construction — there must be zero case-insensitive occurrences of
+/// either `<script` or `</script`.
 #[test]
-fn web_console_inline_script_has_exactly_one_closing_sentinel() {
+fn web_console_inline_script_body_contains_no_script_tag_sentinels() {
     let main_source = fs::read_to_string(workspace_root().join("scorpion_app/src/main.rs"))
         .expect("failed to read scorpion_app/src/main.rs");
-    let script_open = "<script>";
-    let open_at = main_source
-        .find(script_open)
-        .expect("scorpion_app/src/main.rs must contain the Web Console's inline <script> tag");
-    let body = &main_source[open_at + script_open.len()..];
+    let script_body = extract_web_console_script_body(&main_source);
+    let lowercase_body = script_body.to_ascii_lowercase();
 
-    let lowercase_body = body.to_ascii_lowercase();
-    let sentinel_occurrences = lowercase_body.matches("</script").count();
+    let open_sentinels = lowercase_body.matches("<script").count();
     assert_eq!(
-        sentinel_occurrences, 1,
-        "scorpion_app/src/main.rs's inline <script> element must contain \
-         exactly one case-insensitive \"</script\" sequence — the real \
-         closing tag. Any earlier occurrence (even inside a JavaScript \
-         comment or string) silently truncates the script at the HTML \
-         parser level, before any JavaScript past that point ever runs \
-         — this is exactly the defect a real owner browser observation \
-         caught in SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001's \
-         first commit. Found {sentinel_occurrences} occurrence(s)."
+        open_sentinels, 0,
+        "scorpion_app/src/main.rs's inline <script> element body must \
+         contain zero case-insensitive \"<script\" sequences — even one, \
+         inside a JavaScript comment or string, can disrupt a real \
+         browser's HTML script-data tokenizer (confirmed by a real \
+         owner Firefox observation against \
+         SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001's first \
+         corrective commit, d609db25). Found {open_sentinels} \
+         occurrence(s)."
     );
 
-    let closing_at = lowercase_body
-        .find("</script")
-        .expect("already proven to exist by the count assertion above");
-    assert!(
-        lowercase_body[closing_at..].starts_with("</script>"),
-        "the one closing sentinel found must be the real, well-formed \
-         </script> closing tag, not a truncated/malformed one"
+    let close_sentinels = lowercase_body.matches("</script").count();
+    assert_eq!(
+        close_sentinels, 0,
+        "scorpion_app/src/main.rs's inline <script> element body must \
+         contain zero case-insensitive \"</script\" sequences — the \
+         element's own real closing tag is excluded from this extracted \
+         body by construction (see extract_web_console_script_body), so \
+         any occurrence here is a stray sentinel that would silently \
+         truncate the script at the HTML parser level — \
+         SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001's own \
+         original defect. Found {close_sentinels} occurrence(s)."
     );
 }
 
 /// Stronger structural proof that the Web Console's one real `<script>`
-/// element's HTML-parser content — everything between its opening tag
-/// and its real closing tag, the exact shape a browser's HTML parser
-/// sees, not merely "the source file contains this text somewhere" —
-/// actually reaches the Evidence Inspector's submit handler and its
-/// `fetch`/`preventDefault` contract. Together with
-/// `web_console_inline_script_has_exactly_one_closing_sentinel` above,
-/// this proves the specific defect a real owner browser observation
-/// caught (native form GET submission because the handler registration
-/// was never reached) cannot recur silently, even if some future edit
-/// reordered content within the script rather than adding a stray
-/// sentinel.
+/// element's HTML-parser content — [`extract_web_console_script_body`]'s
+/// extracted bytes, the exact shape a browser's HTML parser sees, not
+/// merely "the source file contains this text somewhere" — actually
+/// reaches the Evidence Inspector's submit handler, its
+/// `preventDefault`/`fetch` contract, and that these appear in the
+/// expected order. Together with
+/// `web_console_inline_script_body_contains_no_script_tag_sentinels`
+/// above, this proves the specific defect two real owner browser
+/// observations caught (native form GET submission because the handler
+/// registration was never reached) cannot recur silently, even if some
+/// future edit reordered content within the script rather than adding a
+/// stray sentinel.
 #[test]
 fn web_console_script_body_reaches_the_evidence_submit_handler_before_closing() {
     let main_source = fs::read_to_string(workspace_root().join("scorpion_app/src/main.rs"))
         .expect("failed to read scorpion_app/src/main.rs");
+    let script_body = extract_web_console_script_body(&main_source);
 
-    // Anchored to the real tag's own exact markup line (it appears alone
-    // on an indented line: `\n  <script>\n`) rather than a bare
-    // `"<script>"` substring match — the latter also matches this same
-    // security-documentation comment's own textual example of the
-    // opening half of a hostile `<script>...` payload, which is neither
-    // a real tag nor a defect.
-    let script_tag_line = "\n  <script>\n";
-    let open_count = main_source.matches(script_tag_line).count();
+    let required_in_order = [
+        "const evidenceForm =",
+        "evidenceForm.addEventListener('submit'",
+        "event.preventDefault()",
+        "fetch(`/api/evidence/${encodeURIComponent(ref)}`)",
+    ];
+    let mut cursor = 0usize;
+    for marker in required_in_order {
+        let found_at = script_body[cursor..].find(marker).unwrap_or_else(|| {
+            panic!(
+                "the inline <script> element's own HTML-parser content \
+                 (extract_web_console_script_body's output) must contain \
+                 {marker:?} at or after byte offset {cursor} — either \
+                 the Evidence Inspector handler was removed/reordered, \
+                 or a stray script-tag sentinel truncated the script \
+                 before this point (see \
+                 web_console_inline_script_body_contains_no_script_tag_sentinels)"
+            )
+        });
+        cursor += found_at + marker.len();
+    }
+}
+
+/// Extract the raw string literal `scorpion_app/src/main.rs`'s `const
+/// INDEX_HTML: &str = r#"..."#;` declares — the exact HTML bytes
+/// `scorpion-api` serves — so it can be fed to a real HTML parser rather
+/// than parsing the surrounding Rust source (which is not HTML).
+fn extract_index_html_literal(main_source: &str) -> String {
+    let marker = "const INDEX_HTML: &str = r#\"";
+    let start = main_source
+        .find(marker)
+        .expect("scorpion_app/src/main.rs must declare const INDEX_HTML as a raw string literal")
+        + marker.len();
+    let rest = &main_source[start..];
+    let end = rest
+        .rfind("\"#;")
+        .expect("INDEX_HTML's raw string literal must be closed with \"#;");
+    rest[..end].to_string()
+}
+
+/// Independent, complementary proof, using a genuine HTML5-compliant
+/// streaming tokenizer (`lol_html` — already a real, non-test dependency
+/// of this very `spider` crate; `spider/src/features/audit.rs`'s own
+/// `extract_html_facts` already uses the identical
+/// `element!`/`text!`/`rewrite_str` pattern, so this introduces no new
+/// dependency), that the Web Console's real emitted HTML has exactly
+/// one `<script>` element, and that element's own tokenized text
+/// content reaches the Evidence Inspector's submit handler in order. A
+/// real, separately implemented, spec-compliant tokenizer parses the
+/// actual bytes a browser would receive here, rather than this test
+/// file re-deriving tokenizer behavior by hand.
+///
+/// **Empirically confirmed scope, not assumed:** this test correctly
+/// fails against `SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`'s
+/// original defective commit (624990b3, both sentinels present — the
+/// script element never even contains `const evidenceForm =`), but it
+/// **still passes** against `d609db25`'s incomplete first fix (the raw
+/// opening `<script>` sentinel alone, with the closing one escaped) —
+/// `lol_html` does not reproduce whatever real-browser tokenizer
+/// behavior a live Firefox observation caught on that exact commit. This
+/// test is therefore genuine defense-in-depth, not a substitute for
+/// `web_console_inline_script_body_contains_no_script_tag_sentinels`
+/// above, which is the guardrail actually load-bearing for the specific
+/// raw-opening-sentinel defect class two real owner browser observations
+/// found.
+#[test]
+fn web_console_script_element_is_html5_tokenizer_verified_to_reach_the_handler() {
+    use lol_html::{element, rewrite_str, text, RewriteStrSettings};
+    use std::cell::{Cell, RefCell};
+
+    let main_source = fs::read_to_string(workspace_root().join("scorpion_app/src/main.rs"))
+        .expect("failed to read scorpion_app/src/main.rs");
+    let html = extract_index_html_literal(&main_source);
+
+    let script_element_count = Cell::new(0_usize);
+    let script_text: RefCell<String> = RefCell::new(String::new());
+
+    let output = rewrite_str(
+        &html,
+        RewriteStrSettings {
+            element_content_handlers: vec![
+                element!("script", |_el| {
+                    script_element_count.set(script_element_count.get() + 1);
+                    Ok(())
+                }),
+                text!("script", |chunk| {
+                    script_text.borrow_mut().push_str(chunk.as_str());
+                    Ok(())
+                }),
+            ],
+            ..RewriteStrSettings::default()
+        },
+    )
+    .expect("lol_html (a real HTML5-compliant tokenizer) must parse the Web Console's real emitted HTML without error");
+    let _ = output;
+
     assert_eq!(
-        open_count, 1,
-        "expected exactly one inline <script> element in \
-         scorpion_app/src/main.rs, found {open_count}"
-    );
-    let open_at = main_source.find(script_tag_line).unwrap();
-    let after_open = &main_source[open_at + script_tag_line.len()..];
-    let close_at = after_open
-        .to_ascii_lowercase()
-        .find("</script>")
-        .expect("the script element must have a real closing tag");
-    let script_body = &after_open[..close_at];
-
-    let handler_marker = "evidenceForm.addEventListener('submit'";
-    assert!(
-        script_body.contains(handler_marker),
-        "the inline <script> element's own HTML-parser content, up to \
-         its real closing tag, must contain {handler_marker:?} — if \
-         this fails, either the handler was removed or a premature \
-         </script sentinel (see \
-         web_console_inline_script_has_exactly_one_closing_sentinel) is \
-         truncating the script before this point"
+        script_element_count.get(),
+        1,
+        "a real HTML5 tokenizer (lol_html) must observe exactly one \
+         <script> element in the Web Console's emitted HTML"
     );
 
-    for required in ["event.preventDefault()", "fetch(`/api/evidence/"] {
-        assert!(
-            script_body.contains(required),
-            "the inline <script> element's real content must contain \
-             {required:?} before its closing tag — the handler must \
-             actually intercept native form submission and call the \
-             evidence API, not merely be registered"
-        );
+    let observed = script_text.borrow();
+    let markers = [
+        "const evidenceForm =",
+        "evidenceForm.addEventListener('submit'",
+        "event.preventDefault()",
+        "fetch(`/api/evidence/${encodeURIComponent(ref)}`)",
+    ];
+    let mut cursor = 0usize;
+    for marker in markers {
+        let found_at = observed[cursor..].find(marker).unwrap_or_else(|| {
+            panic!(
+                "a real HTML5 tokenizer's own observed <script> element \
+                 text content must contain {marker:?} at or after byte \
+                 offset {cursor} — independent, tool-verified \
+                 confirmation of the same invariant \
+                 web_console_script_body_reaches_the_evidence_submit_handler_before_closing \
+                 checks by hand-rolled extraction. observed so far: \
+                 {:?}",
+                &observed[..cursor.min(observed.len())]
+            )
+        });
+        cursor += found_at + marker.len();
     }
 }

@@ -432,9 +432,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
     // target-controlled and MUST be treated as inert text, never markup:
     // this section uses only the same createTextNode-based `text()`
     // helper already used above, never a raw-markup DOM-injection
-    // primitive anywhere in this file. A stored value containing
-    // "<script>...<\/script>" or "<img onerror=...>" must render as
-    // literal, inert text — see spider/tests/architecture_guardrails.rs.
+    // primitive anywhere in this file. A stored script-tag payload or
+    // image event-handler payload must render as literal, inert text —
+    // see spider/tests/architecture_guardrails.rs. (Deliberately no
+    // literal HTML tag syntax appears in this comment itself — see
+    // web_console_inline_script_body_contains_no_script_tag_sentinels.)
     const evidenceForm = document.getElementById('evidence-form');
     const evidenceRefInput = document.getElementById('evidence-ref');
     const evidenceButton = document.getElementById('evidence-button');

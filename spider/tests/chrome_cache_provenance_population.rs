@@ -82,17 +82,37 @@ async fn bounded<F: std::future::Future>(fut: F) -> F::Output {
         .expect("operation exceeded the bounded timeout — possible hang/regression")
 }
 
+/// Install a logger with an explicit default level (`warn`) so a real
+/// `Browser::launch()` failure's own `log::error!` diagnostic
+/// (`spider::features::chrome::setup_browser_configuration`) is visible
+/// rather than silently discarded — see
+/// `SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001`'s closure report:
+/// every test in this file ran with no logger installed at all before
+/// this. `RUST_LOG` still overrides this default when set.
+fn init_logging() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(true)
+        .try_init();
+}
+
 /// See `smart_chrome_failure_status_truthfulness.rs`'s identical helper
 /// for the full rationale (large-stack isolated runtime for chrome
-/// futures).
+/// futures). The `.join()` failure path is corrected from this file's
+/// prior `.expect("isolated test thread panicked")` (which produced the
+/// useless `Any { .. }` — `Box<dyn Any + Send>` has no real `Debug`
+/// impl, so the actual panic message/assertion detail was silently
+/// discarded on every genuine inner-thread panic, including the one
+/// SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001's own investigation
+/// hit for real) to downcast and surface the real payload instead.
 fn run_isolated<F>(body: F) -> F::Output
 where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    std::thread::Builder::new()
+    let result = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
+            init_logging();
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -100,8 +120,18 @@ where
             rt.block_on(body)
         })
         .expect("spawn isolated test thread")
-        .join()
-        .expect("isolated test thread panicked")
+        .join();
+    match result {
+        Ok(value) => value,
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "non-string panic payload (see test stdout above for the real panic location/message)".to_string());
+            panic!("isolated test thread panicked: {message}");
+        }
+    }
 }
 
 fn refused_url() -> String {

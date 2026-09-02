@@ -4223,7 +4223,23 @@ mod route_detected_browser_challenge_tests {
         CaptchaVisualInput,
     };
 
+    /// Install a logger with an explicit default level (`warn`) so a
+    /// `Browser::launch()` failure's own real `log::error!` diagnostic
+    /// (`spider::features::chrome::setup_browser_configuration`) is
+    /// visible rather than silently discarded — see
+    /// `SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001`'s closure
+    /// report: every real-browser test in this module ran with no
+    /// logger installed at all before this, so a `launch()` failure's
+    /// own already-emitted diagnostic was always lost, in CI and
+    /// locally alike. `RUST_LOG` still overrides this default when set.
+    fn init_logging() {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+            .is_test(true)
+            .try_init();
+    }
+
     async fn launch() -> chromiumoxide::Browser {
+        init_logging();
         let config = crate::configuration::Configuration::default();
         let Some((browser, _handler, _, _, _)) =
             crate::features::chrome::launch_browser(&config, &None).await

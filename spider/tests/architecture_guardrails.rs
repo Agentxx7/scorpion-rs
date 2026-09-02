@@ -7471,3 +7471,56 @@ fn web_console_script_element_is_html5_tokenizer_verified_to_reach_the_handler()
         cursor += found_at + marker.len();
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001
+// ---------------------------------------------------------------------------
+
+/// `.github/workflows/rust.yml`'s `spider_core` job must run its Chrome
+/// readiness probe (`Cargo test chrome readiness probe (chrome)`)
+/// strictly before every step that constitutes required real-Chrome
+/// production-reality evidence — so a genuinely broken browser runtime
+/// fails fast, alone, with a dedicated name and real diagnostics, rather
+/// than surfacing as an unexplained failure inside one of the larger,
+/// more expensive suites it already investigated
+/// (`SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001`'s own closure
+/// report). This is the structural guarantee that future CI edits cannot
+/// silently reorder the readiness probe after the evidence it exists to
+/// protect. Deliberately a plain substring/byte-offset check against the
+/// one real workflow file, not a YAML-structure-aware framework.
+#[test]
+fn ci_chrome_readiness_probe_precedes_every_required_real_chrome_evidence_step() {
+    let workflow = fs::read_to_string(workspace_root().join(".github/workflows/rust.yml"))
+        .expect("failed to read .github/workflows/rust.yml");
+
+    let probe_marker = "Cargo test chrome readiness probe (chrome)";
+    let probe_at = workflow.find(probe_marker).unwrap_or_else(|| {
+        panic!(
+            "expected the Chrome readiness probe step {probe_marker:?} to exist in \
+             .github/workflows/rust.yml's spider_core job"
+        )
+    });
+
+    for required_evidence_step in [
+        "Cargo test spider lib, deterministic only (chrome cache cache_request)",
+        "Cargo test CAPTCHA CI-portable evidence (chrome local_paligemma)",
+        "Cargo test spider credential-cache regression (chrome_remote_cache)",
+        "Cargo test spider smart/chrome failure-status truthfulness regression (chrome)",
+        "Cargo test spider chrome/cache provenance population regression (chrome)",
+    ] {
+        let evidence_at = workflow.find(required_evidence_step).unwrap_or_else(|| {
+            panic!(
+                "expected required real-Chrome evidence step {required_evidence_step:?} to \
+                 exist in .github/workflows/rust.yml's spider_core job"
+            )
+        });
+        assert!(
+            probe_at < evidence_at,
+            "the Chrome readiness probe ({probe_marker:?}, byte offset {probe_at}) must \
+             appear before required real-Chrome evidence step {required_evidence_step:?} \
+             (byte offset {evidence_at}) in .github/workflows/rust.yml — a broken browser \
+             runtime must fail fast at the probe, not silently inside expensive evidence \
+             (SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001)"
+        );
+    }
+}

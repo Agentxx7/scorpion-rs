@@ -4,6 +4,19 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001: this frontier's own
+  # acceptance bar requires 3 independently-triggered Rust workflow runs
+  # on the exact same final commit that each reach SUCCESS on their
+  # first attempt -- explicitly not satisfied by "Re-run failed jobs"
+  # (or any re-run) on one run's already-recorded attempt. A `push` to
+  # `main` only fires once per commit, and `pull_request` checks out a
+  # synthetic merge ref rather than the commit's own SHA, so neither
+  # trigger can produce 3 genuinely independent runs against one frozen
+  # SHA. `workflow_dispatch` against `ref: main` after the commit lands
+  # does: each dispatch is its own fresh run (its own run ID, its own
+  # first attempt) resolving `github.sha` to the same tip commit, with
+  # no change to what any job does or tests.
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -465,6 +478,12 @@ jobs:
         run: |
           cargo test -p spider --test chrome_cache_provenance_population --features chrome --no-run
           cargo test -p spider --test chrome_cache_provenance_population --features cache_chrome_hybrid --no-run
+      # SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001: same defensive
+      # pattern as the pre-build steps above, for the new Chrome
+      # readiness probe (executed first among the deterministic phase's
+      # real-Chrome steps below).
+      - name: Pre-build chrome readiness probe binary (network still open)
+        run: cargo test -p spider --test chrome_readiness_probe --features chrome --no-run
       # Runtime egress denial for the deterministic phase — the primary
       # enforcement mechanism, not the static LIVE_NETWORK_TESTS registry
       # alone. GitHub-hosted ubuntu-latest runners grant the runner user
@@ -754,6 +773,26 @@ jobs:
             exit 1
           fi
           echo "END: spider lib, default features"
+      # SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001: the first
+      # real-Chrome step in this job's deterministic phase — deliberately
+      # placed before every other real-Chrome step below. Drives the
+      # exact same canonical `Website::scrape()` entrypoint those other
+      # suites use, against one trivial local fixture, and asserts real
+      # JS execution mutated the DOM. If the browser runtime itself is
+      # not sane in this environment (executable missing, launch
+      # timeout, CDP connection failure), this step fails here, alone,
+      # with a dedicated name and (via this test's own default-`warn`
+      # logger) real `Browser::launch()`/CDP diagnostics — instead of
+      # surfacing as an unexplained failure inside one of several larger,
+      # more expensive suites below.
+      - name: Cargo test chrome readiness probe (chrome)
+        run: |
+          echo "BEGIN: chrome readiness probe"
+          if ! timeout 120 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup RUST_LOG=warn cargo test -p spider --test chrome_readiness_probe --features chrome > /tmp/step_chrome_ready.log 2>&1; then
+            bash .github/scripts/report-test-step-failure.sh /tmp/step_chrome_ready.log "chrome readiness probe"
+            exit 1
+          fi
+          echo "END: chrome readiness probe"
       # RUST_MIN_STACK: pre-existing, environment-specific stack-overflow
       # under this feature combination at the default thread stack size
       # (confirmed identical on baseline `HEAD` via `git stash`, unrelated
@@ -766,11 +805,30 @@ jobs:
       # namespace-isolated process. `env VAR=value cmd` is the standard,
       # sudoers-policy-independent way to guarantee a variable reaches a
       # specific child process regardless of what gets reset in between.
+      # --test-threads=1: SCORPION_CI_REAL_CHROME_EXECUTION_STABILITY_001
+      # found this step missing the same protection every sibling
+      # real-Chrome step in this job already carries (see the
+      # "spider_mcp headless_chrome_production_stack" step's own comment
+      # a few jobs over, and the "spider smart/chrome failure-status
+      # truthfulness" / "spider chrome/cache provenance population"
+      # steps below) — this module's own `route_detected_browser_
+      # challenge_tests` (4 tests, each launching a real Chrome process)
+      # ran at Rust's default full test-harness parallelism, and GitHub
+      # Actions run 33593830080 (attempts 1 and 3, commit 77853fd3)
+      # showed exactly the same "real Chrome launches contend against
+      # each other badly enough on this runner's actual hardware"
+      # signature already documented and fixed for that other step:
+      # all 4 tests failing simultaneously with an identical
+      # `launch_browser` failure, in the same step, on the same commit,
+      # while a clean re-run with no code change passed. Serializing
+      # real Chrome launches within this step removes that concurrency
+      # class entirely without weakening what is actually being proven.
       - name: Cargo test spider lib, deterministic only (chrome cache cache_request)
         run: |
           echo "BEGIN: spider lib, chrome cache cache_request"
           if ! timeout 600 sudo ip netns exec spider_ci env PATH=/home/runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/home/runner CARGO_HOME=/home/runner/.cargo RUSTUP_HOME=/home/runner/.rustup RUST_MIN_STACK=67108864 cargo test -p spider --lib \
             --features "chrome cache cache_request" -- \
+            --test-threads=1 \
             --skip website::crawl \
             --skip website::scrape \
             --skip website::not_crawl_blacklist \

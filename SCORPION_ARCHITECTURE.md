@@ -123,7 +123,7 @@ Every architecture-relevant implementation is classified as exactly one of:
 
 | Area | Canonical Owner | Allowed Dependencies | Forbidden Dependencies | Public Execution Seam | Upstream Compatibility Paths |
 |---|---|---|---|---|---|
-| CLI | `spider_cli` | canonical Spider public seams, including `run_durable_research`, `read_research_session`, and `EvidenceRef::resolve` | `Agent::research`, `CanonicalPageAcquirer` construction, identity minting, parallel persistence, independent domain logic | `scorpion` binary, including `scorpion research` / `research show` | None |
+| CLI | `spider_cli` | canonical Spider public seams, including `run_durable_research`, `read_research_session`, `EvidenceRef::resolve`, and audit module/`audit_page` (`spider_cli/src/audit.rs` only — see §3.19) | `Agent::research`, `CanonicalPageAcquirer` construction, identity minting, parallel persistence, independent domain logic, independent audit rule/technology-marker assembly, `fetch_single_page` inside `audit.rs` specifically | `scorpion` binary, including `scorpion research` / `research show` and `scorpion audit <url>` | None |
 | MCP | `spider_mcp` | `spider::utils::evidence`, `spider::features::transport`, `spider::features::search_providers`, `spider::features::audit`/`domain_runtime` (`spider_mcp/src/tools/audit.rs` only — see §3.19), `spider::utils::evidence::{EvidenceRef::resolve, read_evidence}` (`spider_mcp/src/tools/evidence_read.rs` only — see §3.19) | `reqwest::Client` construction, independent domain logic, independent audit rule/technology-marker assembly, independent evidence reconstruction | `serve_stdio()` | `spider_mcp::evidence` shim |
 | Web Console | `scorpion_app` | `spider::features::domain_runtime`, `spider::features::search`, `spider::agent`, `spider::utils::evidence::{EvidenceRef::resolve, read_evidence}` (`scorpion_app/src/evidence.rs` only — see §3.19), audit module/`audit_page` (`scorpion_app/src/audit.rs` only — see §3.19) | `reqwest::Client` construction, independent domain logic, independent evidence reconstruction, independent audit rule/technology-marker assembly, `fetch_single_page` inside `audit.rs` specifically | `scorpion-api` binary (`GET /`, `GET /health`, `POST /api/search`, `POST /api/research`, `GET /api/research/{id}`, `GET /api/evidence/{evidence_ref}`, `POST /api/audit`) | None |
 | Agent types | `spider_agent_types` | Pure data | `spider`, `spider_agent` | Data types | None |
@@ -635,31 +635,39 @@ own doc comment).
 `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` and
 `SCORPION_MCP_CANONICAL_EVIDENCE_READ_001`; the Web Console realized
 first for evidence *inspection*
-(`SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`) and now also
+(`SCORPION_WEB_CONSOLE_CANONICAL_EVIDENCE_INSPECTION_001`) and then also
 for audit *execution*
-(`SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`) — MCP and Web
-Console are now full peer interfaces over every canonical seam this
-section describes, and neither ever calls the other:**
-`spider_mcp/src/tools/audit.rs` and `scorpion_app/src/audit.rs` (the Web
-Console's `POST /api/audit` boundary) are the two authorized consumers —
-the `spider_audit_page` MCP tool and the Web Console's own audit
-route — of `audit_page`/`PageAuditResult` (§7.6, §7.7); every other
-shipping file, in every shipping crate, remains forbidden from
-referencing the audit module or its result vocabulary at all
+(`SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`); the CLI
+realized last for audit execution
+(`SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`) — MCP, Web Console,
+and CLI are now three full peer interfaces over every canonical seam this
+section describes, and none of the three ever calls another:**
+`spider_mcp/src/tools/audit.rs`, `scorpion_app/src/audit.rs` (the Web
+Console's `POST /api/audit` boundary), and `spider_cli/src/audit.rs`
+(the `scorpion audit <url>` command) are the three authorized
+consumers — the `spider_audit_page` MCP tool, the Web Console's own
+audit route, and the CLI's own audit command — of
+`audit_page`/`PageAuditResult` (§7.6, §7.7); every other shipping file,
+in every shipping crate, remains forbidden from referencing the audit
+module or its result vocabulary at all
 (`audit_module_has_a_precise_allowed_consumer_boundary`, widened from one
-authorized file to exactly two by this frontier — which also keeps every
-internal assembly primitive — the individual rule functions,
-`PageFacts::from_page`, `EvidencedPageFacts::record`,
-`extract_technology_markers` and its two sub-extractors, `FindingId::derive`,
-`record_finding` — universally forbidden, with no exception even inside
-either authorized file: an interface calls the aggregate seam, it never
-assembles the capability itself;
-`scorpion_app_audit_seam_has_no_independent_audit_assembly` additionally
-forbids `fetch_single_page` inside `scorpion_app/src/audit.rs`
-specifically — a Web audit boundary must never independently re-acquire
-a target, even though `fetch_single_page` is not forbidden crate-wide,
-since `spider_cli/src/discovery.rs` legitimately calls it directly for
-an unrelated purpose). `spider_mcp/src/tools/evidence_read.rs`
+authorized file to two and then to exactly three across these three
+frontiers — which also keeps every internal assembly primitive — the
+individual rule functions, `PageFacts::from_page`,
+`EvidencedPageFacts::record`, `extract_technology_markers` and its two
+sub-extractors, `FindingId::derive`, `record_finding` — universally
+forbidden, with no exception even inside any of the three authorized
+files: an interface calls the aggregate seam, it never assembles the
+capability itself;
+`scorpion_app_audit_seam_has_no_independent_audit_assembly` and
+`spider_cli_audit_seam_has_no_independent_audit_assembly` additionally
+forbid `fetch_single_page` inside `scorpion_app/src/audit.rs` and
+`spider_cli/src/audit.rs` respectively — an audit boundary must never
+independently re-acquire a target, even though `fetch_single_page` is
+not forbidden crate-wide, since `spider_cli/src/discovery.rs`
+legitimately calls it directly for an unrelated purpose — its own
+FETCH/FEED/SITEMAP/NEWS_SITEMAP/ROBOTS_SITEMAP commands).
+`spider_mcp/src/tools/evidence_read.rs`
 is, analogously, the single authorized MCP consumer of the
 persistence-touching evidence read/resolve seam
 (`EvidenceRef::resolve`/`read_evidence`) —
@@ -690,37 +698,47 @@ derivation, or evidence reconstruction independently. All consumers
 observe the *same* `PageAuditResult`/`EvidenceBundle` truth:
 
 ```text
-                           AI                                    human
-                            │                                      │
-                           MCP                              Web Console
-      (spider_mcp/src/tools/{audit,evidence_read}.rs)   (scorpion_app/src/{audit,evidence}.rs)
-             ┌──────────────┴──────────────┐         ┌──────────────┴──────────────┐
-             │                             │         │                             │
-       spider_audit_page          spider_evidence_read  POST /api/audit   GET /api/evidence/{ref}
-             │                             │         │                             │
-             └──────────────── audit_page() ─────────┘                             │
-             │                             │                                       │
-             └────────── EvidenceRef ──────┴───────── EvidenceRef ──────────────────┘
-                                            │
-                                            ▼
-                                   SCORPION_DOMAIN_DB
-                                            │
-                                            ▼
-                                     EvidenceBundle
+              AI                     human                     human
+               │                       │                         │
+              MCP               Web Console                     CLI
+(spider_mcp/src/tools/     (scorpion_app/src/          (spider_cli/src/audit.rs)
+   {audit,evidence_read}.rs)   {audit,evidence}.rs)
+      │           │              │           │                   │
+ spider_audit_page  spider_evidence_read  POST      GET      scorpion audit <url>
+      │           │           /api/audit  /api/evidence/{ref}    │
+      └───────────┼──────────────┴─────────┼────────────────────┘
+                   │        audit_page()    │
+                   └────────────┬───────────┘
+                                 │  EvidenceRef
+                                 ▼
+                        SCORPION_DOMAIN_DB
+                                 │
+                                 ▼
+                          EvidenceBundle
 ```
 
-Both `spider_audit_page` and `POST /api/audit` call the identical
-`audit_page()` seam — one audit engine, two thin interfaces, never two
-implementations. Both `spider_evidence_read` and `GET /api/evidence/{ref}`
-call the identical `EvidenceRef::resolve()`/`read_evidence()` seam. All
-four routes share the one `SCORPION_DOMAIN_DB`, so evidence created
-through *either* audit interface resolves through *either* read
-interface — proven both directions:
+`spider_audit_page`, `POST /api/audit`, and `scorpion audit <url>` all
+call the identical `audit_page()` seam — one audit engine, three thin
+interfaces, never two (or three) separate implementations.
+`spider_evidence_read` and `GET /api/evidence/{ref}` call the identical
+`EvidenceRef::resolve()`/`read_evidence()` seam. Every route shares the
+one `SCORPION_DOMAIN_DB`, so evidence created through *any* audit
+interface resolves through *either* read interface — proven in both
+directions that matter across the three:
 `scorpion_app/tests/cross_interface_evidence.rs`'s
 `web_created_audit_evidence_resolves_through_mcp_spider_evidence_read`
-(Web audit → MCP read) and its earlier
+(Web audit → MCP read), its earlier
 `mcp_and_web_console_resolve_the_identical_persisted_evidence_bundle`
-(MCP audit → Web read).
+(MCP audit → Web read), and `spider_cli/src/audit.rs`'s own
+`cli_evidence_identity_resolves_to_the_corresponding_evidence_bundle`
+test plus its real production-reality check against both a real
+`scorpion-api` and a real `spider-mcp` process (CLI audit → Web read,
+CLI audit → MCP read — `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`'s
+own closure report). `spider_cli/src/audit.rs`'s own
+`cli_output_matches_direct_audit_page_call_semantically` test is the CLI's
+equivalent of the Web/MCP parity proof: field-for-field identical
+Findings and technology markers against a direct `audit_page()` call,
+differing only in `EvidenceId` (a genuinely separate acquisition).
 
 `spider_audit_page`'s returned `evidence_ref` passes directly into
 `spider_evidence_read` with no translation — proven by real MCP
@@ -741,10 +759,12 @@ wholly separate real `scorpion-api` process and resolves the same
 `SCORPION_DOMAIN_DB` file — asserting field-by-field equality across
 every canonical `EvidenceBundle` field, zero additional target hits, and
 a successful read even though the target is no longer reachable at all.
-MCP and Web Console are peer interfaces over the same canonical core:
-neither calls the other, and neither reconstructs a parallel evidence
-truth — "what the AI saw" and "what a human reviewer sees" are the same
-persisted record. The Web Console's own HTML/JS rendering of that record
+MCP, Web Console, and CLI are peer interfaces over the same canonical
+core: none of the three calls another, and none reconstructs a parallel
+evidence truth — "what the AI saw," "what a human reviewer sees" through
+the Web Console, and "what a human reviewer sees" through the CLI are
+all the same persisted record. The Web Console's own HTML/JS rendering
+of that record
 is presentation-only: `web_console_never_uses_unsafe_dom_injection_
 primitives` structurally proves the entire rendering script contains no
 `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`document.write`/`eval(`/
@@ -809,11 +829,13 @@ half of that same principle
 `EvidenceBundle`, direct-serialized, for any durably-recorded evidence
 identity — never only audit-produced ones, and never a second,
 web-specific projection of the model. Since
-`SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`, the same is
-true in the acquisition direction too: `POST /api/audit` calls the
-identical `audit_page()` seam `spider_audit_page` calls, so a human
-running an audit through the Web Console and an AI running one through
-MCP are executing the same audit engine, not two.
+`SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001` and
+`SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`, the same is true in
+the acquisition direction too: `POST /api/audit` and `scorpion audit
+<url>` both call the identical `audit_page()` seam `spider_audit_page`
+calls, so a human running an audit through the Web Console, a human
+running one through the CLI, and an AI running one through MCP are all
+executing the same audit engine, not three.
 
 ---
 
@@ -1369,21 +1391,25 @@ The following are intentionally not refactored in this frontier:
   and no technology/CMS/framework/WAF fingerprinting vocabulary; and the
   audit module's result vocabulary (`features::audit`, `audit_page(`,
   `ObservedTechnologyMarker`, `TechnologyMarkerSource`, `FindingId`,
-  `EvidencedPageFacts`, `PageAuditResult`) is referenced by exactly one
-  shipping file — `spider_mcp/src/tools/audit.rs`, the authorized
-  `spider_audit_page` MCP tool
-  (`SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`) — and by no other
+  `EvidencedPageFacts`, `PageAuditResult`) is referenced by exactly
+  three shipping files — `spider_mcp/src/tools/audit.rs` (the
+  `spider_audit_page` MCP tool,
+  `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`),
+  `scorpion_app/src/audit.rs` (the Web Console's `POST /api/audit`
+  boundary, `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`),
+  and `spider_cli/src/audit.rs` (the `scorpion audit <url>` command,
+  `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`) — and by no other
   file in `spider_cli`, `spider_mcp`, or `scorpion_app`
   (`audit_module_has_a_precise_allowed_consumer_boundary`), while every
   internal assembly primitive (the individual rule functions,
   `PageFacts::from_page`, `EvidencedPageFacts::record`,
   `extract_technology_markers` and its two sub-extractors,
   `FindingId::derive`, `record_finding`, `analyze_page`) remains
-  universally forbidden with no exception, including inside that one
-  authorized file — proving no parallel audit/technology-marker surface
-  exists anywhere outside `features/audit.rs`, and that the one
-  authorized MCP consumer calls the aggregate seam rather than
-  assembling the capability itself
+  universally forbidden with no exception, including inside any of the
+  three authorized files — proving no parallel audit/technology-marker
+  surface exists anywhere outside `features/audit.rs`, and that each
+  authorized consumer calls the aggregate seam rather than assembling
+  the capability itself
 
 - Every `pub const PREFIX: &'static str = "..."` declared anywhere in
   `spider/src` (every canonical identity/derived-record-identity type's
@@ -1439,20 +1465,36 @@ The following are intentionally not refactored in this frontier:
   the full history
 
 - The aggregate audit seam (`audit_page`/`PageAuditResult` and its
-  result vocabulary) is called by exactly two shipping files —
-  `spider_mcp/src/tools/audit.rs` and `scorpion_app/src/audit.rs`, peer
-  interfaces that never call each other — and by no other file in
-  `spider_cli`, `spider_mcp`, or `scorpion_app`
+  result vocabulary) is called by exactly three shipping files —
+  `spider_mcp/src/tools/audit.rs`, `scorpion_app/src/audit.rs`, and
+  `spider_cli/src/audit.rs`, peer interfaces that never call each
+  other — and by no other file in `spider_cli`, `spider_mcp`, or
+  `scorpion_app`
   (`audit_module_has_a_precise_allowed_consumer_boundary`, widened from
-  one authorized file to two); every internal assembly primitive (rule
-  functions, `PageFacts::from_page`, `EvidencedPageFacts::record`,
-  `extract_technology_markers`, `FindingId::derive`, `record_finding`,
-  `analyze_page`) remains universally forbidden, with no exception even
-  inside either authorized file; `scorpion_app/src/audit.rs`
-  additionally never references `fetch_single_page`
-  (`scorpion_app_audit_seam_has_no_independent_audit_assembly`) — a Web
-  audit boundary must never independently re-acquire a target, even
-  though that primitive is not forbidden crate-wide (`spider_cli`'s own
-  discovery code calls it legitimately)
+  one authorized file to two and then to three); every internal
+  assembly primitive (rule functions, `PageFacts::from_page`,
+  `EvidencedPageFacts::record`, `extract_technology_markers`,
+  `FindingId::derive`, `record_finding`, `analyze_page`) remains
+  universally forbidden, with no exception even inside any of the three
+  authorized files; `scorpion_app/src/audit.rs` and
+  `spider_cli/src/audit.rs` each additionally never reference
+  `fetch_single_page`
+  (`scorpion_app_audit_seam_has_no_independent_audit_assembly`,
+  `spider_cli_audit_seam_has_no_independent_audit_assembly`) — an audit
+  boundary must never independently re-acquire a target, even though
+  that primitive is not forbidden crate-wide
+  (`spider_cli/src/discovery.rs`'s own FETCH/FEED/SITEMAP/etc. commands
+  call it legitimately)
+
+- `SCORPION_ARCHITECTURE.md` (this document) names the exact same three
+  runtime-authorized canonical-audit consumer files
+  `audit_module_has_a_precise_allowed_consumer_boundary` enforces —
+  `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001` widened the runtime
+  boundary to three files without updating this document in the same
+  frontier, and nothing caught that documentation/runtime topology
+  drift until `SCORPION_CLI_CANONICAL_PAGE_AUDIT_ARCHITECTURE_RECONCILIATION_001`
+  both reconciled it and added
+  `architecture_document_names_every_runtime_authorized_audit_consumer`
+  to make the same drift class mechanically detectable going forward
 
 New violations are caught by `cargo test -p spider --test architecture_guardrails`.

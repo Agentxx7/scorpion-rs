@@ -325,23 +325,31 @@ Interfaces must not:
 - independently implement deterministic audit rule evaluation
   (SEO/security-header rules or any future rule), technology-marker
   extraction, applicability decisions, rule-version semantics, or
-  `FindingId`/marker identity derivation — exactly two shipping files are
-  authorized consumers of `audit_page()`/`PageAuditResult` (§4; see
-  `SCORPION_ARCHITECTURE.md` §3.19), peer interfaces that never call each
-  other: the `spider_audit_page` MCP tool
+  `FindingId`/marker identity derivation — exactly three shipping files
+  are authorized consumers of `audit_page()`/`PageAuditResult` (§4; see
+  `SCORPION_ARCHITECTURE.md` §3.19), peer interfaces that never call any
+  of the other two: the `spider_audit_page` MCP tool
   (`spider_mcp/src/tools/audit.rs`, realized by
-  `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`) and the Web Console's
+  `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001`), the Web Console's
   `POST /api/audit` boundary (`scorpion_app/src/audit.rs`, realized by
-  `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`). Both call
-  `audit_page()` as their sole source of audit truth, never re-derive or
-  approximate it, and never reconstruct a parallel evidence truth where a
-  shared `EvidenceRef` already resolves the same underlying evidence for
-  both an AI-visible and a human-facing consumer — no other file, in any
-  shipping crate, may reference the audit module's result vocabulary at
-  all. `scorpion_app/src/audit.rs` additionally never calls
-  `fetch_single_page` — a Web audit boundary must never independently
+  `SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`), and the
+  CLI's `scorpion audit <url>` command (`spider_cli/src/audit.rs`,
+  realized by `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`). All
+  three call `audit_page()` as their sole source of audit truth, never
+  re-derive or approximate it, and never reconstruct a parallel evidence
+  truth where a shared `EvidenceRef` already resolves the same underlying
+  evidence across an AI-visible and two human-facing consumers — no
+  other file, in any shipping crate, may reference the audit module's
+  result vocabulary at all. `scorpion_app/src/audit.rs` and
+  `spider_cli/src/audit.rs` each additionally never call
+  `fetch_single_page` — an audit boundary must never independently
   re-acquire a target; the one acquisition per audit happens exclusively
-  inside `audit_page()`.
+  inside `audit_page()`. No interface-to-interface dependency exists
+  among the three: `CLI -> MCP -> audit_page()`,
+  `CLI -> Web Console -> audit_page()`,
+  `Web Console -> MCP -> audit_page()`, and every other such chaining are
+  all equally unauthorized — there is one engine, not an interface
+  hierarchy.
 - independently resolve/reconstruct durable evidence — exactly two
   shipping files are authorized consumers of the persistence-touching
   `EvidenceRef::resolve`/`read_evidence` seam, peer interfaces that never
@@ -362,17 +370,22 @@ Interfaces must not:
   (`mcp_and_web_console_resolve_the_identical_persisted_evidence_bundle`)
   and Web-created evidence resolves through MCP
   (`web_created_audit_evidence_resolves_through_mcp_spider_evidence_read`).
-  Web Console audit *execution* is realized too
-  (`SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`, see above)
-  — the Web Console and MCP now run the identical audit engine, not two.
+  Web Console and CLI audit *execution* are both realized too
+  (`SCORPION_WEB_CONSOLE_CANONICAL_PAGE_AUDIT_EXECUTION_001`,
+  `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001`, see above) — MCP,
+  Web Console, and CLI now all run the identical audit engine, not
+  three.
 
 Current conformance: `spider_cli` and `spider_mcp` call canonical seams
 (`fetch_single_page_with_options`, `build_evidence`, `Website` crawl seam,
-search providers, and — `spider_mcp` only, through the two authorized
-files above — `audit_page()`/`EvidenceRef::resolve()`/
-`domain_runtime::open_shared_domain_store()`) and hold no duplicate
-domain models. `spider_cli::oauth` constructs an HTTP client as a
-documented authentication-flow exception — not an acquisition path.
+search providers, `domain_runtime::open_shared_domain_store()`, and —
+each only through its own authorized file above —
+`audit_page()` (`spider_mcp/src/tools/audit.rs` and
+`spider_cli/src/audit.rs`) / `EvidenceRef::resolve()`
+(`spider_mcp/src/tools/evidence_read.rs` only; `spider_cli` has no
+evidence-read command and calls no seam of that kind)) and hold no
+duplicate domain models. `spider_cli::oauth` constructs an HTTP client as
+a documented authentication-flow exception — not an acquisition path.
 `scorpion_app` calls canonical seams too (`resolve_search_provider`,
 `AgentBuilder`/`claim_durable_research`, `domain_runtime::
 open_shared_domain_store`, and — through `scorpion_app/src/evidence.rs`

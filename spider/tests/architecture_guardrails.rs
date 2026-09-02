@@ -6802,6 +6802,44 @@ fn spider_cli_audit_seam_has_no_independent_audit_assembly() {
     }
 }
 
+/// The documented architecture in `SCORPION_ARCHITECTURE.md` must name
+/// the exact same canonical-audit facts and consumer files
+/// `audit_module_has_a_precise_allowed_consumer_boundary` enforces at
+/// runtime. This is a real defect class this repository's own history
+/// produced, not a hypothetical one:
+/// `SCORPION_CLI_CANONICAL_PAGE_AUDIT_EXECUTION_001` widened the runtime
+/// guardrail from two authorized files to three, but did not update
+/// `SCORPION_ARCHITECTURE.md` in that same frontier — the documented
+/// topology silently described only two peer audit interfaces while the
+/// shipped one had three, until
+/// `SCORPION_CLI_CANONICAL_PAGE_AUDIT_ARCHITECTURE_RECONCILIATION_001`
+/// reconciled the document and added this guardrail so the same class
+/// of documentation/runtime topology drift is mechanically detectable
+/// going forward. Deliberately not a general Markdown parser or
+/// documentation framework — just the fixed, small set of literal
+/// facts the runtime boundary above already treats as authoritative.
+#[test]
+fn architecture_document_names_every_runtime_authorized_audit_consumer() {
+    let architecture = fs::read_to_string(workspace_root().join("SCORPION_ARCHITECTURE.md"))
+        .expect("failed to read SCORPION_ARCHITECTURE.md");
+    for required in [
+        "spider/src/features/audit.rs",
+        "audit_page()",
+        "spider_mcp/src/tools/audit.rs",
+        "scorpion_app/src/audit.rs",
+        "spider_cli/src/audit.rs",
+    ] {
+        assert!(
+            architecture.contains(required),
+            "SCORPION_ARCHITECTURE.md must name {required:?} — it must \
+             stay truthfully in sync with \
+             audit_module_has_a_precise_allowed_consumer_boundary's own \
+             runtime allowed_consumer_files list \
+             (SCORPION_CLI_CANONICAL_PAGE_AUDIT_ARCHITECTURE_RECONCILIATION_001)"
+        );
+    }
+}
+
 /// Every production rule id has a distinct wire string, and every rule
 /// id constant has a corresponding, separately declared version
 /// constant.

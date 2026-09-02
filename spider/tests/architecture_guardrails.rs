@@ -7524,3 +7524,104 @@ fn ci_chrome_readiness_probe_precedes_every_required_real_chrome_evidence_step()
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_CI_NETWORK_NAMESPACE_READINESS_STABILITY_001
+// ---------------------------------------------------------------------------
+
+/// `.github/workflows/rust.yml`'s network-namespace setup step
+/// (`spider_core` job) must prove loopback readiness with a bounded,
+/// observable condition — not a fixed elapsed-time guess. A fixed `sleep 1`
+/// before the one readiness `curl` is not a deterministic proxy for "the
+/// server is actually listening"; a sufficiently slow/contended runner can
+/// reach that `curl` before the server has bound its socket, indistinguishable
+/// from a real loopback break (the exact, independently diagnosed cause of a
+/// real remote first-attempt CI failure this frontier closes). This guardrail
+/// structurally proves three things about that one step's own text: the old
+/// fixed-delay pattern is gone, the replacement readiness probe is bounded
+/// (never an unbounded retry), and the IPv4/IPv6 external-egress denial
+/// probes still run, still after loopback readiness is proven. Deliberately a
+/// plain substring/byte-offset check against the one real workflow file, not
+/// a YAML-structure-aware framework — same established pattern as this
+/// file's other `.github/workflows/rust.yml`-scoped guardrails.
+#[test]
+fn ci_namespace_loopback_readiness_is_bounded_and_observable_not_fixed_delay() {
+    let workflow = fs::read_to_string(workspace_root().join(".github/workflows/rust.yml"))
+        .expect("failed to read .github/workflows/rust.yml");
+
+    let setup_marker = "Create an isolated network namespace for the deterministic test phase";
+    let setup_at = workflow.find(setup_marker).unwrap_or_else(|| {
+        panic!(
+            "expected the network namespace setup step {setup_marker:?} to exist in \
+             .github/workflows/rust.yml's spider_core job"
+        )
+    });
+
+    // Scope every check below to just this one step's own body (from its
+    // name through the next top-level `- name:` step marker), so a match
+    // against unrelated, later text in the file can never satisfy these
+    // assertions.
+    let after_setup = &workflow[setup_at..];
+    let step_body = match after_setup[setup_marker.len()..].find("\n      - name:") {
+        Some(offset) => &after_setup[..setup_marker.len() + offset],
+        None => after_setup,
+    };
+
+    // A. The exact old fixed-delay regression pattern must be gone: a bare
+    // `sleep 1` immediately gating the one loopback readiness `curl`.
+    assert!(
+        !step_body.contains("sleep 1\n          if ! sudo ip netns exec spider_ci curl"),
+        "the network namespace setup step must not use a fixed `sleep 1` as a proxy for \
+         loopback readiness (SCORPION_CI_NETWORK_NAMESPACE_READINESS_STABILITY_001) — \
+         readiness must be an observable, bounded condition, not a fixed elapsed-time guess"
+    );
+
+    // B. The replacement must be a bounded (finite-count) poll loop, never
+    // an unbounded retry.
+    let readiness_loop_at = step_body.find("seq 1 50").unwrap_or_else(|| {
+        panic!(
+            "expected a bounded (finite-count, `seq 1 50`) loopback readiness poll loop in \
+             the network namespace setup step — readiness must be observable but never \
+             unbounded"
+        )
+    });
+    assert!(
+        !step_body.contains("while true"),
+        "the network namespace setup step's readiness probe must never be an unbounded loop"
+    );
+
+    // C. Readiness must be based on a real observable request (curl against
+    // the loopback endpoint), not process liveness alone.
+    assert!(
+        step_body.contains("curl") && step_body.contains("kill -0"),
+        "expected both an observable readiness request (curl) and an early-exit \
+         process-liveness check (kill -0) in the network namespace setup step"
+    );
+
+    // D. The IPv4/IPv6 external-egress denial probes must still exist, and
+    // must still run after loopback readiness is proven.
+    let ipv4_denial_at = step_body
+        .find("IPv4 external egress from inside the namespace")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected the IPv4 external-egress denial probe to still exist in the \
+                 network namespace setup step"
+            )
+        });
+    let ipv6_denial_at = step_body
+        .find("IPv6 external egress from inside the namespace")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected the IPv6 external-egress denial probe to still exist in the \
+                 network namespace setup step"
+            )
+        });
+    assert!(
+        readiness_loop_at < ipv4_denial_at,
+        "loopback readiness must be proven before the IPv4 external-egress denial probe runs"
+    );
+    assert!(
+        readiness_loop_at < ipv6_denial_at,
+        "loopback readiness must be proven before the IPv6 external-egress denial probe runs"
+    );
+}

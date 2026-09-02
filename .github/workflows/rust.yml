@@ -623,9 +623,43 @@ jobs:
           sudo ip netns exec spider_ci python3 -m http.server 18734 --bind 127.0.0.1 &>/dev/null &
           server_pid=$!
           trap "sudo kill $server_pid 2>/dev/null || true" EXIT
-          sleep 1
-          if ! sudo ip netns exec spider_ci curl -sS --max-time 3 -o /dev/null http://127.0.0.1:18734/; then
-            echo "::error::IPv4 loopback connectivity failed inside the namespace — LOCAL_NETWORK fixtures cannot run"
+
+          # SCORPION_CI_NETWORK_NAMESPACE_READINESS_STABILITY_001: a fixed
+          # `sleep 1` before the one readiness curl is a non-deterministic
+          # proxy for "the server is actually listening" — a sufficiently
+          # slow/contended runner can reach that curl before python's HTTP
+          # server has bound its socket, and the failure is indistinguishable
+          # from a real loopback break (this is the exact, independently
+          # diagnosed cause of a real remote first-attempt CI failure; see
+          # that frontier's closure report). Replaced with a bounded,
+          # observable poll: up to 10s total (matching this step's own
+          # `run_bounded` 10s convention), in 0.2s steps (50 attempts), each
+          # curl attempt itself bounded to 1s so one slow attempt cannot
+          # consume the whole budget. `kill -0 "$server_pid"` is a
+          # best-effort early-exit check, not a guaranteed-precise one —
+          # this frontier deliberately did not assume specific sudo/`ip
+          # netns exec` PID/process-tree semantics beyond "if this PID is
+          # provably gone, something is provably wrong"; if that check ever
+          # under-fires (PID semantics differ from expected), the bounded
+          # poll loop below still catches a genuinely broken server at the
+          # deadline, just without the earlier, more specific diagnostic. A
+          # single failed poll attempt is expected, ordinary, and silent —
+          # only the terminal outcome (ready, early process death, or
+          # deadline expiry) is ever reported.
+          ready=0
+          for _ in $(seq 1 50); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::loopback readiness probe server (pid $server_pid) exited before becoming ready — LOCAL_NETWORK fixtures cannot run"
+              exit 1
+            fi
+            if sudo ip netns exec spider_ci curl -sS --max-time 1 -o /dev/null http://127.0.0.1:18734/ 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::IPv4 loopback readiness deadline (10s) expired inside the namespace — LOCAL_NETWORK fixtures cannot run"
             exit 1
           fi
 

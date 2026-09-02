@@ -347,7 +347,27 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
 # shipping_manifests` both still pass unchanged.
-reviewed_commit = "7c2bc5c19aa70a5dd65b9ca828acbb30280ebbba"
+# Re-bound again, to 4dff7c72: SCORPION_CI_NETWORK_NAMESPACE_READINESS_
+# STABILITY_001 edited .github/workflows/rust.yml (this capability's
+# own CI_ENFORCED.ci_workflow_file) to replace a fixed `sleep 1` with a
+# bounded, observable readiness poll in the network-namespace setup
+# step that runs once, early in the spider_core job, well before this
+# capability's own CAPTCHA CI-portable evidence step — unrelated to
+# CAPTCHA/chrome semantics, but rust.yml is itself one of this
+# capability's own closure_relevant_files, so that byte change alone
+# invalidated 7c2bc5c1's binding here too. The CAPTCHA CI-portable
+# evidence step itself (name, run command, RUST_MIN_STACK=67108864,
+# and every --test target) is untouched by this commit — it edits only
+# the earlier, separate namespace-setup step and adds a new test file
+# guardrail, neither of which this capability cites — confirmed by
+# inspection, not merely assumed. No CAPTCHA detection, solving,
+# provider routing, frame/OOPIF handling, or CI evidence this
+# capability cites changed at all — confirmed empirically by
+# re-running this harness itself:
+# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
+# source` and `production_reachable_claims_are_grep_verified_against_
+# shipping_manifests` both still pass unchanged.
+reviewed_commit = "4dff7c72f22db631a592e01015e97732508b87d6"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -441,4 +461,10 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # CI-portable evidence step itself is byte-for-byte unchanged; every
 # other closure_relevant_file is untouched; no CAPTCHA-relevant fact
 # changed.
-closed_commit = "7c2bc5c19aa70a5dd65b9ca828acbb30280ebbba"
+# Re-bound again, to 4dff7c72, for the exact same reason reviewed_
+# commit above was at that time (SCORPION_CI_NETWORK_NAMESPACE_
+# READINESS_STABILITY_001's edits to .github/workflows/rust.yml — see
+# that field's own comment in full for the complete accounting). The
+# CAPTCHA CI-portable evidence step itself is untouched; every other
+# closure_relevant_file is untouched; no CAPTCHA-relevant fact changed.
+closed_commit = "4dff7c72f22db631a592e01015e97732508b87d6"

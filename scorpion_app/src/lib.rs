@@ -288,6 +288,13 @@ pub enum ResearchError {
     InvalidProviderConfiguration(String),
     CapacityExhausted,
     NotFound,
+    /// A present-but-malformed static Research runtime setting (currently:
+    /// `OPENAI_COMPAT_TIMEOUT_SECS` set to zero or a non-integer value).
+    /// Distinct from `NotConfigured` — the setting is present, just
+    /// invalid — so it must never collapse to "absent". The raw offending
+    /// value is never carried here or in the public message
+    /// (`SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001`).
+    ConfigurationInvalid,
     /// An execution/runtime dependency failure (e.g. the durable evidence
     /// store could not be opened) — reserved for failures that occur only
     /// after static configuration has already resolved successfully.
@@ -328,6 +335,10 @@ pub enum ResearchAvailability {
     /// The configured search provider selector is not a recognized
     /// canonical identity (see `ResearchError::InvalidProviderConfiguration`).
     InvalidConfiguration(String),
+    /// A present-but-malformed static Research runtime setting (see
+    /// `ResearchError::ConfigurationInvalid`) — never collapsed into
+    /// `NotConfigured`, which means "absent", not "invalid".
+    ConfigurationInvalid,
 }
 
 struct ResearchRuntimeConfig {
@@ -336,6 +347,13 @@ struct ResearchRuntimeConfig {
     openai_base_url: String,
     model: String,
     api_key: String,
+    /// Operator-configured timeout for the OpenAI-compatible synthesis HTTP
+    /// client (`OPENAI_COMPAT_TIMEOUT_SECS`). `None` when the operator did
+    /// not set it — `ResearchService::submit` must then leave
+    /// `spider_agent::AgentBuilder`'s own 60-second default completely
+    /// untouched rather than re-deriving or re-encoding it here
+    /// (`SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001`).
+    openai_timeout: Option<std::time::Duration>,
 }
 
 impl std::fmt::Display for ResearchError {
@@ -353,6 +371,7 @@ impl std::fmt::Display for ResearchError {
             ),
             Self::CapacityExhausted => f.write_str("research capacity is temporarily exhausted"),
             Self::NotFound => f.write_str("research session not found"),
+            Self::ConfigurationInvalid => f.write_str("research configuration is invalid"),
             Self::Unavailable => f.write_str("research is unavailable"),
             Self::Internal => f.write_str("internal research error"),
         }
@@ -373,7 +392,8 @@ pub fn research_error_status(error: &ResearchError) -> u16 {
         ResearchError::NotConfigured
         | ResearchError::CapacityExhausted
         | ResearchError::UnsupportedProvider(_)
-        | ResearchError::InvalidProviderConfiguration(_) => 503,
+        | ResearchError::InvalidProviderConfiguration(_)
+        | ResearchError::ConfigurationInvalid => 503,
         ResearchError::Unavailable => 502,
         ResearchError::Internal => 500,
     }
@@ -387,6 +407,7 @@ pub fn research_error_json(error: &ResearchError) -> String {
         ResearchError::InvalidProviderConfiguration(_) => "research_provider_configuration_invalid",
         ResearchError::CapacityExhausted => "execution_capacity_exhausted",
         ResearchError::NotFound => "research_not_found",
+        ResearchError::ConfigurationInvalid => "research_configuration_invalid",
         ResearchError::Unavailable => "research_unavailable",
         ResearchError::Internal => "internal_error",
     };
@@ -428,9 +449,17 @@ impl ResearchService {
                 .await
                 .map_err(|_| ResearchError::Unavailable)?,
         );
-        let builder = AgentBuilder::new()
+        let mut builder = AgentBuilder::new()
             .with_openai_compatible(config.openai_base_url, config.api_key, config.model)
             .with_search_provider(config.provider);
+        // Bind the operator's OPENAI_COMPAT_TIMEOUT_SECS through the
+        // existing canonical AgentBuilder::with_timeout seam only when
+        // explicitly configured — leaving spider_agent's own 60-second
+        // default completely untouched otherwise
+        // (SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001).
+        if let Some(timeout) = config.openai_timeout {
+            builder = builder.with_timeout(Some(timeout));
+        }
         let claimed = claim_durable_research(
             Arc::clone(&store),
             builder,
@@ -482,6 +511,30 @@ fn required_config(
         .ok_or(ResearchError::NotConfigured)
 }
 
+/// Parse the optional `OPENAI_COMPAT_TIMEOUT_SECS` operator setting. Absent
+/// (or set to only whitespace, matching `required_config`'s own
+/// absent-equals-empty convention) preserves existing behavior — `None`, so
+/// `ResearchService::submit` leaves `spider_agent::AgentBuilder`'s own
+/// 60-second default completely untouched. Present, it must be a positive
+/// integer; zero or anything non-numeric fails closed as static
+/// configuration, never silently falling back to the 60-second default
+/// (`SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001`).
+fn parse_openai_timeout(
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<std::time::Duration>, ResearchError> {
+    let Some(raw) = lookup("OPENAI_COMPAT_TIMEOUT_SECS") else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.parse::<u64>() {
+        Ok(seconds) if seconds > 0 => Ok(Some(std::time::Duration::from_secs(seconds))),
+        _ => Err(ResearchError::ConfigurationInvalid),
+    }
+}
+
 fn resolve_research_config_with(
     lookup: &impl Fn(&str) -> Option<String>,
 ) -> Result<ResearchRuntimeConfig, ResearchError> {
@@ -495,6 +548,7 @@ fn resolve_research_config_with(
     let openai_base_url = required_config("OPENAI_COMPAT_BASE_URL", lookup)?;
     let model = required_config("OPENAI_COMPAT_MODEL", lookup)?;
     let api_key = required_config("OPENAI_COMPAT_API_KEY", lookup)?;
+    let openai_timeout = parse_openai_timeout(lookup)?;
     let selector = lookup("SEARCH_PROVIDER");
     let searxng = lookup("SEARXNG_BASE_URL");
     let brave = lookup("BRAVE_API_KEY");
@@ -515,6 +569,7 @@ fn resolve_research_config_with(
         openai_base_url,
         model,
         api_key,
+        openai_timeout,
     })
 }
 
@@ -537,11 +592,16 @@ fn research_availability_with(lookup: &impl Fn(&str) -> Option<String>) -> Resea
         Err(ResearchError::InvalidProviderConfiguration(name)) => {
             ResearchAvailability::InvalidConfiguration(name)
         }
+        // A present-but-malformed OPENAI_COMPAT_TIMEOUT_SECS must never
+        // collapse to NotConfigured — that state means "absent", not
+        // "invalid" (SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001).
+        Err(ResearchError::ConfigurationInvalid) => ResearchAvailability::ConfigurationInvalid,
         // NotConfigured and every other configuration-resolution error
         // (CapacityExhausted/NotFound/Unavailable/Internal never occur
         // here — resolve_research_config_with only ever returns
-        // NotConfigured or a provider-configuration variant) collapse to
-        // the truthful NotConfigured state.
+        // NotConfigured, a provider-configuration variant, or
+        // ConfigurationInvalid, each handled above) collapse to the
+        // truthful NotConfigured state.
         Err(_) => ResearchAvailability::NotConfigured,
     }
 }
@@ -995,5 +1055,144 @@ mod tests {
         let _ = std::fs::remove_file(&database);
         let _ = std::fs::remove_file(format!("{}-shm", database.display()));
         let _ = std::fs::remove_file(format!("{}-wal", database.display()));
+    }
+
+    // -----------------------------------------------------------------
+    // SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001
+    // -----------------------------------------------------------------
+
+    /// Baseline lookup with every required Research field present and no
+    /// `OPENAI_COMPAT_TIMEOUT_SECS` override — callers patch in the one
+    /// field they're testing.
+    fn base_research_lookup(name: &str) -> Option<String> {
+        match name {
+            "SCORPION_DOMAIN_DB" => Some("/tmp/scorpion-timeout-test.sqlite".to_string()),
+            "SEARXNG_BASE_URL" => Some("http://127.0.0.1:8080".to_string()),
+            "OPENAI_COMPAT_BASE_URL" => Some("http://127.0.0.1:11434/v1".to_string()),
+            "OPENAI_COMPAT_MODEL" => Some("operator-model".to_string()),
+            "OPENAI_COMPAT_API_KEY" => Some("operator-key".to_string()),
+            _ => None,
+        }
+    }
+
+    // A. Absent OPENAI_COMPAT_TIMEOUT_SECS preserves existing behavior
+    // exactly: no explicit override is carried, so ResearchService::submit
+    // must never call AgentBuilder::with_timeout, leaving spider_agent's
+    // own 60-second default untouched.
+    #[test]
+    fn openai_timeout_absent_resolves_to_no_override() {
+        let config = resolve_research_config_with(&base_research_lookup).unwrap();
+        assert_eq!(config.openai_timeout, None);
+    }
+
+    // B. A valid positive integer parses into the exact configured Duration
+    // and is carried into ResearchRuntimeConfig unchanged.
+    #[test]
+    fn openai_timeout_valid_value_binds_the_exact_configured_duration() {
+        let lookup = |name: &str| match name {
+            "OPENAI_COMPAT_TIMEOUT_SECS" => Some("300".to_string()),
+            other => base_research_lookup(other),
+        };
+        let config = resolve_research_config_with(&lookup).unwrap();
+        assert_eq!(
+            config.openai_timeout,
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
+    // C. Zero is explicitly rejected as static configuration — never
+    // silently treated as "no timeout" or falling back to the 60-second
+    // default.
+    #[test]
+    fn openai_timeout_zero_fails_closed_as_invalid_configuration() {
+        let lookup = |name: &str| match name {
+            "OPENAI_COMPAT_TIMEOUT_SECS" => Some("0".to_string()),
+            other => base_research_lookup(other),
+        };
+        assert_eq!(
+            resolve_research_config_with(&lookup).err().unwrap(),
+            ResearchError::ConfigurationInvalid
+        );
+    }
+
+    // D. A non-integer value is explicitly rejected the same way.
+    #[test]
+    fn openai_timeout_malformed_value_fails_closed_as_invalid_configuration() {
+        for malformed in ["banana", "-5", "3.5", " ", "\t"] {
+            let lookup = |name: &str| match name {
+                "OPENAI_COMPAT_TIMEOUT_SECS" => Some(malformed.to_string()),
+                other => base_research_lookup(other),
+            };
+            // " " and "\t" are whitespace-only, matching required_config's
+            // own absent-equals-empty convention — resolve successfully
+            // with no override, same as fully absent.
+            if malformed.trim().is_empty() {
+                assert_eq!(
+                    resolve_research_config_with(&lookup)
+                        .unwrap()
+                        .openai_timeout,
+                    None,
+                    "whitespace-only {malformed:?} must behave exactly like absent"
+                );
+            } else {
+                assert_eq!(
+                    resolve_research_config_with(&lookup).err().unwrap(),
+                    ResearchError::ConfigurationInvalid,
+                    "{malformed:?} must fail closed as invalid configuration"
+                );
+            }
+        }
+    }
+
+    // E. The public error surface for an invalid timeout never carries the
+    // raw configured value, an API key, an endpoint URL, or a filesystem
+    // path — matching this file's existing sanitization convention for
+    // every other static-configuration error class.
+    #[test]
+    fn openai_timeout_invalid_configuration_error_never_leaks_the_raw_value_or_secrets() {
+        let lookup = |name: &str| match name {
+            "OPENAI_COMPAT_TIMEOUT_SECS" => {
+                Some("OPERATOR_SENTINEL_TIMEOUT_VALUE_7Q2K".to_string())
+            }
+            other => base_research_lookup(other),
+        };
+        let error = resolve_research_config_with(&lookup).err().unwrap();
+        assert_eq!(error, ResearchError::ConfigurationInvalid);
+
+        let message = error.to_string();
+        let json = research_error_json(&error);
+        for surface in [&message, &json] {
+            assert!(!surface.contains("OPERATOR_SENTINEL_TIMEOUT_VALUE_7Q2K"));
+            assert!(!surface.contains("operator-key"));
+            assert!(!surface.contains("http://"));
+            assert!(!surface.contains("/tmp/"));
+        }
+        assert_eq!(research_error_status(&error), 503);
+        assert!(json.contains("\"research_configuration_invalid\""));
+    }
+
+    // F. The exact same invalid timeout configuration that fails execution
+    // must also make research_availability() report the corresponding
+    // invalid state — one resolver, reused by both, never a second
+    // independently-maintained parser, and never collapsed into
+    // NotConfigured (which means "absent", not "invalid").
+    #[test]
+    fn openai_timeout_invalid_configuration_agrees_with_availability() {
+        let lookup = |name: &str| match name {
+            "OPENAI_COMPAT_TIMEOUT_SECS" => Some("not-a-number".to_string()),
+            other => base_research_lookup(other),
+        };
+        assert_eq!(
+            resolve_research_config_with(&lookup).err().unwrap(),
+            ResearchError::ConfigurationInvalid
+        );
+        assert_eq!(
+            research_availability_with(&lookup),
+            ResearchAvailability::ConfigurationInvalid
+        );
+        assert_ne!(
+            research_availability_with(&lookup),
+            ResearchAvailability::NotConfigured
+        );
     }
 }

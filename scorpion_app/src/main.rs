@@ -255,6 +255,10 @@ fn render_index(availability: ResearchAvailability) -> String {
             " disabled",
             "Research is not available: the configured search provider selection is invalid.",
         ),
+        ResearchAvailability::ConfigurationInvalid => (
+            " disabled",
+            "Research is not available: the configured research runtime settings are invalid.",
+        ),
     };
     INDEX_HTML
         .replace("{{RESEARCH_DISABLED}}", disabled)

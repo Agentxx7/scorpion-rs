@@ -7625,3 +7625,49 @@ fn ci_namespace_loopback_readiness_is_bounded_and_observable_not_fixed_delay() {
         "loopback readiness must be proven before the IPv6 external-egress denial probe runs"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001
+// ---------------------------------------------------------------------------
+
+/// `scorpion_app`'s Research runtime configuration
+/// (`OPENAI_COMPAT_TIMEOUT_SECS`) may configure the canonical
+/// `spider_agent::AgentBuilder::with_timeout` seam, but must never
+/// construct its own HTTP client or its own timeout implementation — the
+/// Web Console's own peer of the existing `no independent audit assembly`
+/// guardrails above. Deliberately a plain substring check against
+/// `scorpion_app/src/lib.rs`'s production code (the `#[cfg(test)]` module
+/// stripped first, matching those same guardrails' own convention), not a
+/// YAML/AST-aware framework.
+#[test]
+fn scorpion_app_research_timeout_uses_the_canonical_agent_builder_seam_only() {
+    let full_source = fs::read_to_string(workspace_root().join("scorpion_app/src/lib.rs"))
+        .expect("failed to read scorpion_app/src/lib.rs");
+    let production = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+
+    for forbidden in [
+        "reqwest::Client::new",
+        "reqwest::Client::builder",
+        "tokio::time::timeout",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "scorpion_app/src/lib.rs must not reference {forbidden:?} in production code \
+             — Research's OpenAI-compatible timeout is configured exclusively through \
+             spider_agent::AgentBuilder::with_timeout, never a second HTTP client or a \
+             shadow timeout wrapped around Research execution \
+             (SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001)"
+        );
+    }
+
+    assert!(
+        production.contains(".with_timeout("),
+        "expected scorpion_app/src/lib.rs to actually bind the operator's configured \
+         timeout through AgentBuilder::with_timeout — parsing \
+         OPENAI_COMPAT_TIMEOUT_SECS without ever calling the canonical seam would leave \
+         the setting silently inert (SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001)"
+    );
+}

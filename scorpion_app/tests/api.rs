@@ -39,6 +39,7 @@ fn api_server_with_research(searxng: Option<String>, research_configured: bool) 
         "OPENAI_COMPAT_BASE_URL",
         "OPENAI_COMPAT_MODEL",
         "OPENAI_COMPAT_API_KEY",
+        "OPENAI_COMPAT_TIMEOUT_SECS",
     ] {
         command.env_remove(name);
     }
@@ -82,6 +83,7 @@ fn api_server_with_env(env: &[(&str, &str)]) -> (Child, String) {
         "OPENAI_COMPAT_BASE_URL",
         "OPENAI_COMPAT_MODEL",
         "OPENAI_COMPAT_API_KEY",
+        "OPENAI_COMPAT_TIMEOUT_SECS",
     ] {
         command.env_remove(name);
     }
@@ -492,6 +494,224 @@ fn invalid_research_provider_selector_agrees_across_ui_and_execution() {
     );
     assert!(!submit.contains("research_not_configured"), "{submit}");
     assert!(!submit.contains("research_unavailable"), "{submit}");
+}
+
+// SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001: a present-but-
+// malformed OPENAI_COMPAT_TIMEOUT_SECS is a static configuration failure,
+// same class as an invalid provider selector above — never "not
+// configured" (the setting is present) and never the runtime-failure
+// class. UI availability and POST /api/research must agree.
+#[test]
+fn invalid_openai_timeout_agrees_across_ui_and_execution() {
+    let env: &[(&str, &str)] = &[
+        ("SEARXNG_BASE_URL", "http://127.0.0.1:8080"),
+        ("RESEARCH_EVIDENCE_DB", UNSUPPORTED_DB_PATH),
+        ("OPENAI_COMPAT_BASE_URL", UNSUPPORTED_OPENAI_URL),
+        ("OPENAI_COMPAT_MODEL", "operator-model"),
+        ("OPENAI_COMPAT_API_KEY", UNSUPPORTED_OPENAI_KEY),
+        ("OPENAI_COMPAT_TIMEOUT_SECS", "not-a-number"),
+    ];
+
+    let (mut child, base) = api_server_with_env(env);
+    let index = get(&base, "/");
+    child.kill().unwrap();
+    assert!(
+        index.contains("id=\"research-button\" type=\"submit\" disabled"),
+        "{index}"
+    );
+    assert!(
+        !index.contains(">Research is not configured.</p>"),
+        "{index}"
+    );
+    assert!(!index.contains(">Research is configured.</p>"), "{index}");
+    assert!(index.contains("invalid"), "{index}");
+    assert!(!index.contains("not-a-number"), "{index}");
+
+    let (mut child, base) = api_server_with_env(env);
+    let submit = post_path(&base, "/api/research", r#"{"topic":"rust"}"#);
+    child.kill().unwrap();
+    assert!(
+        submit.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{submit}"
+    );
+    assert!(
+        submit.contains("\"code\":\"research_configuration_invalid\""),
+        "{submit}"
+    );
+    assert!(!submit.contains("research_not_configured"), "{submit}");
+    assert!(!submit.contains("research_unavailable"), "{submit}");
+    assert!(!submit.contains("not-a-number"), "{submit}");
+    assert!(!submit.contains(UNSUPPORTED_OPENAI_KEY), "{submit}");
+    assert!(!submit.contains(UNSUPPORTED_DB_PATH), "{submit}");
+}
+
+// A valid OPENAI_COMPAT_TIMEOUT_SECS must not disable Research — the same
+// static configuration otherwise accepted by
+// `valid_research_configuration_remains_enabled` below, plus an explicit
+// operator timeout, must still report Research as configured.
+#[test]
+fn valid_openai_timeout_does_not_disable_research() {
+    let (mut child, base) = api_server_with_env(&[
+        ("SEARXNG_BASE_URL", "http://127.0.0.1:8080"),
+        (
+            "RESEARCH_EVIDENCE_DB",
+            "/tmp/scorpion-web-research-timeout.sqlite",
+        ),
+        ("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:11434/v1"),
+        ("OPENAI_COMPAT_MODEL", "operator-model"),
+        ("OPENAI_COMPAT_API_KEY", "never-render-this-secret"),
+        ("OPENAI_COMPAT_TIMEOUT_SECS", "300"),
+    ]);
+    let index = get(&base, "/");
+    child.kill().unwrap();
+    assert!(index.contains(">Research is configured.</p>"), "{index}");
+    assert!(
+        !index.contains("id=\"research-button\" type=\"submit\" disabled"),
+        "{index}"
+    );
+}
+
+/// SCORPION_WEB_RESEARCH_CONFIGURABLE_LLM_TIMEOUT_001, Phase 5 boundary
+/// proof: an explicitly configured OPENAI_COMPAT_TIMEOUT_SECS is actually
+/// applied to Research's real Agent HTTP client, through the existing
+/// canonical execution path — not merely parsed and discarded. A local
+/// OpenAI-compatible fixture never responds within the deliberately tiny
+/// configured timeout; Research must reach a terminal state quickly (well
+/// under the old 60-second default) rather than hanging until the fixture
+/// eventually would respond. Uses the real `POST /api/research` /
+/// `GET /api/research/{id}` routes and the real `claim_durable_research`
+/// execution path — no independently-created reqwest client, no second
+/// Agent/LLM implementation.
+#[test]
+fn configured_openai_timeout_is_actually_applied_to_research_execution() {
+    // A trivial real page for acquisition/extraction to succeed against,
+    // so execution genuinely reaches the synthesis step this test targets.
+    let page_body = "<html><body><h1>Rust</h1><p>A systems programming language focused on safety and performance.</p></body></html>";
+    let page_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let page_addr = page_listener.local_addr().unwrap();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = page_listener.accept() {
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page_body}",
+                page_body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let page_url = format!("http://{page_addr}/");
+
+    let searxng_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let searxng_addr = searxng_listener.local_addr().unwrap();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = searxng_listener.accept() {
+            let mut buf = [0_u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = format!(
+                r#"{{"query":"rust","results":[{{"title":"Rust","url":"{page_url}","content":"Rust is a systems programming language."}}]}}"#
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let searxng_url = format!("http://{searxng_addr}");
+
+    // Deliberately never responds within this test's bound: accepts the
+    // connection, reads the request, then sleeps well past the configured
+    // 1-second timeout before ever writing a response.
+    let openai_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let openai_addr = openai_listener.local_addr().unwrap();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = openai_listener.accept() {
+            let mut buf = [0_u8; 8192];
+            let _ = stream.read(&mut buf);
+            thread::sleep(Duration::from_secs(20));
+            let body = r#"{"choices":[{"message":{"content":"too late to matter"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    let openai_url = format!("http://{openai_addr}/v1");
+
+    let database = std::env::temp_dir().join(format!(
+        "scorpion-app-research-timeout-boundary-{}.sqlite3",
+        std::process::id()
+    ));
+    let database_str = database.to_string_lossy().to_string();
+
+    let (mut child, base) = api_server_with_env(&[
+        ("SEARXNG_BASE_URL", &searxng_url),
+        ("RESEARCH_EVIDENCE_DB", &database_str),
+        ("OPENAI_COMPAT_BASE_URL", &openai_url),
+        ("OPENAI_COMPAT_MODEL", "test-model"),
+        ("OPENAI_COMPAT_API_KEY", "test-key"),
+        ("OPENAI_COMPAT_TIMEOUT_SECS", "1"),
+    ]);
+    let submit = post_path(&base, "/api/research", r#"{"topic":"rust programming"}"#);
+    assert!(submit.starts_with("HTTP/1.1 202 Accepted"), "{submit}");
+    let research_id = submit
+        .rsplit("\"research_id\":\"")
+        .next()
+        .and_then(|rest| rest.split('"').next())
+        .expect("research_id in submit response")
+        .to_string();
+
+    // The old default is 60s; this bound proves the 1-second override was
+    // genuinely applied, not silently ignored -- generous enough to absorb
+    // real search/acquisition/extraction work, but far short of 60s.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut terminal_state: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        let status = get(&base, &format!("/api/research/{research_id}"));
+        if let Some(state) = status
+            .rsplit("\"state\":\"")
+            .next()
+            .and_then(|rest| rest.split('"').next())
+        {
+            if state != "claimed" {
+                terminal_state = Some(state.to_string());
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    child.kill().unwrap();
+    let _ = std::fs::remove_file(&database);
+    let _ = std::fs::remove_file(format!("{database_str}-shm"));
+    let _ = std::fs::remove_file(format!("{database_str}-wal"));
+
+    let terminal_state = terminal_state.unwrap_or_else(|| {
+        panic!(
+            "research did not reach a terminal state within 30s -- the configured 1s \
+             OPENAI_COMPAT_TIMEOUT_SECS was not applied (it would otherwise have hung \
+             toward the old 60s default or the fixture's 20s delay)"
+        )
+    });
+    // `research_session.rs` documents extraction itself as reaching the LLM
+    // stage (a per-source extraction call, distinct from the final
+    // synthesis call) -- both use the same configured OpenAI-compatible
+    // client, so a uniformly-too-short 1s timeout cuts off extraction's own
+    // call before synthesis is ever attempted, landing on
+    // `completed_no_extractions` rather than `completed_synthesis_failed`.
+    // Either is valid proof for what this test asserts: the terminal state
+    // was reached quickly (the deadline loop above already proved that),
+    // not that the timeout happened to cut off one specific pipeline stage
+    // over another.
+    assert!(
+        matches!(
+            terminal_state.as_str(),
+            "completed_no_extractions" | "completed_synthesis_failed"
+        ),
+        "expected a terminal state reachable only once the LLM-calling stage(s) genuinely \
+         timed out at ~1s, got {terminal_state:?}"
+    );
 }
 
 #[test]

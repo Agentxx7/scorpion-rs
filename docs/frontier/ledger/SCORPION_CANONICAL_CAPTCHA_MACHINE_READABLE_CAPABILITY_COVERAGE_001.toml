@@ -367,7 +367,26 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
 # shipping_manifests` both still pass unchanged.
-reviewed_commit = "4dff7c72f22db631a592e01015e97732508b87d6"
+# Re-bound again, to fad7c07b: SCORPION_CANONICAL_HUGGING_FACE_ARTIFACT_
+# DISCOVERY_CLI_SURFACE_001 added a new `hugging_face_artifacts` feature
+# block to spider_cli/Cargo.toml (forwarding only `spider/source_
+# hugging_face`, unrelated to CAPTCHA/chrome) — unrelated to CAPTCHA/
+# chrome semantics, but spider_cli/Cargo.toml is itself one of this
+# capability's own closure_relevant_files (`verdict_evidence` above
+# quotes its `default = [..., "chrome", ...]` line), so that byte
+# change alone invalidated 4dff7c72's binding here too. The new feature
+# block is purely additive, added after the existing `remote_addr`
+# entry and before the existing `local_paligemma` entry; it does not
+# touch the `default = [...]` line, the `chrome = [...]` line, or any
+# other line this capability's verdict_evidence cites — confirmed by
+# inspection of the commit's own diff, not merely assumed. No CAPTCHA
+# detection, solving, provider routing, frame/OOPIF handling, or CI
+# evidence this capability cites changed at all — confirmed empirically
+# by re-running this harness itself:
+# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
+# source` and `production_reachable_claims_are_grep_verified_against_
+# shipping_manifests` both still pass unchanged.
+reviewed_commit = "fad7c07bc564e49486f48a63862eb34900f7833f"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -467,4 +486,11 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # that field's own comment in full for the complete accounting). The
 # CAPTCHA CI-portable evidence step itself is untouched; every other
 # closure_relevant_file is untouched; no CAPTCHA-relevant fact changed.
-closed_commit = "4dff7c72f22db631a592e01015e97732508b87d6"
+# Re-bound again, to fad7c07b, for the exact same reason reviewed_
+# commit above was at that time (SCORPION_CANONICAL_HUGGING_FACE_
+# ARTIFACT_DISCOVERY_CLI_SURFACE_001's purely additive new feature
+# block in spider_cli/Cargo.toml — see that field's own comment in
+# full for the complete accounting). The CAPTCHA CI-portable evidence
+# step itself is untouched; every other closure_relevant_file is
+# untouched; no CAPTCHA-relevant fact changed.
+closed_commit = "fad7c07bc564e49486f48a63862eb34900f7833f"

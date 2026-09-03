@@ -1706,3 +1706,197 @@ fn console_citation_rendering_uses_the_canonical_projection_and_only_inert_text_
     // `web_console_never_uses_unsafe_dom_injection_primitives`).
     assert!(response.contains("citationButton.appendChild(text(match[0]))"));
 }
+
+// ---------------------------------------------------------------------
+// SCORPION_CANONICAL_WEB_FETCH_SURFACE_001
+//
+// POST /api/fetch acceptance matrix against the real, compiled
+// `scorpion-api` binary — mirrors the POST /api/audit matrix above
+// (real local fixture, real acquisition, real durable evidence) since
+// both boundaries share the same "one canonical seam, one interface
+// adapter" shape.
+// ---------------------------------------------------------------------
+
+fn fetch_db_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "scorpion-api-fetch-route-test-{}-{name}.sqlite3",
+        std::process::id()
+    ))
+}
+
+const FETCH_MINIMAL_HTML: &str =
+    "<html><head><title>t</title></head><body><h1>hi</h1></body></html>";
+
+fn post_fetch(base: &str, url: &str) -> String {
+    post_path(base, "/api/fetch", &format!("{{\"url\":\"{url}\"}}"))
+}
+
+#[test]
+fn valid_fetch_returns_200_with_evidence_ref_and_exactly_one_acquisition() {
+    let path = fetch_db_path("valid");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", FETCH_MINIMAL_HTML, "");
+
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_fetch(&base, &fixture.url());
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"evidence_ref\":\"evid_"));
+    assert!(response.contains("\"status_code\":200"));
+    assert!(response.contains("\"observed_status_code\":200"));
+    assert!(response.contains("\"content_type\":\"text/html\""));
+    assert_eq!(
+        fixture.hit_count(),
+        1,
+        "exactly one target acquisition, never a crawl"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn empty_fetch_url_is_400() {
+    let path = fetch_db_path("empty-url");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_fetch(&base, "");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"invalid_request\""));
+}
+
+#[test]
+fn non_http_scheme_fetch_target_is_400() {
+    let path = fetch_db_path("non-http-scheme");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_fetch(&base, "ftp://example.test/");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"invalid_fetch_target\""));
+}
+
+#[test]
+fn unavailable_fetch_store_is_sanitized_and_does_not_leak_the_path() {
+    let dir = std::env::temp_dir().join(format!(
+        "scorpion-api-fetch-route-unopenable-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_fetch(&base, "http://example.test/");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 503 Service Unavailable"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"fetch_store_unavailable\""));
+    assert!(!response.contains(&db));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn set_cookie_never_leaks_into_the_public_fetch_response() {
+    let path = fetch_db_path("set-cookie");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start(
+        "200 OK",
+        "text/html",
+        FETCH_MINIMAL_HTML,
+        "Set-Cookie: session=SUPER_SECRET_SENTINEL; Secure; HttpOnly\r\n",
+    );
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_fetch(&base, &fixture.url());
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(!response.to_lowercase().contains("set-cookie"));
+    assert!(!response.contains("SUPER_SECRET_SENTINEL"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn console_serves_the_fetch_section() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("id=\"fetch-heading\""));
+    assert!(response.contains("id=\"fetch-form\""));
+    assert!(response.contains("id=\"fetch-url\""));
+    assert!(response.contains("id=\"fetch-button\" type=\"submit\">Fetch</button>"));
+    assert!(response.contains("fetch('/api/fetch'"));
+    assert!(response.contains("<h2 id=\"fetch-heading\">Fetch</h2>"));
+}
+
+/// A Web-created fetch's own `evidence_ref` resolves through the Web
+/// Console's own `GET /api/evidence/{ref}` — the same proof
+/// `web_created_audit_evidence_resolves_through_the_web_evidence_route`
+/// already establishes for Audit, now for Fetch: one shared canonical
+/// store, no translation, no second evidence path.
+#[test]
+fn web_created_fetch_evidence_resolves_through_the_web_evidence_route() {
+    let path = fetch_db_path("web-fetch-then-web-evidence");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start("200 OK", "text/html", FETCH_MINIMAL_HTML, "");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let fetch_response = post_fetch(&base, &fixture.url());
+    assert!(
+        fetch_response.starts_with("HTTP/1.1 200 OK"),
+        "{fetch_response}"
+    );
+    let fetch_body = fetch_response.split("\r\n\r\n").nth(1).unwrap();
+    let evidence_ref = fetch_body
+        .split("\"evidence_ref\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("fetch response must contain evidence_ref");
+
+    let evidence_response = get(&base, &format!("/api/evidence/{evidence_ref}"));
+    child.kill().unwrap();
+    assert!(
+        evidence_response.starts_with("HTTP/1.1 200 OK"),
+        "{evidence_response}"
+    );
+    assert!(evidence_response.contains(&format!("\"id\":\"{evidence_ref}\"")));
+    assert!(evidence_response.contains(&fixture.addr.to_string()));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The Fetch capability never crawls or follows links — proven the same
+/// way `one_web_audit_causes_exactly_one_target_hit` proves it for
+/// Audit: exactly one target hit, even when the fixture's own page body
+/// contains outbound links a crawler would otherwise discover.
+#[test]
+fn one_web_fetch_causes_exactly_one_target_hit_even_with_outbound_links_in_the_body() {
+    let path = fetch_db_path("one-hit");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditRouteFixture::start(
+        "200 OK",
+        "text/html",
+        "<html><body><a href=\"/other\">other</a><a href=\"/another\">another</a></body></html>",
+        "",
+    );
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_fetch(&base, &fixture.url());
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_eq!(fixture.hit_count(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}

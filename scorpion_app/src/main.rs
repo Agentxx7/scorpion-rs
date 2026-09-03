@@ -3,6 +3,7 @@ use scorpion_app::evidence::{
     content_filename, evidence, evidence_content, evidence_error_json, evidence_error_status,
     export_filename, EvidenceError,
 };
+use scorpion_app::fetch::{fetch_error_json, fetch_error_status, run_fetch, FetchRequest};
 use scorpion_app::{
     error_json, error_status, research_availability, research_error_json, research_error_status,
     search, ResearchAvailability, ResearchError, ResearchRequest, ResearchService, SearchError,
@@ -193,6 +194,38 @@ async fn handle(
                 &mut stream,
                 audit_error_status(&error),
                 &audit_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
+    if method == "POST" && path == "/api/fetch" {
+        let body = bytes
+            .get(body_offset..body_offset + content_length)
+            .unwrap_or_default();
+        let input: FetchRequest = match serde_json::from_slice(body) {
+            Ok(input) => input,
+            Err(error) => {
+                let failure = scorpion_app::fetch::FetchError::InvalidRequest(format!(
+                    "invalid JSON body: {error}"
+                ));
+                return write_json(
+                    &mut stream,
+                    fetch_error_status(&failure),
+                    &fetch_error_json(&failure),
+                )
+                .await
+                .map_err(Into::into);
+            }
+        };
+        return match run_fetch(input).await {
+            Ok(response) => write_json(&mut stream, 200, &serde_json::to_string(&response)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                fetch_error_status(&error),
+                &fetch_error_json(&error),
             )
             .await
             .map_err(Into::into),
@@ -453,6 +486,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </form>
       <div id="audit-status" role="status" aria-live="polite"></div>
       <div id="audit-result"></div>
+    </section>
+    <section aria-labelledby="fetch-heading">
+      <h2 id="fetch-heading">Fetch</h2>
+      <p class="tagline">Fetch exactly one resource over HTTP(S) — no crawl, no browser, no link following — and record its retrieval as durable evidence.</p>
+      <form id="fetch-form">
+        <label for="fetch-url" hidden>Fetch URL</label>
+        <input id="fetch-url" name="url" type="url" placeholder="https://..." autocomplete="off" required>
+        <button id="fetch-button" type="submit">Fetch</button>
+      </form>
+      <div id="fetch-status" role="status" aria-live="polite"></div>
+      <div id="fetch-result"></div>
     </section>
   </main>
   <script>
@@ -940,6 +984,83 @@ const INDEX_HTML: &str = r#"<!doctype html>
         renderAuditError('Audit is temporarily unavailable.');
       } finally {
         auditButton.disabled = false;
+      }
+    });
+
+    // Fetch — runs the canonical one-shot Fetch capability: one caller-
+    // supplied URL, no crawl, no browser, no link following. The response
+    // carries only the recorded evidence's own fields, verbatim, plus its
+    // EvidenceRef — the complete record (captured content, response
+    // headers, downloads) is reached through the existing Evidence
+    // Inspector via the same shared `goToEvidence` seam Page Audit already
+    // uses, never re-rendered independently here.
+    const fetchForm = document.getElementById('fetch-form');
+    const fetchUrlInput = document.getElementById('fetch-url');
+    const fetchButton = document.getElementById('fetch-button');
+    const fetchStatus = document.getElementById('fetch-status');
+    const fetchResult = document.getElementById('fetch-result');
+    function renderFetchError(message) {
+      fetchStatus.className = 'error';
+      fetchStatus.replaceChildren(text(message));
+      fetchResult.replaceChildren();
+    }
+    function fetchField(label, value) {
+      const row = document.createElement('div');
+      row.className = 'audit-field';
+      const term = document.createElement('strong');
+      term.appendChild(text(label + ': '));
+      row.append(term, text(value === null || value === undefined ? '(absent)' : String(value)));
+      return row;
+    }
+    function renderFetchResult(payload) {
+      fetchStatus.className = '';
+      fetchStatus.replaceChildren(text('Fetch complete.'));
+      const container = document.createElement('div');
+      container.append(
+        fetchField('Requested URL', payload.requested_url),
+        fetchField('Final URL', payload.final_url),
+        fetchField('Status', payload.status_code),
+        fetchField('Observed HTTP status', payload.observed_status_code),
+        fetchField('Content type', payload.content_type),
+      );
+
+      const refRow = document.createElement('div');
+      refRow.className = 'audit-field';
+      const refTerm = document.createElement('strong');
+      refTerm.appendChild(text('Evidence reference: '));
+      const inspectButton = document.createElement('button');
+      inspectButton.type = 'button';
+      inspectButton.appendChild(text('Inspect evidence'));
+      inspectButton.addEventListener('click', () => goToEvidence(payload.evidence_ref));
+      refRow.append(refTerm, text(payload.evidence_ref), text(' '), inspectButton);
+      container.append(refRow);
+
+      fetchResult.replaceChildren(container);
+    }
+    fetchForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const url = fetchUrlInput.value.trim();
+      if (!url) { renderFetchError('Enter a URL to fetch.'); return; }
+      fetchButton.disabled = true;
+      fetchStatus.className = '';
+      fetchStatus.replaceChildren(text('Fetching…'));
+      fetchResult.replaceChildren();
+      try {
+        const response = await fetch('/api/fetch', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          renderFetchError(payload?.error?.message || 'Fetch is unavailable.');
+          return;
+        }
+        renderFetchResult(payload);
+      } catch (_) {
+        renderFetchError('Fetch is temporarily unavailable.');
+      } finally {
+        fetchButton.disabled = false;
       }
     });
   </script>

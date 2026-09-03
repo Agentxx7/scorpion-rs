@@ -6773,6 +6773,48 @@ fn scorpion_app_audit_seam_has_no_independent_audit_assembly() {
     }
 }
 
+/// `scorpion_app/src/fetch.rs`'s production code performs no independent
+/// acquisition of its own beyond the one canonical, transport-fixed
+/// one-shot seam (`fetch_single_page_with_options`) it is specifically
+/// authorized to call — it never crawls (`Website::`), never follows
+/// discovered links, never independently parses HTML, never constructs a
+/// raw HTTP client, and never reuses or duplicates the audit engine
+/// (`SCORPION_CANONICAL_WEB_FETCH_SURFACE_001`).
+#[test]
+fn scorpion_app_fetch_seam_has_no_independent_acquisition() {
+    let full_source = fs::read_to_string(workspace_root().join("scorpion_app/src/fetch.rs"))
+        .expect("failed to read scorpion_app/src/fetch.rs");
+    let production = full_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("split always yields at least one segment");
+    for forbidden in [
+        "Website::",
+        "lol_html",
+        "reqwest::Client",
+        "audit_page(",
+        "record_finding(",
+        "AgentBuilder",
+        "TransportPolicy::Tor",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "scorpion_app/src/fetch.rs must not reference {forbidden:?} \
+             in production code — this Web Console seam performs exactly \
+             one transport-fixed (Default) one-shot fetch through \
+             fetch_single_page_with_options; it never crawls, never \
+             follows links, never independently parses HTML, and never \
+             exposes Tor \
+             (SCORPION_CANONICAL_WEB_FETCH_SURFACE_001)"
+        );
+    }
+    assert!(
+        production.contains("fetch_single_page_with_options"),
+        "scorpion_app/src/fetch.rs must call the canonical one-shot \
+         acquisition seam, not reimplement it"
+    );
+}
+
 /// `spider_cli/src/audit.rs`'s production code performs no independent
 /// audit assembly of its own — the CLI's own peer of
 /// `scorpion_app_audit_seam_has_no_independent_audit_assembly`.

@@ -7,11 +7,15 @@
 //! `spider::utils::evidence`/`spider::features::domain_runtime` seams
 //! `spider_mcp`'s own `spider_evidence_read` MCP tool uses; canonical page
 //! audit execution (`audit`) is owned by the same canonical audit engine
-//! `spider_mcp`'s own `spider_audit_page` MCP tool uses — see each
+//! `spider_mcp`'s own `spider_audit_page` MCP tool uses; canonical one-shot
+//! Fetch execution (`fetch`) is owned by the same canonical
+//! `fetch_single_page_with_options`/`build_evidence`/`record_evidence`
+//! primitives the CLI's own `scorpion fetch <url>` command uses — see each
 //! module's own doc comment.
 
 pub mod audit;
 pub mod evidence;
+pub mod fetch;
 
 use serde::{Deserialize, Serialize};
 use spider::agent::{AgentBuilder, ResearchOptions};

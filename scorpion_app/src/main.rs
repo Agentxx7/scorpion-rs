@@ -1,5 +1,8 @@
 use scorpion_app::audit::{audit_error_json, audit_error_status, run_audit, AuditRequest};
-use scorpion_app::evidence::{evidence, evidence_error_json, evidence_error_status};
+use scorpion_app::evidence::{
+    content_filename, evidence, evidence_content, evidence_error_json, evidence_error_status,
+    export_filename, EvidenceError,
+};
 use scorpion_app::{
     error_json, error_status, research_availability, research_error_json, research_error_status,
     search, ResearchAvailability, ResearchError, ResearchRequest, ResearchService, SearchError,
@@ -97,7 +100,14 @@ async fn handle(
             .map_err(Into::into);
     }
     if method == "GET" && path.starts_with("/api/evidence/") {
-        let raw_ref = &path["/api/evidence/".len()..];
+        let rest = &path["/api/evidence/".len()..];
+        if let Some(raw_ref) = rest.strip_suffix("/content") {
+            return handle_evidence_content(&mut stream, raw_ref).await;
+        }
+        if let Some(raw_ref) = rest.strip_suffix("/export") {
+            return handle_evidence_export(&mut stream, raw_ref).await;
+        }
+        let raw_ref = rest;
         return match evidence(raw_ref).await {
             Ok(bundle) => write_json(&mut stream, 200, &serde_json::to_string(&bundle)?)
                 .await
@@ -220,6 +230,98 @@ async fn handle(
     }
 }
 
+/// `GET /api/evidence/{ref}/content` — "Download captured content".
+/// Resolves through the exact same canonical `evidence` seam the plain
+/// inspection route uses (no second read implementation, no re-fetch) and
+/// returns exactly the stored `EvidenceBundle.content` bytes, unmodified,
+/// as a `text/plain` attachment named only from the canonical
+/// `EvidenceId` — never from the target-controlled URL
+/// (`SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001` Phase 7).
+async fn handle_evidence_content(
+    stream: &mut TcpStream,
+    raw_ref: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match evidence_content(raw_ref).await {
+        Ok((id, content)) => write_download(
+            stream,
+            "text/plain; charset=utf-8",
+            &content_filename(id),
+            content.as_bytes(),
+        )
+        .await
+        .map_err(Into::into),
+        Err(error) => write_json(
+            stream,
+            evidence_error_status(&error),
+            &evidence_error_json(&error),
+        )
+        .await
+        .map_err(Into::into),
+    }
+}
+
+/// `GET /api/evidence/{ref}/export` — "Download canonical JSON". Resolves
+/// through the exact same canonical `evidence` seam and re-serializes the
+/// identical `EvidenceBundle` value the plain inspection route returns —
+/// same fields, no reconstruction, no recalculated hashes — as an
+/// `application/json` attachment named only from the canonical
+/// `EvidenceId` (Phase 8).
+async fn handle_evidence_export(
+    stream: &mut TcpStream,
+    raw_ref: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match evidence(raw_ref).await {
+        Ok(bundle) => {
+            let Some(id) = bundle.id else {
+                let error = EvidenceError::ReadFailed;
+                return write_json(
+                    stream,
+                    evidence_error_status(&error),
+                    &evidence_error_json(&error),
+                )
+                .await
+                .map_err(Into::into);
+            };
+            let json = serde_json::to_string(&bundle)?;
+            write_download(
+                stream,
+                "application/json",
+                &export_filename(id),
+                json.as_bytes(),
+            )
+            .await
+            .map_err(Into::into)
+        }
+        Err(error) => write_json(
+            stream,
+            evidence_error_status(&error),
+            &evidence_error_json(&error),
+        )
+        .await
+        .map_err(Into::into),
+    }
+}
+
+/// Write a `200 OK` file-download response. `filename` must already be a
+/// safe deterministic value (this crate only ever calls it with
+/// `content_filename`/`export_filename`, both derived solely from the
+/// canonical `EvidenceId`'s fixed hex charset) — never built from
+/// target-controlled input, since it is placed directly into the
+/// `Content-Disposition` header.
+async fn write_download(
+    stream: &mut TcpStream,
+    content_type: &str,
+    filename: &str,
+    body: &[u8],
+) -> Result<(), std::io::Error> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Disposition: attachment; filename=\"{filename}\"\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(body).await
+}
+
 async fn write_json(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), std::io::Error> {
     let reason = match status {
         200 => "OK",
@@ -295,10 +397,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .meta { color: #536170; font-size: .85rem; }
     .evidence-field { margin: .2rem 0; overflow-wrap: anywhere; }
     #evidence-result pre { background: #eef1f5; border: 1px solid #d6dce3; border-radius: .4rem; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    #evidence-result details { margin: .9rem 0; }
+    #evidence-result summary { cursor: pointer; font-weight: 650; }
+    .evidence-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: .9rem 0; }
+    .evidence-actions a { font-size: .95rem; padding: .5rem .85rem; border-radius: .45rem; background: #eef1f5; text-decoration: none; }
+    .citation-link { display: inline; padding: 0 .1rem; border: 0; background: none; color: #165dff; font: inherit; font-weight: 650; cursor: pointer; text-decoration: underline; }
+    .citation-link:hover, .citation-link:focus-visible { color: #0d3fb8; }
     .audit-field { margin: .2rem 0; overflow-wrap: anywhere; }
     .audit-finding { margin: 0 0 1rem; padding: .6rem 0 .6rem .8rem; border-left: 3px solid #d6dce3; }
     #audit-result pre { background: #eef1f5; border: 1px solid #d6dce3; border-radius: .4rem; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre, #audit-result pre { background: #1b222c; border-color: #536170; } .audit-finding { border-left-color: #536170; } }
+    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre, #audit-result pre { background: #1b222c; border-color: #536170; } .audit-finding { border-left-color: #536170; } .evidence-actions a { background: #1b222c; } .citation-link { color: #6ea8ff; } .citation-link:hover, .citation-link:focus-visible { color: #9cc4ff; } }
   </style>
 </head>
 <body>
@@ -414,6 +522,40 @@ const INDEX_HTML: &str = r#"<!doctype html>
       researchStatus.replaceChildren(text(message));
       researchResult.replaceChildren();
     }
+    // Renders literal "[Source N]" markers inside synthesis text as
+    // clickable controls resolved from the canonical citation projection
+    // (payload.citations, sourced verbatim from the durable
+    // Source-N -> EvidenceRef binding the Research domain already
+    // persisted) — never from array position, never by otherwise parsing
+    // synthesis prose. A marker whose N has no canonical binding — an
+    // out-of-range or malformed citation, or any other synthesis text —
+    // remains inert text like everything else here: every appended piece
+    // uses the same createTextNode-based `text()` helper already used
+    // throughout this file, never a raw-markup DOM-injection primitive,
+    // so no synthesis content is ever interpreted as markup.
+    const sourceCitationPattern = /\[Source (\d+)\]/g;
+    function appendSynthesisWithCitations(container, summary, citationsBySourceNumber) {
+      sourceCitationPattern.lastIndex = 0;
+      let lastIndex = 0;
+      let match;
+      while ((match = sourceCitationPattern.exec(summary)) !== null) {
+        if (match.index > lastIndex) container.appendChild(text(summary.slice(lastIndex, match.index)));
+        const sourceNumber = Number(match[1]);
+        const evidenceRef = sourceNumber > 0 ? citationsBySourceNumber.get(sourceNumber) : undefined;
+        if (evidenceRef) {
+          const citationButton = document.createElement('button');
+          citationButton.type = 'button';
+          citationButton.className = 'citation-link';
+          citationButton.appendChild(text(match[0]));
+          citationButton.addEventListener('click', () => goToEvidence(evidenceRef));
+          container.appendChild(citationButton);
+        } else {
+          container.appendChild(text(match[0]));
+        }
+        lastIndex = sourceCitationPattern.lastIndex;
+      }
+      if (lastIndex < summary.length) container.appendChild(text(summary.slice(lastIndex)));
+    }
     function renderResearch(payload) {
       researchStatus.className = '';
       researchStatus.replaceChildren(text(`Research ${researchStateLabel(payload.state)}`));
@@ -430,9 +572,20 @@ const INDEX_HTML: &str = r#"<!doctype html>
         `Created: ${payload.created_at_unix_ms}`
       ];
       if (payload.completed_at_unix_ms != null) lines.push(`Completed: ${payload.completed_at_unix_ms}`);
-      if (payload.synthesis_summary) lines.push(`\nSynthesis:\n${payload.synthesis_summary}`);
-      if (payload.evidence_ids?.length) lines.push(`\nEvidenceIds:\n${payload.evidence_ids.join('\n')}`);
-      researchResult.replaceChildren(text(lines.join('\n')));
+      const container = document.createDocumentFragment();
+      container.appendChild(text(lines.join('\n')));
+      if (payload.synthesis_summary) {
+        const citationsBySourceNumber = new Map();
+        for (const citation of payload.citations || []) {
+          if (citation && Number.isInteger(citation.source_number) && citation.source_number > 0 && citation.evidence_ref) {
+            citationsBySourceNumber.set(citation.source_number, citation.evidence_ref);
+          }
+        }
+        container.appendChild(text('\n\nSynthesis:\n'));
+        appendSynthesisWithCitations(container, payload.synthesis_summary, citationsBySourceNumber);
+      }
+      if (payload.evidence_ids?.length) container.appendChild(text(`\n\nEvidenceIds:\n${payload.evidence_ids.join('\n')}`));
+      researchResult.replaceChildren(container);
     }
     async function pollResearch(id, generation) {
       if (generation !== researchGeneration) return;
@@ -516,6 +669,32 @@ const INDEX_HTML: &str = r#"<!doctype html>
       pre.appendChild(text(contents));
       return pre;
     }
+    // Native, accessible disclosure — collapsed by default. Expanding
+    // reveals exactly `contentNode`, already built from inert text
+    // (`evidencePre`/`evidenceLabel`) — nothing is truncated, this only
+    // defers rendering of large technical payloads until asked for.
+    function evidenceDetails(summaryLabel, contentNode) {
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.appendChild(text(summaryLabel));
+      details.append(summary, contentNode);
+      return details;
+    }
+    // Only http/https targets are ever returned — javascript:, data:,
+    // file:, ftp:, and every other scheme resolve to null and are never
+    // made clickable. `URL` performs real scheme parsing rather than a
+    // string-prefix check, so a hostile value like
+    // "javascript:alert(1)//https://example.test" (a bare prefix check
+    // could be fooled by trailing decoys) is rejected: `URL` reports its
+    // true `javascript:` protocol, not `https:`.
+    function safeHttpUrl(candidate) {
+      if (!candidate) return null;
+      try {
+        const parsed = new URL(candidate);
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return parsed.href;
+      } catch (_) { /* not a parseable absolute URL */ }
+      return null;
+    }
     function renderEvidence(bundle) {
       evidenceStatus.className = '';
       evidenceStatus.replaceChildren(text('Evidence found.'));
@@ -536,14 +715,41 @@ const INDEX_HTML: &str = r#"<!doctype html>
         evidenceField('Response body hash', bundle.response_body_hash),
         evidenceField('Transformed content hash', bundle.transformed_content_hash),
       );
+
+      // Actions: following any of these performs a new live action
+      // (navigation or download) distinct from the immutable Evidence
+      // record rendered above — none of them mutate or re-fetch Evidence.
+      const actions = document.createElement('div');
+      actions.className = 'evidence-actions';
+      const liveSourceUrl = safeHttpUrl(bundle.final_url) ?? safeHttpUrl(bundle.requested_url);
+      if (liveSourceUrl) {
+        const openLiveSource = document.createElement('a');
+        openLiveSource.href = liveSourceUrl;
+        openLiveSource.target = '_blank';
+        openLiveSource.rel = 'noopener noreferrer';
+        openLiveSource.appendChild(text('Open live source'));
+        actions.appendChild(openLiveSource);
+      }
+      if (bundle.id) {
+        const downloadContent = document.createElement('a');
+        downloadContent.href = `/api/evidence/${encodeURIComponent(bundle.id)}/content`;
+        downloadContent.appendChild(text('Download captured content'));
+        actions.appendChild(downloadContent);
+        const downloadJson = document.createElement('a');
+        downloadJson.href = `/api/evidence/${encodeURIComponent(bundle.id)}/export`;
+        downloadJson.appendChild(text('Download canonical JSON'));
+        actions.appendChild(downloadJson);
+      }
+      if (actions.childNodes.length) container.appendChild(actions);
+
       if (bundle.response_headers) {
-        container.append(evidenceLabel('Response headers'), evidencePre(JSON.stringify(bundle.response_headers, null, 2)));
+        container.append(evidenceDetails('Response headers', evidencePre(JSON.stringify(bundle.response_headers, null, 2))));
       }
       if (bundle.links) {
         container.append(evidenceLabel('Links'), evidencePre(bundle.links.join('\n')));
       }
       if (bundle.content !== null && bundle.content !== undefined) {
-        container.append(evidenceLabel('Content (inert text — never executed)'), evidencePre(bundle.content));
+        container.append(evidenceDetails('Captured content (inert text — never executed)', evidencePre(bundle.content)));
       }
       if (bundle.metadata) {
         container.append(evidenceLabel('Metadata'), evidencePre(JSON.stringify(bundle.metadata, null, 2)));
@@ -555,7 +761,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           evidencePre(bundle.screenshot),
         );
       }
-      container.append(evidenceLabel('Raw canonical evidence (complete stored value)'), evidencePre(JSON.stringify(bundle, null, 2)));
+      container.append(evidenceDetails('Raw canonical evidence (complete stored value)', evidencePre(JSON.stringify(bundle, null, 2))));
       evidenceResult.replaceChildren(container);
     }
     // Shared by the Evidence Inspector's own form submit below and by
@@ -581,6 +787,18 @@ const INDEX_HTML: &str = r#"<!doctype html>
       } finally {
         evidenceButton.disabled = false;
       }
+    }
+    // Shared navigation target for anything that resolves to a canonical
+    // EvidenceRef and wants the Evidence Inspector to show it — Research
+    // synthesis citations and Page Audit's own "Inspect evidence" action
+    // both funnel through this one function, so there is exactly one
+    // place that populates the input, triggers the canonical read, and
+    // scrolls the Evidence Inspector into view.
+    function goToEvidence(evidenceRef) {
+      evidenceRefInput.value = evidenceRef;
+      inspectEvidenceRef(evidenceRef);
+      const heading = document.getElementById('evidence-heading');
+      if (heading) heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     evidenceForm.addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -669,12 +887,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const inspectButton = document.createElement('button');
       inspectButton.type = 'button';
       inspectButton.appendChild(text('Inspect evidence'));
-      inspectButton.addEventListener('click', () => {
-        evidenceRefInput.value = payload.evidence_ref;
-        inspectEvidenceRef(payload.evidence_ref);
-        const heading = document.getElementById('evidence-heading');
-        if (heading) heading.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
+      inspectButton.addEventListener('click', () => goToEvidence(payload.evidence_ref));
       refRow.append(refTerm, text(payload.evidence_ref), text(' '), inspectButton);
       container.append(refRow);
 

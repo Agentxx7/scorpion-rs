@@ -267,6 +267,28 @@ pub struct ResearchStatus {
     pub completed_at_unix_ms: Option<u64>,
     pub synthesis_summary: Option<String>,
     pub evidence_ids: Vec<String>,
+    /// Canonical Source N -> EvidenceRef citation bindings actually cited
+    /// by the synthesis, projected verbatim from the durable
+    /// `DurableResearchSynthesis.citations` the canonical Research domain
+    /// already persists — `source_number` and the `EvidenceRef` identity
+    /// are copied as-is, never re-derived from array position and never
+    /// reconstructed by parsing synthesis prose
+    /// (`SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001`).
+    pub citations: Vec<ResearchCitation>,
+}
+
+/// One thin projection of a canonical `DurableResearchCitation` — the Web
+/// wire shape the console uses to resolve a clicked `[Source N]` marker to
+/// its exact canonical Evidence, without reconstructing that relationship
+/// client-side.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct ResearchCitation {
+    /// One-based Source N position, copied verbatim from the canonical
+    /// citation. Not an identity — a presentation label position.
+    pub source_number: usize,
+    /// The canonical `EvidenceRef` identity string bound to that source
+    /// position, copied verbatim (`EvidenceRef::id().to_string()`).
+    pub evidence_ref: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -612,6 +634,27 @@ fn project_session(session: ResearchSession) -> ResearchStatus {
         .iter()
         .map(|binding| binding.evidence.id().to_string())
         .collect();
+    // Projected from a reference before `session.result` is moved below —
+    // straight from the canonical `DurableResearchSynthesis.citations` the
+    // Research domain already persisted. `source_number` and the
+    // `EvidenceRef` identity are copied verbatim; no array-position
+    // re-derivation, no synthesis-prose parsing
+    // (SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001).
+    let citations = session
+        .result
+        .as_ref()
+        .and_then(|result| result.synthesis.as_ref())
+        .map(|synthesis| {
+            synthesis
+                .citations
+                .iter()
+                .map(|citation| ResearchCitation {
+                    source_number: citation.source_number,
+                    evidence_ref: citation.evidence.id().to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     ResearchStatus {
         research_id: session.id.to_string(),
         topic: session.topic,
@@ -629,6 +672,7 @@ fn project_session(session: ResearchSession) -> ResearchStatus {
             .result
             .and_then(|result| result.synthesis.map(|synthesis| synthesis.summary)),
         evidence_ids,
+        citations,
     }
 }
 
@@ -653,6 +697,137 @@ fn state_name(state: ResearchSessionState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------
+    // SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001 — Phase 11
+    // A/B: `project_session` is a pure DTO projection, so these
+    // constructs a `ResearchSession` value directly rather than driving
+    // the full research engine — `extractions` is left empty because
+    // `project_session` never reads it (only `source_bindings` and
+    // `result.synthesis`), and every canonical invariant `research_session`
+    // itself enforces for `extractions`/`synthesis` agreement is already
+    // proven inside `spider`'s own test suite, not re-litigated here.
+    // -----------------------------------------------------------------
+    fn citation_fixture_session(
+        evidence_a: spider::utils::evidence::EvidenceRef,
+        evidence_b: spider::utils::evidence::EvidenceRef,
+        citations: Vec<spider::features::research_session::DurableResearchCitation>,
+    ) -> ResearchSession {
+        use spider::features::research_session::{
+            DurableResearchResult, DurableResearchSynthesis, DurableResearchTokenUsage,
+            ResearchSessionCounts, ResearchSessionSource, ResearchSourceBinding,
+            ResearchSourceDisposition,
+        };
+        ResearchSession {
+            id: ResearchId::new(),
+            topic: "topic".to_string(),
+            extraction_instructions: None,
+            sources: vec![
+                ResearchSessionSource {
+                    evidence: evidence_a,
+                    disposition: ResearchSourceDisposition::SuccessfullyExtracted,
+                },
+                ResearchSessionSource {
+                    evidence: evidence_b,
+                    disposition: ResearchSourceDisposition::SuccessfullyExtracted,
+                },
+            ],
+            source_bindings: vec![
+                ResearchSourceBinding {
+                    source_number: 1,
+                    evidence: evidence_a,
+                },
+                ResearchSourceBinding {
+                    source_number: 2,
+                    evidence: evidence_b,
+                },
+            ],
+            extraction_diagnostics: Vec::new(),
+            synthesis_diagnostic: None,
+            counts: ResearchSessionCounts::default(),
+            state: ResearchSessionState::CompletedSuccessfully,
+            result: Some(DurableResearchResult {
+                extractions: Vec::new(),
+                synthesis: Some(DurableResearchSynthesis {
+                    summary: "... [Source 1] ... [Source 2] ...".to_string(),
+                    citations,
+                    usage: DurableResearchTokenUsage::default(),
+                }),
+            }),
+            created_at_unix_ms: 1,
+            completed_at_unix_ms: Some(2),
+        }
+    }
+
+    #[test]
+    fn research_projection_binds_citations_verbatim_never_by_array_position() {
+        use spider::features::identity::EvidenceId;
+        use spider::features::research_session::DurableResearchCitation;
+        use spider::utils::evidence::EvidenceRef;
+
+        let evidence_a = EvidenceRef::new(EvidenceId::new());
+        let evidence_b = EvidenceRef::new(EvidenceId::new());
+        let session = citation_fixture_session(
+            evidence_a,
+            evidence_b,
+            vec![
+                DurableResearchCitation {
+                    source_number: 1,
+                    evidence: evidence_a,
+                },
+                DurableResearchCitation {
+                    source_number: 2,
+                    evidence: evidence_b,
+                },
+            ],
+        );
+
+        let status = project_session(session);
+        assert_eq!(status.citations.len(), 2);
+        assert_eq!(status.citations[0].source_number, 1);
+        assert_eq!(
+            status.citations[0].evidence_ref,
+            evidence_a.id().to_string()
+        );
+        assert_eq!(status.citations[1].source_number, 2);
+        assert_eq!(
+            status.citations[1].evidence_ref,
+            evidence_b.id().to_string()
+        );
+    }
+
+    #[test]
+    fn research_projection_reflects_only_the_citations_the_synthesis_actually_cites() {
+        use spider::features::identity::EvidenceId;
+        use spider::features::research_session::DurableResearchCitation;
+        use spider::utils::evidence::EvidenceRef;
+
+        let evidence_a = EvidenceRef::new(EvidenceId::new());
+        let evidence_b = EvidenceRef::new(EvidenceId::new());
+        // Both sources have successful-extraction bindings, but the
+        // synthesis cited only Source 2 — the Web projection must reflect
+        // exactly that subset, never every durable binding.
+        let session = citation_fixture_session(
+            evidence_a,
+            evidence_b,
+            vec![DurableResearchCitation {
+                source_number: 2,
+                evidence: evidence_b,
+            }],
+        );
+
+        let status = project_session(session);
+        assert_eq!(status.citations.len(), 1);
+        assert_eq!(status.citations[0].source_number, 2);
+        assert_eq!(
+            status.citations[0].evidence_ref,
+            evidence_b.id().to_string()
+        );
+        // The pre-existing `evidence_ids` projection is a distinct
+        // contract (every successful-extraction binding) and must remain
+        // unaffected by the narrower citation subset.
+        assert_eq!(status.evidence_ids.len(), 2);
+    }
 
     #[test]
     fn public_response_excludes_provider_metadata() {

@@ -53,6 +53,13 @@ pub enum EvidenceError {
     NotFound,
     /// The store opened, but reading/decoding the record failed.
     ReadFailed,
+    /// The referenced Evidence exists, but its stored `content` field is
+    /// `None` — there is no captured content to download. Distinct from
+    /// `NotFound` (which means the Evidence identity itself names nothing)
+    /// and from a fabricated empty file: a truthful absence is reported as
+    /// this error, never silently downloaded as zero bytes
+    /// (`SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001` Phase 7).
+    NoContent,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -66,6 +73,9 @@ impl std::fmt::Display for EvidenceError {
             }
             Self::ReadFailed => {
                 f.write_str("failed to read the requested evidence from the canonical store")
+            }
+            Self::NoContent => {
+                f.write_str("this evidence record has no captured content to download")
             }
         }
     }
@@ -83,11 +93,15 @@ impl std::fmt::Display for EvidenceError {
 /// boundary's point of view).
 /// `500` — the store opened but the read/decode itself failed
 /// unexpectedly.
+/// `404` also covers `NoContent` — the Evidence identity itself resolves,
+/// but the specific sub-resource this route serves (captured content)
+/// does not exist for it, the same "named thing not present" semantics as
+/// `NotFound`.
 pub fn evidence_error_status(error: &EvidenceError) -> u16 {
     match error {
         EvidenceError::InvalidReference(_) => 400,
         EvidenceError::NotConfigured | EvidenceError::Unavailable => 503,
-        EvidenceError::NotFound => 404,
+        EvidenceError::NotFound | EvidenceError::NoContent => 404,
         EvidenceError::ReadFailed => 500,
     }
 }
@@ -101,6 +115,7 @@ pub fn evidence_error_json(error: &EvidenceError) -> String {
         EvidenceError::Unavailable => "evidence_store_unavailable",
         EvidenceError::NotFound => "evidence_not_found",
         EvidenceError::ReadFailed => "evidence_read_failed",
+        EvidenceError::NoContent => "evidence_content_absent",
     };
     serde_json::json!({"error": {"code": code, "message": error.to_string()}}).to_string()
 }
@@ -150,6 +165,41 @@ async fn evidence_with_environment(
             EvidenceError::ReadFailed
         })?
         .ok_or(EvidenceError::NotFound)
+}
+
+/// Deterministic filename for the "Download captured content" export —
+/// derived only from the canonical [`EvidenceId`], never from a
+/// target-controlled URL or title
+/// (`SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001` Phase 7).
+pub fn content_filename(id: EvidenceId) -> String {
+    format!("{id}-content.txt")
+}
+
+/// Deterministic filename for the "Download canonical JSON" export — see
+/// [`content_filename`] (Phase 8).
+pub fn export_filename(id: EvidenceId) -> String {
+    format!("{id}-evidence.json")
+}
+
+/// Resolve one durable Evidence's captured content exactly as stored, for
+/// the Web Console's "Download captured content" export. Reuses the exact
+/// same canonical read seam as [`evidence`] above — no second read
+/// implementation, no re-fetch, no HTML cleaning, no transformation.
+/// Returns the canonical [`EvidenceId`] alongside the content so callers
+/// can build the deterministic filename from the resolved identity rather
+/// than the caller-supplied reference string.
+pub async fn evidence_content(raw_ref: &str) -> Result<(EvidenceId, String), EvidenceError> {
+    evidence_content_with_environment(raw_ref, &|name| std::env::var(name).ok()).await
+}
+
+async fn evidence_content_with_environment(
+    raw_ref: &str,
+    lookup: &impl Fn(&str) -> Option<String>,
+) -> Result<(EvidenceId, String), EvidenceError> {
+    let bundle = evidence_with_environment(raw_ref, lookup).await?;
+    let id = bundle.id.ok_or(EvidenceError::ReadFailed)?;
+    let content = bundle.content.ok_or(EvidenceError::NoContent)?;
+    Ok((id, content))
 }
 
 #[cfg(test)]
@@ -425,6 +475,113 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // -----------------------------------------------------------------
+    // SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001 — Phase 7/8:
+    // captured-content and canonical-JSON export seam.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn evidence_content_returns_exact_stored_content_through_the_same_seam() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+
+        let writer = DomainPersistence::open(&path).await.unwrap();
+        let recorded = record_evidence(&writer, representative_bundle())
+            .await
+            .unwrap();
+        let id = recorded.id.unwrap();
+        drop(writer);
+
+        let (returned_id, content) = evidence_content_with_environment(&id.to_string(), &lookup)
+            .await
+            .unwrap();
+        assert_eq!(returned_id, id);
+        assert_eq!(Some(content), recorded.content);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn evidence_content_repeated_downloads_never_mutate_history() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+
+        let writer = DomainPersistence::open(&path).await.unwrap();
+        let recorded = record_evidence(&writer, representative_bundle())
+            .await
+            .unwrap();
+        let id = recorded.id.unwrap();
+        let history_before = writer.read_history(&id.to_string()).await.unwrap();
+        drop(writer);
+
+        let _ = evidence_content_with_environment(&id.to_string(), &lookup)
+            .await
+            .unwrap();
+        let _ = evidence_content_with_environment(&id.to_string(), &lookup)
+            .await
+            .unwrap();
+
+        let checker = DomainPersistence::open(&path).await.unwrap();
+        let history_after = checker.read_history(&id.to_string()).await.unwrap();
+        assert_eq!(history_before, history_after);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn evidence_content_absent_is_a_truthful_no_content_error_not_a_fabricated_empty_file() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+
+        let writer = DomainPersistence::open(&path).await.unwrap();
+        let mut bundle = representative_bundle();
+        bundle.content = None;
+        let recorded = record_evidence(&writer, bundle).await.unwrap();
+        let id = recorded.id.unwrap();
+        drop(writer);
+
+        let error = evidence_content_with_environment(&id.to_string(), &lookup)
+            .await
+            .unwrap_err();
+        assert_eq!(error, EvidenceError::NoContent);
+        assert_eq!(evidence_error_status(&error), 404);
+        assert!(evidence_error_json(&error).contains("\"evidence_content_absent\""));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn evidence_content_invalid_reference_and_absent_id_agree_with_evidence_read() {
+        let path = store_path();
+        let lookup = configured_lookup(&path);
+        let error = evidence_content_with_environment("not-a-real-ref", &lookup)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EvidenceError::InvalidReference(_)));
+
+        let never_recorded = EvidenceId::new();
+        let error = evidence_content_with_environment(&never_recorded.to_string(), &lookup)
+            .await
+            .unwrap_err();
+        assert_eq!(error, EvidenceError::NotFound);
+    }
+
+    #[test]
+    fn content_and_export_filenames_are_canonical_id_based_and_distinct() {
+        let id = EvidenceId::new();
+        let content_name = content_filename(id);
+        let export_name = export_filename(id);
+        let id_string = id.to_string();
+        assert_eq!(content_name, format!("{id_string}-content.txt"));
+        assert_eq!(export_name, format!("{id_string}-evidence.json"));
+        assert_ne!(content_name, export_name);
+        assert!(content_name.starts_with(&id_string));
+        assert!(export_name.starts_with(&id_string));
+    }
+
     #[test]
     fn error_status_and_json_codes_are_distinct_and_deterministic() {
         assert_eq!(
@@ -435,6 +592,7 @@ mod tests {
         assert_eq!(evidence_error_status(&EvidenceError::Unavailable), 503);
         assert_eq!(evidence_error_status(&EvidenceError::NotFound), 404);
         assert_eq!(evidence_error_status(&EvidenceError::ReadFailed), 500);
+        assert_eq!(evidence_error_status(&EvidenceError::NoContent), 404);
 
         assert!(
             evidence_error_json(&EvidenceError::InvalidReference("x".into()))
@@ -447,6 +605,9 @@ mod tests {
         assert!(evidence_error_json(&EvidenceError::NotFound).contains("\"evidence_not_found\""));
         assert!(
             evidence_error_json(&EvidenceError::ReadFailed).contains("\"evidence_read_failed\"")
+        );
+        assert!(
+            evidence_error_json(&EvidenceError::NoContent).contains("\"evidence_content_absent\"")
         );
     }
 }

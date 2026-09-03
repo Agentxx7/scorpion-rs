@@ -1482,3 +1482,227 @@ fn web_created_audit_evidence_resolves_through_the_web_evidence_route() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------
+// SCORPION_RESEARCH_EVIDENCE_NAVIGATION_AND_EXPORT_UX_001 — Phase 11 C/D/E:
+// `GET /api/evidence/{ref}/content` and `GET /api/evidence/{ref}/export`
+// against the real, compiled `scorpion-api` binary. Evidence is seeded
+// directly through the canonical `record_evidence` seam, exactly like the
+// existing `/api/evidence/{ref}` acceptance matrix above.
+// ---------------------------------------------------------------------
+
+fn split_head_and_body(response: &str) -> (&str, &str) {
+    let mut parts = response.splitn(2, "\r\n\r\n");
+    let head = parts.next().unwrap_or_default();
+    let body = parts.next().unwrap_or_default();
+    (head, body)
+}
+
+#[test]
+fn download_captured_content_returns_exact_stored_bytes_with_safe_headers() {
+    let path = evidence_db_path("download-content");
+    let _ = std::fs::remove_file(&path);
+    let evidence_ref = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, &format!("/api/evidence/{evidence_ref}/content"));
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let (head, body) = split_head_and_body(&response);
+    assert!(
+        head.contains("Content-Type: text/plain; charset=utf-8"),
+        "{head}"
+    );
+    assert!(
+        head.contains(&format!(
+            "Content-Disposition: attachment; filename=\"{evidence_ref}-content.txt\""
+        )),
+        "{head}"
+    );
+    assert!(head.contains("X-Content-Type-Options: nosniff"), "{head}");
+    // Exactly the stored content, unmodified — no HTML cleaning, no
+    // extraction, no re-fetch.
+    assert_eq!(body, "<html><body>hello evidence route</body></html>");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn download_canonical_json_export_resolves_back_to_the_same_evidence_id() {
+    let path = evidence_db_path("download-export");
+    let _ = std::fs::remove_file(&path);
+    let evidence_ref = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, &format!("/api/evidence/{evidence_ref}/export"));
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    let (head, body) = split_head_and_body(&response);
+    assert!(head.contains("Content-Type: application/json"), "{head}");
+    assert!(
+        head.contains(&format!(
+            "Content-Disposition: attachment; filename=\"{evidence_ref}-evidence.json\""
+        )),
+        "{head}"
+    );
+    assert!(head.contains("X-Content-Type-Options: nosniff"), "{head}");
+    // Same canonical EvidenceBundle value the plain read route returns —
+    // same identity, same fields, no reconstruction.
+    assert!(body.contains(&format!("\"id\":\"{evidence_ref}\"")));
+    assert!(body.contains("hello evidence route"));
+    assert!(body.contains("\"backend_provenance\":\"reqwest\""));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn download_captured_content_absent_is_a_truthful_404_never_a_fabricated_empty_file() {
+    let path = evidence_db_path("download-content-absent");
+    let _ = std::fs::remove_file(&path);
+    let evidence_ref = {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let store = spider::features::domain_persistence::DomainPersistence::open(&path)
+                .await
+                .unwrap();
+            let bundle = spider::utils::evidence::EvidenceBundle {
+                requested_url: Some("https://example.test/no-content".to_string()),
+                status_code: Some(200),
+                content: None,
+                ..Default::default()
+            };
+            let recorded = spider::utils::evidence::record_evidence(&store, bundle)
+                .await
+                .unwrap();
+            recorded.id.unwrap().to_string()
+        })
+    };
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+    let response = get(&base, &format!("/api/evidence/{evidence_ref}/content"));
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+    assert!(response.contains("\"code\":\"evidence_content_absent\""));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn download_content_and_export_reuse_the_same_evidence_error_classes() {
+    let path = evidence_db_path("download-errors");
+    let _ = std::fs::remove_file(&path);
+    let _ = seed_evidence(&path);
+
+    let env = evidence_env(&path);
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let (mut child, base) = api_server_with_env(&env_refs);
+
+    for suffix in ["content", "export"] {
+        let malformed = get(&base, &format!("/api/evidence/not-a-real-ref/{suffix}"));
+        assert!(
+            malformed.starts_with("HTTP/1.1 400 Bad Request"),
+            "{suffix}: {malformed}"
+        );
+        assert!(malformed.contains("\"code\":\"invalid_evidence_reference\""));
+
+        let absent = get(
+            &base,
+            &format!("/api/evidence/evid_0123456789abcdef0123456789abcdef/{suffix}"),
+        );
+        assert!(
+            absent.starts_with("HTTP/1.1 404 Not Found"),
+            "{suffix}: {absent}"
+        );
+        assert!(absent.contains("\"code\":\"evidence_not_found\""));
+    }
+    child.kill().unwrap();
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn downloads_never_leak_filesystem_paths_or_store_diagnostics() {
+    let dir = std::env::temp_dir().join(format!(
+        "scorpion-api-evidence-download-unopenable-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_string = dir.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &dir_string)]);
+
+    for suffix in ["content", "export"] {
+        let response = get(
+            &base,
+            &format!("/api/evidence/evid_0123456789abcdef0123456789abcdef/{suffix}"),
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{suffix}: {response}"
+        );
+        assert!(response.contains("\"code\":\"evidence_store_unavailable\""));
+        assert!(!response.contains(&dir_string), "{suffix}: {response}");
+    }
+    child.kill().unwrap();
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Phase 12 UI-safety proof: the Evidence Inspector's rendering script
+/// only ever assigns a live-source `href` after passing it through
+/// `safeHttpUrl` (which parses the URL and checks its real `protocol`),
+/// and download links point at this crate's own deterministic
+/// `/api/evidence/{id}/...` routes — never at a raw, unvalidated,
+/// target-controlled string.
+#[test]
+fn console_evidence_actions_use_safe_url_construction_and_deterministic_download_routes() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("function safeHttpUrl(candidate)"));
+    assert!(response.contains("parsed.protocol === 'http:' || parsed.protocol === 'https:'"));
+    assert!(response.contains("openLiveSource.href = liveSourceUrl"));
+    assert!(response.contains("openLiveSource.rel = 'noopener noreferrer'"));
+    assert!(response.contains("openLiveSource.target = '_blank'"));
+    assert!(response.contains("`/api/evidence/${encodeURIComponent(bundle.id)}/content`"));
+    assert!(response.contains("`/api/evidence/${encodeURIComponent(bundle.id)}/export`"));
+    // Collapsible sections default closed — no `open` attribute anywhere
+    // on a `<details>` element this console renders.
+    assert!(response.contains("document.createElement('details')"));
+    assert!(!response.contains("details.open = true"));
+    assert!(!response.contains(".setAttribute('open'"));
+}
+
+/// Phase 12/3: the citation-link rendering path resolves only through the
+/// canonical `citations` projection (never `evidence_ids` array position)
+/// and never renders synthesis text via an unsafe DOM-injection
+/// primitive — reusing the same structural proof style as
+/// `spider/tests/architecture_guardrails.rs`'s
+/// `web_console_never_uses_unsafe_dom_injection_primitives`, scoped to
+/// this new citation-rendering code.
+#[test]
+fn console_citation_rendering_uses_the_canonical_projection_and_only_inert_text_nodes() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("payload.citations"));
+    assert!(response.contains("citationsBySourceNumber.get(sourceNumber)"));
+    assert!(response
+        .contains("citationsBySourceNumber.set(citation.source_number, citation.evidence_ref)"));
+    // Every citation piece — the literal marker text and the surrounding
+    // synthesis text — goes through the same createTextNode-based `text`
+    // helper; there is no innerHTML/outerHTML/insertAdjacentHTML anywhere
+    // in the file (already proven repository-wide by
+    // `web_console_never_uses_unsafe_dom_injection_primitives`).
+    assert!(response.contains("citationButton.appendChild(text(match[0]))"));
+}

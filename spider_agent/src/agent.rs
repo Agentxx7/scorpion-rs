@@ -637,7 +637,7 @@ impl Agent {
 
         let messages = vec![
             Message::system(
-                "You are a source-bound research synthesis assistant. Use ONLY the supplied extraction data. You MUST NOT use prior, pretrained, general, or external knowledge; make assumptions not contained in the supplied extraction data; infer missing factual information; or fill gaps. Evaluate sufficiency from the COLLECTIVE evidence across all supplied sources. No individual source is required to answer the whole topic, and partial evidence from multiple sources may collectively be sufficient. A source's `missing_evidence` describes only that source and is not itself a global insufficiency verdict. Every factual statement in the summary MUST be supported by and attributed to at least one supplied Source N identifier. If the collective extraction data cannot support an answer, return a truthful insufficient-evidence result instead of supplementing it.",
+                "You are a source-bound research synthesis assistant. Use ONLY the supplied extraction data. You MUST NOT use prior, pretrained, general, or external knowledge; make assumptions not contained in the supplied extraction data; infer missing factual information; or fill gaps. Evaluate sufficiency from the COLLECTIVE evidence across all supplied sources. No individual source is required to answer the whole topic, and partial evidence from multiple sources may collectively be sufficient. A source's `missing_evidence` describes only that source and is not itself a global insufficiency verdict. Every factual statement in the summary MUST be supported by and attributed to at least one supplied Source N identifier. If the collective extraction data cannot support an answer, return a truthful insufficient-evidence result instead of supplementing it. Write the `summary` in the same language as the Topic given in the user message, unless the Topic explicitly requests a different output language, in which case follow that explicit request instead. Source identifiers such as `Source N` are canonical labels and must never be translated, transliterated, or otherwise altered.",
             ),
             Message::user(format!(
                 "Topic: {}\n\nSupplied sources:{}\n\nReturn exactly one JSON object with all three mandatory fields: `sufficient` (boolean), `summary` (string), and `source_ids` (array of Source N strings). Return no prose or markup outside the JSON object. When `sufficient` is true, `source_ids` must be non-empty, may contain only identifiers supplied above, and every factual statement in `summary` must include mandatory [Source N] attribution. When `sufficient` is false, `summary` must begin with `Insufficient evidence:` and explain the missing evidence without using prior or external knowledge; `source_ids` may be empty or contain only supplied identifiers.",
@@ -3476,6 +3476,101 @@ mod tests {
             assert!(user.contains("Source 2"));
             assert!(user.contains(r#""missing_evidence""#));
             assert!(!user.contains(r#""status""#));
+        }
+
+        // ---------------------------------------------------------------
+        // SCORPION_CANONICAL_RESEARCH_SYNTHESIS_TOPIC_LANGUAGE_PRESERVATION_001
+        // ---------------------------------------------------------------
+
+        /// The exact, fixed system-message instruction proven present in
+        /// every case below — deliberately identical text regardless of the
+        /// topic's own language, so a passing assertion here on a Swedish
+        /// topic and again on an English topic is itself proof there is no
+        /// language-specific branch: the instruction is one static string,
+        /// and only the user message's `Topic:` line varies per call.
+        const SAME_LANGUAGE_INSTRUCTION: &str =
+            "Write the `summary` in the same language as the Topic given in the user message";
+        const LANGUAGE_OVERRIDE_CLAUSE: &str =
+            "unless the Topic explicitly requests a different output language, in which case follow that explicit request instead";
+        const SOURCE_LABEL_PRESERVATION_CLAUSE: &str =
+            "Source identifiers such as `Source N` are canonical labels and must never be translated, transliterated, or otherwise altered";
+
+        // A. Swedish topic: the canonical same-language instruction and the
+        // original topic reach the LLM verbatim -- Swedish text is never
+        // stripped, transliterated, or rewritten before the request is
+        // sent.
+        #[tokio::test]
+        async fn synthesis_prompt_carries_same_language_instruction_and_swedish_topic_verbatim() {
+            let (llm, captured) = ScriptedLlm::new(&[
+                r#"{"sufficient":true,"summary":"Gröna, blå och röda färger [Source 1]","source_ids":["Source 1"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let topic = "Madagaskar gecko färger";
+            let sources = vec![extraction("https://example.test/final", Some("evid_test"))];
+
+            let (synthesis, _, _) = agent.synthesize_research(topic, &sources).await.unwrap();
+
+            assert!(synthesis.sufficient);
+            let calls = captured.lock().unwrap();
+            let system = message_text(&calls[0][0]);
+            let user = message_text(&calls[0][1]);
+            assert!(system.contains(SAME_LANGUAGE_INSTRUCTION));
+            assert!(system.contains(LANGUAGE_OVERRIDE_CLAUSE));
+            assert!(system.contains(SOURCE_LABEL_PRESERVATION_CLAUSE));
+            assert!(user.contains(&format!("Topic: {topic}")));
+        }
+
+        // B. English topic: the identical canonical instruction applies --
+        // no Swedish-specific (or any other language-specific) branch
+        // exists. Asserting the exact same SAME_LANGUAGE_INSTRUCTION
+        // constant appears here, unchanged from test A, is the proof.
+        #[tokio::test]
+        async fn synthesis_prompt_carries_same_language_instruction_and_english_topic_verbatim() {
+            let (llm, captured) = ScriptedLlm::new(&[
+                r#"{"sufficient":true,"summary":"Green, blue, and red colors [Source 1]","source_ids":["Source 1"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let topic = "Colors of Madagascar geckos";
+            let sources = vec![extraction("https://example.test/final", Some("evid_test"))];
+
+            let (synthesis, _, _) = agent.synthesize_research(topic, &sources).await.unwrap();
+
+            assert!(synthesis.sufficient);
+            let calls = captured.lock().unwrap();
+            let system = message_text(&calls[0][0]);
+            let user = message_text(&calls[0][1]);
+            assert!(system.contains(SAME_LANGUAGE_INSTRUCTION));
+            assert!(user.contains(&format!("Topic: {topic}")));
+        }
+
+        // C. Explicit language override embedded in the topic itself: the
+        // canonical instruction's own override clause is present (proven in
+        // A and B too, since it is the same static string), and the full
+        // topic -- override request included -- reaches the user message
+        // verbatim, so the model can honor it.
+        #[tokio::test]
+        async fn synthesis_prompt_preserves_explicit_language_override_in_topic() {
+            let (llm, captured) = ScriptedLlm::new(&[
+                r#"{"sufficient":true,"summary":"Green, blue, and red colors [Source 1]","source_ids":["Source 1"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let topic = "Madagaskar gecko färger — answer in English";
+            let sources = vec![extraction("https://example.test/final", Some("evid_test"))];
+
+            let (synthesis, _, _) = agent.synthesize_research(topic, &sources).await.unwrap();
+
+            assert!(synthesis.sufficient);
+            let calls = captured.lock().unwrap();
+            let system = message_text(&calls[0][0]);
+            let user = message_text(&calls[0][1]);
+            assert!(system.contains(LANGUAGE_OVERRIDE_CLAUSE));
+            assert!(user.contains(&format!("Topic: {topic}")));
         }
 
         #[tokio::test]

@@ -29,6 +29,15 @@ thin interfaces.
   same canonical core capabilities.
 - Interfaces must not implement independent business, acquisition, transport,
   evidence, artifact, watch, or provider logic.
+- Canonical capability ownership does not require identical capability
+  exposure across CLI, MCP, and Web. An interface may intentionally restrict
+  its exposure of an otherwise-canonical capability (different resource,
+  trust, abuse-surface, or operational profile is a legitimate reason). Such
+  a restriction must be explicitly recorded as an owner decision (see §3.7)
+  — absence from one frontend must never be silently read as evidence that
+  the underlying capability is missing, incomplete, or defective, and a
+  recorded restriction must never be read as a permanent prohibition; it is
+  the current canonical interface boundary, revisable by a future frontier.
 
 ---
 
@@ -128,6 +137,52 @@ Every architecture-relevant implementation is classified as exactly one of:
 | Web Console | `scorpion_app` | `spider::features::domain_runtime`, `spider::features::search`, `spider::agent`, `spider::utils::evidence::{EvidenceRef::resolve, read_evidence}` (`scorpion_app/src/evidence.rs` only — see §3.19), audit module/`audit_page` (`scorpion_app/src/audit.rs` only — see §3.19) | `reqwest::Client` construction, independent domain logic, independent evidence reconstruction, independent audit rule/technology-marker assembly, `fetch_single_page` inside `audit.rs` specifically | `scorpion-api` binary (`GET /`, `GET /health`, `POST /api/search`, `POST /api/research`, `GET /api/research/{id}`, `GET /api/evidence/{evidence_ref}`, `POST /api/audit`) | None |
 | Agent types | `spider_agent_types` | Pure data | `spider`, `spider_agent` | Data types | None |
 | Agent HTML | `spider_agent_html` | `lol_html` | `spider`, `spider_agent` | `clean_html*()` | None |
+
+**Clarification on Web Console browser-driven capabilities (owner decision,
+`SCORPION_CANONICAL_INTERFACE_SCOPE_DECISION_RECORD_001`):** the Web
+Console's public seam (above) intentionally excludes Chrome/headless browser
+acquisition, browser-driven CAPTCHA detection/routing/action, external
+CAPTCHA-provider browser execution, and PaliGemma/local CAPTCHA execution —
+`scorpion_app`'s own `Cargo.toml` does not compile in `chrome` or
+`local_paligemma_cuda`. This is an intentional interface restriction, not
+evidence of a missing or incomplete canonical capability: all of the above
+are canonical, implemented, and already exposed through CLI and MCP (§3.19's
+sibling CAPTCHA production-capability chain, `CANONICAL_CAPTCHA_PRODUCTION_
+CAPABILITY_SDD.md`). Rationale: HTTP exposure of caller-directed browser
+execution against a caller-supplied target carries a materially different
+resource-ownership, trust-boundary, abuse-surface, and operational profile
+than local CLI/MCP execution — a genuinely separate scoping question, not a
+routing gap. PaliGemma/local CAPTCHA execution specifically remains an
+explicit opt-in, local-execution-only capability; its absence from Web is
+not a prerequisite gap and must not be classified as an implementation
+defect. This is the current canonical interface boundary, not a permanent
+prohibition — a future frontier may revisit it with its own explicit
+resource/trust/abuse-surface design, at which point this paragraph must be
+updated, not silently bypassed.
+
+**Clarification on MCP Durable Research (owner decision, same record):** the
+MCP public seam (above) intentionally excludes Durable Research. `spider_mcp`
+does not currently link the `spider_agent` synthesis subsystem or own any of
+the LLM execution, model/provider configuration, or credential handling that
+capability requires (`spider_mcp/Cargo.toml` has no `spider_agent`
+dependency at all today — not a disabled feature flag, an entirely absent
+one). Durable Research remains canonical and is fully exposed through Web
+and CLI (§3.18). Adding it to MCP is a separate architectural/product
+frontier — introducing a new subsystem dependency and a new credential-
+handling surface into that binary — not a missing route over an
+already-owned MCP subsystem, and is not authorized by this record.
+
+**Clarification on Authenticated Session Lifecycle public exposure:** no
+interface (CLI, MCP, or Web) currently exposes creation or transition of an
+authenticated session (§3.12) — `AUTHENTICATED_SESSION_LIFECYCLE_SDD.md`'s
+own "Successor boundary" already scopes "any interface (CLI/MCP) surface for
+creating or transitioning authenticated sessions" out as a separate,
+later frontier. Unlike the two decisions above, this is **not** a recorded
+owner decision either way: the capability is reachable from every interface
+with no compile-time prerequisite, but its credential/cookie/state-bearing
+semantics require a separate, explicit security/product scope decision
+before any interface may expose it. Absence here remains undecided and
+not authorized, not defective and not intentionally restricted.
 
 ### 3.8 Future Areas
 

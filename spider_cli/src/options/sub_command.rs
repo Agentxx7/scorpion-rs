@@ -242,6 +242,29 @@ pub enum Commands {
         #[clap(long)]
         language: Option<String>,
     },
+    /// Discover exactly one Hugging Face model repository's files through
+    /// the canonical Hugging Face artifact-discovery provider and print
+    /// them as JSON. Read-only: no artifact is downloaded, no file is
+    /// written. `resolved_revision` and `download_url` may legitimately be
+    /// null; declared identities are provider-recorded claims, never
+    /// locally verified checksums.
+    #[cfg(feature = "hugging_face_artifacts")]
+    #[clap(name = "hugging-face-artifacts")]
+    #[allow(non_camel_case_types)]
+    HUGGING_FACE_ARTIFACTS {
+        /// Provider-native Hugging Face repository identity, e.g.
+        /// "owner/model".
+        repository_id: String,
+        /// Caller-requested branch, tag, or commit. Omitted means the Hub's
+        /// own default (`main`) is used server-side, but this remains
+        /// recorded as absent — never presented as an immutable resolution.
+        #[clap(long)]
+        revision: Option<String>,
+        /// Maximum file artifacts retained from the single response
+        /// (`1..=100`).
+        #[clap(long)]
+        limit: Option<usize>,
+    },
     /// Launch the canonical Spider MCP server over stdio — the same
     /// server implementation the standalone `spider-mcp` binary runs.
     /// Stdout is reserved for MCP protocol traffic; logs go to stderr.

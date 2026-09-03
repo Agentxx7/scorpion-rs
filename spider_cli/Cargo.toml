@@ -110,6 +110,16 @@ headers = ["spider/headers"]
 time = ["spider/time"]
 status_code = []
 remote_addr = ["spider/remote_addr"]
+# Canonical Hugging Face artifact-discovery provider
+# (`scorpion hugging-face-artifacts <repository_id>`) — read-only repository
+# file listing with provider-declared identities, never a download. Not
+# part of `default`: this is the first public-interface exposure of this
+# capability family (SCORPION_CANONICAL_HUGGING_FACE_ARTIFACT_DISCOVERY_
+# CLI_SURFACE_001) and is deliberately opt-in pending a separate decision
+# on wider rollout. Forwards to `spider/source_hugging_face` (module-level
+# gate on `hugging_face_source_provider`, itself just `serde`) — the only
+# genuine compile prerequisite this capability has.
+hugging_face_artifacts = ["spider/source_hugging_face"]
 # Canonical local PaliGemma CAPTCHA provider (SigLIP + Gemma). Not part of
 # `default`: an 11+ GB pinned model checkpoint is not something an ordinary
 # `scorpion` build should pull in silently. Forwards only the library

@@ -34,6 +34,8 @@ pub mod build_folders;
     feature = "robots_sitemap"
 ))]
 pub mod discovery;
+#[cfg(feature = "hugging_face_artifacts")]
+pub mod hugging_face_artifacts;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod oauth;
@@ -263,7 +265,8 @@ fn spawn_crawl_task(
     feature = "sitemap",
     feature = "news_sitemap",
     feature = "robots_sitemap",
-    feature = "search_searxng"
+    feature = "search_searxng",
+    feature = "hugging_face_artifacts"
 ))]
 async fn print_discovery_result(result: Result<String, String>) {
     match result {
@@ -571,6 +574,20 @@ async fn main() {
                 language: language.clone(),
             };
             return print_discovery_result(search::run(params).await).await;
+        }
+        #[cfg(feature = "hugging_face_artifacts")]
+        if let Some(Commands::HUGGING_FACE_ARTIFACTS {
+            repository_id,
+            revision,
+            limit,
+        }) = &cli.command
+        {
+            let params = hugging_face_artifacts::HuggingFaceArtifactsParams {
+                repository_id: repository_id.clone(),
+                revision: revision.clone(),
+                limit: *limit,
+            };
+            return print_discovery_result(hugging_face_artifacts::run(params).await).await;
         }
     }
 

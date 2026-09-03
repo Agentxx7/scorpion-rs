@@ -52,6 +52,51 @@ fn spider_mcp_binary() -> PathBuf {
     binary
 }
 
+/// The real `scorpion` CLI binary — built on demand exactly like
+/// [`spider_mcp_binary`] above, for the three-interface audit-outcome
+/// acceptance below.
+fn scorpion_cli_binary() -> PathBuf {
+    static BUILD: Once = Once::new();
+    let profile_dir = PathBuf::from(env!("CARGO_BIN_EXE_scorpion-api"))
+        .parent()
+        .expect("scorpion-api binary must have a parent directory")
+        .to_path_buf();
+    let binary = profile_dir.join("scorpion");
+    BUILD.call_once(|| {
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "spider_cli", "--bin", "scorpion"])
+            .status()
+            .expect("failed to invoke cargo build for scorpion");
+        assert!(
+            status.success(),
+            "cargo build -p spider_cli --bin scorpion failed"
+        );
+    });
+    assert!(
+        binary.is_file(),
+        "expected scorpion binary at {}",
+        binary.display()
+    );
+    binary
+}
+
+/// Run `scorpion audit <url>` against the shared store, returning the
+/// parsed stdout JSON.
+fn cli_audit(db_path: &std::path::Path, url: &str) -> Value {
+    let output = Command::new(scorpion_cli_binary())
+        .args(["audit", url])
+        .env("SCORPION_DOMAIN_DB", db_path)
+        .output()
+        .expect("scorpion audit must run");
+    assert!(
+        output.status.success(),
+        "scorpion audit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("CLI audit stdout was not JSON: {error}"))
+}
+
 struct McpClient {
     child: Child,
     stdin: ChildStdin,
@@ -544,6 +589,10 @@ fn web_and_mcp_audits_of_the_same_target_produce_deterministic_semantic_parity()
     // Independent acquisitions -> genuinely distinct EvidenceRefs.
     assert_ne!(web_audit["evidence_ref"], mcp_audit["evidence_ref"]);
 
+    // The canonical execution outcome is projected verbatim by both.
+    assert_eq!(web_audit["outcome"], json!("evaluated"));
+    assert_eq!(web_audit["outcome"], mcp_audit["outcome"]);
+
     let web_findings = web_audit["findings"].as_array().unwrap();
     let mcp_findings = mcp_audit["findings"].as_array().unwrap();
     assert_eq!(web_findings.len(), mcp_findings.len());
@@ -585,6 +634,136 @@ fn web_and_mcp_audits_of_the_same_target_produce_deterministic_semantic_parity()
 
     // Both acquisitions genuinely hit the fixture independently.
     assert_eq!(fixture.hit_count(), 2);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------
+// SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001 — three-interface
+// execution-outcome acceptance (BUG-1 regression)
+// ---------------------------------------------------------------------
+
+/// One unreachable but valid HTTP target (a closed local port) through
+/// all three peer interfaces — Web (`POST /api/audit`), MCP
+/// (`spider_audit_page`), and CLI (`scorpion audit`) — against one shared
+/// `SCORPION_DOMAIN_DB`: every interface must expose the canonical
+/// `target_unobserved` outcome with zero findings (zero because no rule
+/// ran, never because "all rules passed") and a resolvable evidence
+/// reference. No interface calls another; each projects the one canonical
+/// outcome independently.
+#[test]
+fn unreachable_target_is_target_unobserved_across_web_mcp_and_cli() {
+    let path = db_path("unobserved-three-interface");
+    let _ = std::fs::remove_file(&path);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_addr = listener.local_addr().unwrap();
+    drop(listener);
+    let target = format!("http://{closed_addr}/");
+
+    // Web.
+    let (mut api, base) = spawn_scorpion_api(&path);
+    let web_response = http_post(&base, "/api/audit", &format!("{{\"url\":\"{target}\"}}"));
+    api.kill().unwrap();
+    assert!(
+        web_response.starts_with("HTTP/1.1 200 OK"),
+        "{web_response}"
+    );
+    let web_audit = http_body_json(&web_response);
+    assert_eq!(web_audit["outcome"], json!("target_unobserved"));
+    assert_eq!(web_audit["findings"], json!([]));
+    assert_eq!(web_audit["technology_markers"], json!([]));
+    assert!(web_audit["evidence_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("evid_"));
+
+    // MCP.
+    let mut mcp = McpClient::spawn(&path);
+    mcp.initialize();
+    let mcp_response = mcp.call("spider_audit_page", json!({ "url": target.clone() }));
+    assert_eq!(mcp_response["result"]["isError"], false, "{mcp_response:?}");
+    let mcp_audit = content_payload(&mcp_response);
+    drop(mcp);
+    assert_eq!(mcp_audit["outcome"], json!("target_unobserved"));
+    assert_eq!(mcp_audit["findings"], json!([]));
+    assert_eq!(mcp_audit["technology_markers"], json!([]));
+    assert!(mcp_audit["evidence_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("evid_"));
+
+    // CLI.
+    let cli_audit_output = cli_audit(&path, &target);
+    assert_eq!(cli_audit_output["outcome"], json!("target_unobserved"));
+    assert_eq!(cli_audit_output["findings"], json!([]));
+    assert_eq!(cli_audit_output["technology_markers"], json!([]));
+    assert!(cli_audit_output["evidence_ref"]
+        .as_str()
+        .unwrap()
+        .starts_with("evid_"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// One genuinely observed local HTML fixture through all three peer
+/// interfaces against one shared `SCORPION_DOMAIN_DB`: every interface
+/// must expose `evaluated` with full semantic parity of the deterministic
+/// findings (rule IDs in canonical order) — the counterpart proving
+/// `target_unobserved` above is a genuinely distinct wire state, not a
+/// relabeling of every audit.
+#[test]
+fn observed_fixture_is_evaluated_with_semantic_parity_across_web_mcp_and_cli() {
+    let path = db_path("evaluated-three-interface");
+    let _ = std::fs::remove_file(&path);
+    let fixture = AuditFixture::start();
+
+    // Web.
+    let (mut api, base) = spawn_scorpion_api(&path);
+    let web_response = http_post(
+        &base,
+        "/api/audit",
+        &format!("{{\"url\":\"{}\"}}", fixture.url()),
+    );
+    api.kill().unwrap();
+    assert!(
+        web_response.starts_with("HTTP/1.1 200 OK"),
+        "{web_response}"
+    );
+    let web_audit = http_body_json(&web_response);
+    assert_eq!(web_audit["outcome"], json!("evaluated"));
+
+    // MCP.
+    let mut mcp = McpClient::spawn(&path);
+    mcp.initialize();
+    let mcp_response = mcp.call("spider_audit_page", json!({ "url": fixture.url() }));
+    assert_eq!(mcp_response["result"]["isError"], false, "{mcp_response:?}");
+    let mcp_audit = content_payload(&mcp_response);
+    drop(mcp);
+    assert_eq!(mcp_audit["outcome"], json!("evaluated"));
+
+    // CLI.
+    let cli_audit_output = cli_audit(&path, &fixture.url());
+    assert_eq!(cli_audit_output["outcome"], json!("evaluated"));
+
+    // Semantic parity of the deterministic finding sequence across all
+    // three interfaces (identical target/response shape, three genuinely
+    // independent acquisitions — only the EvidenceIds differ).
+    let rule_ids = |audit: &Value| -> Vec<String> {
+        audit["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["rule_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let web_rule_ids = rule_ids(&web_audit);
+    assert!(
+        !web_rule_ids.is_empty(),
+        "the fixture must produce findings"
+    );
+    assert_eq!(web_rule_ids, rule_ids(&mcp_audit));
+    assert_eq!(web_rule_ids, rule_ids(&cli_audit_output));
+    assert_eq!(fixture.hit_count(), 3);
 
     let _ = std::fs::remove_file(&path);
 }

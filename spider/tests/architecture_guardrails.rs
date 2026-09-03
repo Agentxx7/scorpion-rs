@@ -6802,6 +6802,76 @@ fn spider_cli_audit_seam_has_no_independent_audit_assembly() {
     }
 }
 
+/// `PageAuditOutcome` is determined in exactly one place —
+/// `spider/src/features/audit.rs`'s `audit_page`, from
+/// `PageFacts::observed_status` (see that module's "Execution outcome"
+/// doc section). The three authorized adapters
+/// (`scorpion_app/src/audit.rs`, `spider_cli/src/audit.rs`,
+/// `spider_mcp/src/tools/audit.rs`) are thin projections: each must
+/// project `result.outcome()` verbatim, and none may contain any
+/// independent outcome-derivation signal — a reference to
+/// `observed_status`/`response_origin`/`status_code` provenance fields,
+/// the `EvidenceBundle` itself, evidence-building/reading primitives, or
+/// a `PageAuditOutcome::` variant *construction* (adapters name the type
+/// for their wire shape; only the engine constructs a value).
+/// `SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001`.
+#[test]
+fn audit_adapters_project_the_canonical_outcome_and_never_derive_it() {
+    // The engine itself must contain the gate this boundary protects.
+    let engine = strip_comment_lines(&read_src_file("features/audit.rs"));
+    let engine_production = engine
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap_or(engine.as_str());
+    assert!(
+        engine_production.contains(".observed_status().is_some()"),
+        "audit_page must classify PageAuditOutcome from \
+         PageFacts::observed_status — the single canonical derivation"
+    );
+
+    for adapter in [
+        "scorpion_app/src/audit.rs",
+        "spider_cli/src/audit.rs",
+        "spider_mcp/src/tools/audit.rs",
+    ] {
+        let full_source = fs::read_to_string(workspace_root().join(adapter))
+            .unwrap_or_else(|_| panic!("failed to read {adapter}"));
+        let production = strip_comment_lines(
+            full_source
+                .split("#[cfg(test)]")
+                .next()
+                .expect("split always yields at least one segment"),
+        );
+
+        // Positive: the adapter projects the canonical outcome verbatim.
+        assert!(
+            production.contains("result.outcome()"),
+            "{adapter} must project the canonical outcome via \
+             result.outcome() — never an independent signal"
+        );
+
+        for forbidden in [
+            "observed_status",
+            "response_origin",
+            "status_code",
+            "page_provenance",
+            "EvidenceBundle",
+            "build_evidence",
+            "read_evidence",
+            "record_evidence",
+            "PageAuditOutcome::",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "{adapter} must not reference {forbidden:?} in production \
+                 code — PageAuditOutcome is determined only in \
+                 spider/src/features/audit.rs; adapters project it \
+                 verbatim (SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001)"
+            );
+        }
+    }
+}
+
 /// The documented architecture in `SCORPION_ARCHITECTURE.md` must name
 /// the exact same canonical-audit facts and consumer files
 /// `audit_module_has_a_precise_allowed_consumer_boundary` enforces at

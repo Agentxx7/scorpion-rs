@@ -34,7 +34,9 @@
 use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use spider::features::audit::{audit_page, AuditError, Finding, ObservedTechnologyMarker};
+use spider::features::audit::{
+    audit_page, AuditError, Finding, ObservedTechnologyMarker, PageAuditOutcome,
+};
 use spider::features::domain_runtime::{open_shared_domain_store, DomainRuntimeError};
 use spider::features::identity::EvidenceId;
 
@@ -45,14 +47,19 @@ pub struct AuditPageParams {
 }
 
 /// Thin, presentation-only wire projection of one canonical
-/// `PageAuditResult`. Reuses `Finding`'s and `ObservedTechnologyMarker`'s
-/// own `Serialize` implementations verbatim — no field is re-derived,
-/// renamed, or reinterpreted; `evidence_ref` is the exact `EvidenceId`
+/// `PageAuditResult`. Reuses `Finding`'s, `ObservedTechnologyMarker`'s,
+/// and `PageAuditOutcome`'s own `Serialize` implementations verbatim —
+/// no field is re-derived, renamed, or reinterpreted; `outcome` is the
+/// exact [`PageAuditOutcome`] `PageAuditResult::outcome()` already
+/// carries (`"evaluated"` / `"target_unobserved"`), never re-derived
+/// here from status codes, evidence fields, or content; `evidence_ref`
+/// is the exact `EvidenceId`
 /// `PageAuditResult::evidence_ref()` already carries, serialized through
 /// its own canonical `Serialize` impl (a bare `evid_...` string), never a
 /// minted, hashed, or translated identity.
 #[derive(Serialize)]
 struct AuditPageResponse {
+    outcome: PageAuditOutcome,
     evidence_ref: EvidenceId,
     findings: Vec<Finding>,
     technology_markers: Vec<ObservedTechnologyMarker>,
@@ -103,6 +110,10 @@ fn map_store_error(error: DomainRuntimeError) -> String {
 /// never the raw `Display`.
 fn map_audit_error(error: AuditError) -> String {
     match error {
+        AuditError::InvalidTarget(_) => audit_tool_error(
+            "invalid_audit_target",
+            "invalid audit target: the target must be a valid http(s) URL",
+        ),
         AuditError::Acquisition(internal) => {
             eprintln!("spider-mcp audit tool: acquisition failed: {internal}");
             audit_tool_error(
@@ -174,6 +185,7 @@ async fn run_with_environment(
     let result = audit_page(&store, url).await.map_err(map_audit_error)?;
 
     let response = AuditPageResponse {
+        outcome: result.outcome(),
         evidence_ref: result.evidence_ref().id(),
         findings: result.findings().to_vec(),
         technology_markers: result.technology_markers().to_vec(),
@@ -306,6 +318,9 @@ mod tests {
         assert_eq!(fixture.hit_count(), 1);
 
         let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+        // The canonical execution outcome, projected verbatim.
+        assert_eq!(value["outcome"], json!("evaluated"));
 
         // EvidenceRef present and non-empty.
         let evidence_ref = value["evidence_ref"].as_str().unwrap();
@@ -444,6 +459,74 @@ mod tests {
             let error: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
             assert_eq!(error["error"], "invalid_request");
         }
+    }
+
+    /// SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001: a malformed or
+    /// non-HTTP(S) target is rejected by the canonical engine *before*
+    /// any acquisition — a stable, sanitized `invalid_audit_target`
+    /// error, never `audit_acquisition_failed` (which now means a real
+    /// pre-response acquisition breakdown only), and never a fabricated
+    /// success. The hit-counting fixture proves no fetch was attempted.
+    #[tokio::test]
+    async fn invalid_target_is_rejected_before_any_acquisition() {
+        let fixture = AuditFixture::start("200 OK", "text/html", &[], FIXTURE_HTML);
+        let path = configured_store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let bare_address = fixture
+            .url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .to_string();
+
+        for url in [
+            "not a url".to_string(),
+            bare_address,
+            "ftp://example.com/".to_string(),
+        ] {
+            let result = run_with_environment(AuditPageParams { url }, &lookup).await;
+            let error: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+            assert_eq!(error["error"], "invalid_audit_target");
+        }
+        assert_eq!(
+            fixture.hit_count(),
+            0,
+            "rejection precedes acquisition — the fixture was never hit"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An unobserved target (valid HTTP URL, nothing listening) is a
+    /// truthful completed execution: `"outcome": "target_unobserved"`,
+    /// zero findings/markers *because no rule ran*, and the evidence
+    /// reference still present for inspection — never the
+    /// indistinguishable "evaluated with zero findings" shape.
+    #[tokio::test]
+    async fn unobserved_target_projects_target_unobserved_verbatim() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let path = configured_store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+
+        let output = run_with_environment(
+            AuditPageParams {
+                url: format!("http://{addr}/"),
+            },
+            &lookup,
+        )
+        .await
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["outcome"], json!("target_unobserved"));
+        assert_eq!(value["findings"], json!([]));
+        assert_eq!(value["technology_markers"], json!([]));
+        assert!(value["evidence_ref"].as_str().unwrap().starts_with("evid_"));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

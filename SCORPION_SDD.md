@@ -182,7 +182,7 @@ Forbidden:
 | Watch identity/state | `features/{identity,watch}.rs` | `define_watch()`, watch transitions/read seams | `WatchId`, `WatchDefinition`, `WatchState` |
 | Watch scheduling/execution | `features/watch_schedule.rs` | `define_watch_schedule()`, `execute_scheduled_watch_run()` | `WatchSchedule`, `ScheduledRunRecord` |
 | Watch change/health | `features/{change_detection,watch_health}.rs` | change recording/read and health assessment seams | `ChangeResult`, `ChangeEvent`, `WatchHealthReport` |
-| Deterministic page audit | `features/audit.rs` | `audit_page()` | `PageFacts`, `HtmlPageFacts`, `EvidencedPageFacts`, `Finding`, `ObservedTechnologyMarker`, `PageAuditResult` |
+| Deterministic page audit | `features/audit.rs` | `audit_page()` | `PageFacts`, `HtmlPageFacts`, `EvidencedPageFacts`, `Finding`, `ObservedTechnologyMarker`, `PageAuditOutcome`, `PageAuditResult` |
 | Domain persistence runtime binding | `features/domain_runtime.rs` | `resolve_domain_database_path()`, `open_shared_domain_store()` | — (resolves a path/handle; owns no domain model of its own) |
 
 ---

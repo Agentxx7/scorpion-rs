@@ -44,6 +44,7 @@
 use serde::{Deserialize, Serialize};
 use spider::features::audit::{
     audit_page, AuditError as CanonicalAuditError, Finding, ObservedTechnologyMarker,
+    PageAuditOutcome,
 };
 use spider::features::domain_runtime::{open_shared_domain_store, DomainRuntimeError};
 use spider::features::identity::EvidenceId;
@@ -59,14 +60,21 @@ pub struct AuditRequest {
 }
 
 /// Thin, presentation-only wire projection of one canonical
-/// `PageAuditResult`. Reuses `Finding`'s and `ObservedTechnologyMarker`'s
-/// own `Serialize` implementations verbatim — no field is re-derived,
-/// renamed, reordered, or reinterpreted; `evidence_ref` is the exact
-/// `EvidenceId` `PageAuditResult::evidence_ref()` already carries,
+/// `PageAuditResult`. Reuses `Finding`'s, `ObservedTechnologyMarker`'s,
+/// and `PageAuditOutcome`'s own `Serialize` implementations verbatim —
+/// no field is re-derived, renamed, reordered, or reinterpreted;
+/// `outcome` is the exact [`PageAuditOutcome`]
+/// `PageAuditResult::outcome()` already carries (`"evaluated"` /
+/// `"target_unobserved"` on the wire), never re-derived here from
+/// status codes, evidence fields, or content; `evidence_ref` is the
+/// exact `EvidenceId` `PageAuditResult::evidence_ref()` already carries,
 /// serialized through its own canonical `Serialize` impl (a bare
 /// `evid_...` string), never a minted, hashed, or translated identity.
+/// Both outcomes remain HTTP 200: `target_unobserved` is a truthful
+/// *completed* execution result with the outcome explicit on the wire.
 #[derive(Debug, Serialize)]
 pub struct AuditResponse {
+    pub outcome: PageAuditOutcome,
     pub evidence_ref: EvidenceId,
     pub findings: Vec<Finding>,
     pub technology_markers: Vec<ObservedTechnologyMarker>,
@@ -79,6 +87,10 @@ pub enum AuditError {
     /// Request-level validation failed before any store/acquisition
     /// activity.
     InvalidRequest(String),
+    /// The supplied target is not a valid HTTP(S) page-audit target —
+    /// rejected by the canonical engine before any acquisition; no
+    /// evidence was minted.
+    InvalidTarget,
     /// No canonical domain database is configured for this process.
     NotConfigured,
     /// The canonical store is configured but could not be opened.
@@ -96,6 +108,9 @@ impl std::fmt::Display for AuditError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidRequest(message) => write!(f, "invalid audit request: {message}"),
+            Self::InvalidTarget => {
+                f.write_str("invalid audit target: the target must be a valid http(s) URL")
+            }
             Self::NotConfigured => f.write_str("audit store is not configured"),
             Self::Unavailable => f.write_str("audit store is unavailable"),
             Self::AcquisitionFailed => f.write_str("failed to acquire the target page"),
@@ -109,7 +124,9 @@ impl std::fmt::Display for AuditError {
 
 /// HTTP status for a public page-audit error.
 ///
-/// `400` — malformed/empty request, never reached the store.
+/// `400` — malformed/empty request, or a target that is not a valid
+/// HTTP(S) page-audit target (rejected by the canonical engine before
+/// any acquisition), never reached the store.
 /// `503` — the canonical store is not configured, or configured but
 /// unreachable — an execution/runtime dependency failure, matching
 /// `scorpion_app::evidence::evidence_error_status`'s own convention for
@@ -122,7 +139,7 @@ impl std::fmt::Display for AuditError {
 /// violated.
 pub fn audit_error_status(error: &AuditError) -> u16 {
     match error {
-        AuditError::InvalidRequest(_) => 400,
+        AuditError::InvalidRequest(_) | AuditError::InvalidTarget => 400,
         AuditError::NotConfigured | AuditError::Unavailable => 503,
         AuditError::AcquisitionFailed => 502,
         AuditError::PersistenceFailed | AuditError::Internal => 500,
@@ -134,6 +151,7 @@ pub fn audit_error_status(error: &AuditError) -> u16 {
 pub fn audit_error_json(error: &AuditError) -> String {
     let code = match error {
         AuditError::InvalidRequest(_) => "invalid_request",
+        AuditError::InvalidTarget => "invalid_audit_target",
         AuditError::NotConfigured => "audit_store_not_configured",
         AuditError::Unavailable => "audit_store_unavailable",
         AuditError::AcquisitionFailed => "audit_acquisition_failed",
@@ -179,6 +197,7 @@ async fn run_audit_with_environment(
         .map_err(|error| map_canonical_audit_error(&error))?;
 
     Ok(AuditResponse {
+        outcome: result.outcome(),
         evidence_ref: result.evidence_ref().id(),
         findings: result.findings().to_vec(),
         technology_markers: result.technology_markers().to_vec(),
@@ -193,6 +212,7 @@ async fn run_audit_with_environment(
 /// never the raw `Display`.
 fn map_canonical_audit_error(error: &CanonicalAuditError) -> AuditError {
     match error {
+        CanonicalAuditError::InvalidTarget(_) => AuditError::InvalidTarget,
         CanonicalAuditError::Acquisition(internal) => {
             eprintln!("scorpion-api page audit: acquisition failed: {internal}");
             AuditError::AcquisitionFailed
@@ -299,7 +319,7 @@ mod tests {
     const MINIMAL_HTML: &str = "<html><head><title>t</title></head><body>hi</body></html>";
 
     #[tokio::test]
-    async fn valid_audit_returns_findings_ref_and_one_acquisition() {
+    async fn valid_audit_returns_evaluated_outcome_findings_ref_and_one_acquisition() {
         let path = store_path("valid");
         let _ = std::fs::remove_file(&path);
         let lookup = configured_lookup(&path);
@@ -309,8 +329,44 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(response.outcome, PageAuditOutcome::Evaluated);
         assert!(!response.findings.is_empty());
         assert_eq!(fixture.hit_count(), 1, "exactly one target acquisition");
+        let wire = serde_json::to_value(&response).unwrap();
+        assert_eq!(wire["outcome"], serde_json::json!("evaluated"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A valid HTTP(S) target nothing listens on is a truthful completed
+    /// execution — HTTP 200 at the route level, `target_unobserved` on
+    /// the wire, zero findings *because no rule ran* — never rendered
+    /// indistinguishable from an observed page with zero findings, and
+    /// still carrying the evidence reference for inspection.
+    #[tokio::test]
+    async fn unobserved_target_returns_target_unobserved_with_zero_findings_and_evidence_ref() {
+        let path = store_path("unobserved");
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let response = run_audit_with_environment(
+            AuditRequest {
+                url: format!("http://{addr}/"),
+            },
+            &lookup,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.outcome, PageAuditOutcome::TargetUnobserved);
+        assert!(response.findings.is_empty());
+        assert!(response.technology_markers.is_empty());
+        let wire = serde_json::to_value(&response).unwrap();
+        assert_eq!(wire["outcome"], serde_json::json!("target_unobserved"));
+        assert!(wire["evidence_ref"].is_string());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -345,20 +401,33 @@ mod tests {
     async fn malformed_url_fails_deterministically() {
         let path = store_path("malformed-url");
         let lookup = configured_lookup(&path);
-        let error = run_audit_with_environment(
-            AuditRequest {
-                url: "not a url".to_string(),
-            },
-            &lookup,
-        )
-        .await
-        .unwrap_err();
-        // Canonical acquisition rejects an unparsable URL as an
-        // acquisition failure, not a request-shape failure — this
-        // application boundary does not re-validate URL syntax itself,
-        // matching spider_mcp's own tool contract exactly.
-        assert_eq!(error, AuditError::AcquisitionFailed);
-        assert_eq!(audit_error_status(&error), 502);
+        let fixture = AuditFixture::start("200 OK", "text/html", MINIMAL_HTML);
+        let bare_address = fixture
+            .url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .to_string();
+
+        for url in ["not a url".to_string(), bare_address] {
+            let error = run_audit_with_environment(AuditRequest { url }, &lookup)
+                .await
+                .unwrap_err();
+            // The canonical engine rejects an unparsable/non-HTTP(S)
+            // target *before* any acquisition — a client-correctable
+            // 400, never a 502 acquisition failure (which now means a
+            // real pre-response acquisition breakdown only). This
+            // application boundary does not re-validate URL syntax
+            // itself; it projects the canonical engine's own verdict.
+            assert_eq!(error, AuditError::InvalidTarget);
+            assert_eq!(audit_error_status(&error), 400);
+            assert!(audit_error_json(&error).contains("invalid_audit_target"));
+        }
+        assert_eq!(
+            fixture.hit_count(),
+            0,
+            "rejection precedes acquisition — the fixture was never hit"
+        );
     }
 
     #[tokio::test]
@@ -496,6 +565,7 @@ mod tests {
             audit_error_status(&AuditError::InvalidRequest("x".into())),
             400
         );
+        assert_eq!(audit_error_status(&AuditError::InvalidTarget), 400);
         assert_eq!(audit_error_status(&AuditError::NotConfigured), 503);
         assert_eq!(audit_error_status(&AuditError::Unavailable), 503);
         assert_eq!(audit_error_status(&AuditError::AcquisitionFailed), 502);
@@ -504,6 +574,7 @@ mod tests {
 
         assert!(audit_error_json(&AuditError::InvalidRequest("x".into()))
             .contains("\"invalid_request\""));
+        assert!(audit_error_json(&AuditError::InvalidTarget).contains("\"invalid_audit_target\""));
         assert!(
             audit_error_json(&AuditError::NotConfigured).contains("\"audit_store_not_configured\"")
         );

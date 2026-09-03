@@ -648,8 +648,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     function renderAuditResult(payload) {
       auditStatus.className = '';
-      auditStatus.replaceChildren(text('Audit complete.'));
       const container = document.createElement('div');
+
+      // The canonical engine's own execution outcome, projected verbatim
+      // on the wire (`outcome`), is the only signal used here — the
+      // console never re-derives observed/unobserved from status codes,
+      // evidence fields, or findings counts.
+      const unobserved = payload.outcome === 'target_unobserved';
+      if (unobserved) {
+        auditStatus.replaceChildren(
+          text('Target was not observed. No audit findings were evaluated.'));
+      } else {
+        auditStatus.replaceChildren(text('Audit complete.'));
+      }
 
       const refRow = document.createElement('div');
       refRow.className = 'audit-field';
@@ -666,6 +677,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       });
       refRow.append(refTerm, text(payload.evidence_ref), text(' '), inspectButton);
       container.append(refRow);
+
+      if (unobserved) {
+        // No Findings/markers sections: zero findings here means no rule
+        // ran — never render it as "Audit complete. Findings (0)".
+        container.append(auditLabel('Raw canonical audit result (complete)'), auditPre(JSON.stringify(payload, null, 2)));
+        auditResult.replaceChildren(container);
+        return;
+      }
 
       container.append(auditLabel(`Findings (${payload.findings.length})`));
       const findingsList = document.createElement('ol');

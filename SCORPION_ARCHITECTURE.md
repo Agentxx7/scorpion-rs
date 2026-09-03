@@ -570,13 +570,28 @@ time it is recorded here as canonical ownership, reconciling this document
 with production reality rather than describing new behavior.
 
 `audit_page(store, url)` is the single canonical execution seam and the
-*only* production acquisition entrypoint in this module: it calls
+*only* production acquisition entrypoint in this module: it first admits
+or rejects the target itself (`AuditError::InvalidTarget` — the raw,
+trimmed input must parse as a URL and use exactly the `http`/`https`
+scheme — before any acquisition is attempted and before any evidence is
+minted), calls
 `fetch_single_page` exactly once, records that one `Page`'s evidence and
 derives `PageFacts` from it via `EvidencedPageFacts::record` (the sole
 association constructor — no public seam pairs a caller-supplied
-`PageFacts` with a caller-supplied `EvidenceRef` independently), then runs
+`PageFacts` with a caller-supplied `EvidenceRef` independently) —
+exactly once, always, including for unobserved targets whose truthful
+failure evidence must persist — then classifies the execution's
+`PageAuditOutcome` from `PageFacts::observed_status`
+(`SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001`): `Evaluated` when a
+target response was genuinely observed (any status, including non-2xx),
+`TargetUnobserved` when the acquisition completed without ever observing
+a response (transport failure: connection refused, DNS, timeout, TLS).
+Only for an observed target does it then run
 every rule in `PAGE_RULES` (`analyze_page`) and every technology-marker
-extractor (`extract_technology_markers`) over that *same* value. Every
+extractor (`extract_technology_markers`) over that *same* value; for an
+unobserved target no rule runs at all, so `findings` and
+`technology_markers` are empty *because no rule evaluated anything* —
+never to be read as "all rules passed". Every
 `Finding` and every `ObservedTechnologyMarker` a single `audit_page` call
 produces therefore shares one `EvidenceRef` — the same evidence identity
 `utils/evidence.rs` already owns (§3.6); `audit.rs` mints no identity of
@@ -624,12 +639,20 @@ interchangeable:
   fingerprint, or signature/vendor-classification catalog is implemented
   or authorized.
 
-`PageAuditResult { evidence_ref, findings, technology_markers }` is the one
-canonical aggregate result `audit_page` returns — both result vocabularies,
+`PageAuditResult { outcome, evidence_ref, findings, technology_markers }`
+is the one
+canonical aggregate result `audit_page` returns — the explicit
+`PageAuditOutcome` (`"evaluated"`/`"target_unobserved"` on the wire), both
+result vocabularies,
 bound to the one shared `EvidenceRef`, in one value. It is not itself
 `Serialize`; the one authorized shipping DTO that projects it onto a wire
 shape is described immediately below (still not a second model — see its
-own doc comment).
+own doc comment). The outcome is determined only in `audit_page`; the
+three peer adapters project it verbatim from `PageAuditResult::outcome()`
+and are forbidden from independently inspecting `observed_status`,
+`status_code`, `EvidenceBundle`, `response_origin`, content, or transport
+errors to derive it
+(`audit_adapters_project_the_canonical_outcome_and_never_derive_it`).
 
 **Human/AI interface boundary — MCP realized by
 `SCORPION_MCP_CANONICAL_PAGE_AUDIT_SHIPPING_001` and

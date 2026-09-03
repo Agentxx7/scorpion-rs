@@ -40,6 +40,60 @@
 //! proven in this module's own `exact_page_evidence_binding`,
 //! `same_evidence_across_rules`, and `technology_markers` test modules.
 //!
+//! # Execution outcome: observed vs. unobserved targets
+//!
+//! `SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001` made the outcome of a
+//! completed audit execution explicit and canonical:
+//! [`PageAuditOutcome::Evaluated`] vs.
+//! [`PageAuditOutcome::TargetUnobserved`]. Before this frontier, an
+//! audit of a target no response was ever observed from (connection
+//! refused, DNS failure, timeout, TLS failure) completed "successfully"
+//! with zero findings — on the wire, indistinguishable from a genuinely
+//! observed page against which all eleven rules truly passed. The
+//! outcome is derived in exactly one place, [`audit_page`], from
+//! [`PageFacts::observed_status`]; adapters (Web/MCP/CLI) project it
+//! verbatim and never re-derive it.
+//!
+//! Why `observed_status().is_some()` is the correct, complete signal on
+//! this seam (verified by direct inspection of the acquisition path
+//! [`fetch_single_page`] drives — one bare `Website`, non-browser HTTP,
+//! no cache, no Chrome):
+//!
+//! 1. Every *completed* HTTP response (`Ok(res)`, any status including
+//!    non-2xx, including oversized/truncated bodies) flows through
+//!    `handle_response_bytes` (`utils/mod.rs`), which unconditionally
+//!    stamps `observed_status_code: Some(status_code)`.
+//! 2. Every *transport failure* (`Err(err)` — connect refused, DNS,
+//!    timeout, TLS handshake, including the www-strip/scheme-flip
+//!    retries) flows through `build_error_page_response`, which stamps
+//!    `observed_status_code = err.status()`. reqwest attaches a status
+//!    to an error only when that error was built from a real response
+//!    (`Response::error_for_status`), which this path never calls, so
+//!    transport failures stamp `None`. Proven independently by
+//!    `reqwest_error_status_is_observed_but_transport_error_is_not` in
+//!    `utils/mod.rs`'s tests: a real 404/500 surfaced as an error keeps
+//!    `Some(status)`; a refused connection stamps `None`.
+//! 3. `Page::build` (`page.rs`) propagates `observed_status_code`
+//!    verbatim; its only reset-to-`None` branch is the Chrome
+//!    `chrome-error://chromewebdata` interstitial reclassification,
+//!    unreachable on the non-browser path [`fetch_single_page`] uses
+//!    (and correctly `None` even there — that content is Chrome's own
+//!    interstitial, never the target's origin response).
+//! 4. Synthetic failure statuses (521/524/525/526/503/504...) are
+//!    stamped on `status_code` (Spider's *effective* status) only, never
+//!    on `observed_status_code` — so `None` can never mean "observed
+//!    something". Consequently no legitimate representation reachable
+//!    from this seam carries real observed content with
+//!    `observed_status == None`.
+//!
+//! An unobserved target is still recorded exactly once, truthfully
+//! (evidence with `observed_status_code: null` and the synthetic failure
+//! provenance), so its [`EvidenceRef`] remains inspectable; only rule
+//! evaluation and marker extraction are skipped — no rule may fire on
+//! URL-only/synthetic facts, which is also why
+//! `security.https.missing` can never fire for an unobserved target
+//! (see [`security_https_missing`]'s own doc comment).
+//!
 //! # Applicability
 //!
 //! Reproduced empirically before this frontier's mutation: the original
@@ -967,6 +1021,15 @@ impl Finding {
 /// Why a finding could not be derived, resolved, or persisted.
 #[derive(Debug)]
 pub enum AuditError {
+    /// The supplied value is not a valid HTTP(S) page-audit target:
+    /// it either fails `url::Url::parse` or uses a scheme other than
+    /// exactly `http`/`https`. Rejected *before* any acquisition is
+    /// attempted — no `Page` is fetched and no evidence is minted.
+    /// Deliberately not a reuse of
+    /// `spider_transport::is_ssrf_redirect`: that predicate's contract
+    /// is deny-classification of fetch redirect hops, not admission of
+    /// an audit target.
+    InvalidTarget(String),
     /// [`fetch_single_page`] failed before producing a `Page`.
     Acquisition(String),
     /// Building/recording the acquired page's evidence failed.
@@ -990,6 +1053,9 @@ pub enum AuditError {
 impl fmt::Display for AuditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidTarget(target) => {
+                write!(f, "invalid audit target: {target}")
+            }
             Self::Acquisition(message) => write!(f, "audit acquisition failed: {message}"),
             Self::EvidenceRecording(error) => write!(f, "audit evidence recording: {error}"),
             Self::EmptyEvidence => f.write_str("a finding must carry at least one EvidenceRef"),
@@ -1012,6 +1078,7 @@ impl std::error::Error for AuditError {
             Self::Persistence(error) => Some(error),
             Self::Serialization(error) => Some(error),
             Self::Acquisition(_) | Self::EmptyEvidence | Self::EvidenceUnresolvable(_) => None,
+            Self::InvalidTarget(_) => None,
         }
     }
 }
@@ -1224,10 +1291,24 @@ fn url_scheme(url: &str) -> Option<UrlScheme> {
 /// `Some(Finding)` when `evidenced`'s final URL scheme is `http`, `None`
 /// otherwise. Applicability differs from the HTML DOM SEO rules above:
 /// this applies to any successfully acquired page with an observed final
-/// URL (the seam already guarantees a `Page` was acquired to reach the
-/// analyzer at all) — status code and representation are irrelevant. No
+/// URL — status code and representation are irrelevant. No
 /// active probe, no second request: purely a read of the already-
 /// acquired final URL.
+///
+/// Observation gate (precision since
+/// `SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001`): the seam guarantees
+/// an acquisition *result* — a `Page` value — but not necessarily an
+/// observed target response: a transport failure (connection refused,
+/// DNS, timeout, TLS) still produces a `Page` carrying a synthetic
+/// effective status and `observed_status == None`. Rule *eligibility* on
+/// that signal is enforced at the execution level in [`audit_page`],
+/// which skips rule evaluation entirely for an unobserved target — so
+/// this rule (like every other) can never fire on URL-only/synthetic
+/// facts, and in particular can never claim `https` is "missing" for a
+/// target no response was ever observed from. The gate lives outside the
+/// rule deliberately: this rule's predicate, inputs, and semantics are
+/// unchanged, so [`SECURITY_HTTPS_MISSING_RULE_VERSION`] is unchanged —
+/// no version bump.
 pub fn security_https_missing(evidenced: &EvidencedPageFacts) -> Option<Finding> {
     let facts = evidenced.facts();
     let scheme = url_scheme(facts.final_url())?;
@@ -1602,20 +1683,62 @@ pub async fn read_finding(
     }
 }
 
+/// The canonical outcome of one completed page-audit execution —
+/// derived in exactly one place, [`audit_page`], from
+/// [`PageFacts::observed_status`] (see this module's "Execution outcome"
+/// doc section for why that signal is correct and complete on this
+/// seam). Adapters (Web/MCP/CLI) project this value verbatim onto their
+/// own wire shapes and never re-derive it from evidence, status codes,
+/// content, or transport errors.
+///
+/// The wire representation is stable and explicit
+/// (`rename_all = "snake_case"`): `"evaluated"` / `"target_unobserved"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAuditOutcome {
+    /// A target response was genuinely observed (any status, including
+    /// non-2xx) and every authorized rule in [`PAGE_RULES`] was
+    /// evaluated over the observed page — including when that evaluation
+    /// legitimately produced zero findings.
+    Evaluated,
+    /// The acquisition attempt completed and truthful evidence was
+    /// recorded exactly once, but no target response was ever observed
+    /// (transport failure: connection refused, DNS, timeout, TLS), so
+    /// rule evaluation of a remotely observed page could not occur.
+    /// `findings` and `technology_markers` are empty *because no rule
+    /// ran* — never to be read as "all rules passed" — and the
+    /// [`EvidenceRef`] naming the truthful failure evidence remains
+    /// available.
+    TargetUnobserved,
+}
+
 /// The smallest internal result proving one page audit's architecture:
-/// the exact [`EvidenceRef`] every returned [`Finding`] *and* every
+/// the canonical [`PageAuditOutcome`] of the execution, the exact
+/// [`EvidenceRef`] every returned [`Finding`] *and* every
 /// returned [`ObservedTechnologyMarker`] is linked to, the deterministic
 /// Finding list, and the deterministic technology-marker list. Not a
 /// shipping DTO — no API, UI, MCP, or CLI schema is authorized in this
 /// frontier.
+///
+/// When [`Self::outcome`] is [`PageAuditOutcome::TargetUnobserved`], the
+/// acquisition attempt completed and truthful evidence was recorded, but
+/// rule evaluation of a remotely observed page could not occur;
+/// `findings` and `technology_markers` are therefore empty and the
+/// [`EvidenceRef`] remains available for inspection.
 #[derive(Debug, Clone)]
 pub struct PageAuditResult {
+    outcome: PageAuditOutcome,
     evidence_ref: EvidenceRef,
     findings: Vec<Finding>,
     technology_markers: Vec<ObservedTechnologyMarker>,
 }
 
 impl PageAuditResult {
+    /// The canonical execution outcome — see [`PageAuditOutcome`].
+    pub fn outcome(&self) -> PageAuditOutcome {
+        self.outcome
+    }
+
     /// The evidence every `Finding` in [`Self::findings`] and every
     /// marker in [`Self::technology_markers`] is linked to — always the
     /// exact evidence recorded for the one `Page` this audit acquired.
@@ -1638,27 +1761,62 @@ impl PageAuditResult {
     }
 }
 
+/// Admit `url` as a page-audit target, or reject it with
+/// [`AuditError::InvalidTarget`] *before* any acquisition is attempted —
+/// no `Page` is fetched and no evidence is minted for a rejected target.
+/// Admission is deliberately narrow and self-contained: the raw (trimmed)
+/// input must parse via `url::Url::parse` *and* use exactly the `http`
+/// or `https` scheme. This rejects unparseable input (`not a url`) and
+/// every non-HTTP(S) scheme (`ftp:`, `file:`, `javascript:`, `data:`).
+/// Deliberately not a reuse or broadening of
+/// `spider_transport::is_ssrf_redirect` — that predicate's contract is
+/// deny-classification of fetch redirect hops, not audit-target
+/// admission.
+fn validate_audit_target(url: &str) -> Result<(), AuditError> {
+    let trimmed = url.trim();
+    let admitted = url::Url::parse(trimmed)
+        .map(|parsed| matches!(parsed.scheme(), "http" | "https"))
+        .unwrap_or(false);
+    if admitted {
+        Ok(())
+    } else {
+        Err(AuditError::InvalidTarget(trimmed.to_string()))
+    }
+}
+
 /// The internal, generic canonical audit execution seam — the *only*
 /// production acquisition entrypoint in this module, reused by every
 /// current and future page rule and by technology-marker extraction
 /// (never one acquisition entrypoint per rule, and never a second
 /// acquisition entrypoint for markers):
+/// validate the target ([`validate_audit_target`], rejecting
+/// non-HTTP(S)/unparseable input before any network activity) ->
 /// acquire exactly one page ([`fetch_single_page`], the same one-shot
 /// primitive every other evidence-first caller uses) -> record its
 /// evidence and derive [`PageFacts`] from that *exact same* `Page`
-/// ([`EvidencedPageFacts::record`]) -> run every rule in [`PAGE_RULES`]
-/// ([`analyze_page`]) -> persist each resulting [`Finding`]
-/// ([`record_finding`]) -> derive every technology marker from that
+/// ([`EvidencedPageFacts::record`]) -> classify the execution
+/// [`PageAuditOutcome`] from [`PageFacts::observed_status`] (see this
+/// module's "Execution outcome" doc section for the signal proof) -> for
+/// an observed target only, run every rule in [`PAGE_RULES`]
+/// ([`analyze_page`]), persist each resulting [`Finding`]
+/// ([`record_finding`]), and derive every technology marker from that
 /// *same* [`EvidencedPageFacts`] value ([`extract_technology_markers`]).
 /// Exactly one acquisition, exactly one evidence recording, per audited
-/// page — every returned `Finding` and every returned
-/// `ObservedTechnologyMarker` therefore shares
-/// [`PageAuditResult::evidence_ref`]. This is not a CLI/API/MCP/Web
-/// Console surface — see this module's doc comment.
+/// page — *always*, including unobserved targets, whose truthful failure
+/// evidence must persist. An unobserved target
+/// ([`PageAuditOutcome::TargetUnobserved`]) skips rule evaluation and
+/// marker extraction entirely: no rule may fire on URL-only/synthetic
+/// facts, so `security.https.missing` can never fire for one (see
+/// [`security_https_missing`]'s own doc comment). Every returned
+/// `Finding` and every returned `ObservedTechnologyMarker` therefore
+/// shares [`PageAuditResult::evidence_ref`]. This is not a CLI/API/MCP/
+/// Web Console surface — see this module's doc comment.
 pub async fn audit_page(
     store: &DomainPersistence,
     url: &str,
 ) -> Result<PageAuditResult, AuditError> {
+    validate_audit_target(url)?;
+
     let page = fetch_single_page(url)
         .await
         .map_err(AuditError::Acquisition)?;
@@ -1666,14 +1824,19 @@ pub async fn audit_page(
     let evidenced = EvidencedPageFacts::record(store, &page).await?;
     let evidence_ref = evidenced.evidence_ref();
 
-    let mut findings = Vec::new();
-    for finding in analyze_page(&evidenced) {
-        findings.push(record_finding(store, finding).await?);
-    }
-
-    let technology_markers = extract_technology_markers(&evidenced);
+    let (outcome, findings, technology_markers) = if evidenced.facts().observed_status().is_some() {
+        let mut findings = Vec::new();
+        for finding in analyze_page(&evidenced) {
+            findings.push(record_finding(store, finding).await?);
+        }
+        let technology_markers = extract_technology_markers(&evidenced);
+        (PageAuditOutcome::Evaluated, findings, technology_markers)
+    } else {
+        (PageAuditOutcome::TargetUnobserved, Vec::new(), Vec::new())
+    };
 
     Ok(PageAuditResult {
+        outcome,
         evidence_ref,
         findings,
         technology_markers,
@@ -3685,6 +3848,315 @@ mod tests {
             let page = page_with_html("https://example.test/", "<html></html>");
             let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
             assert_eq!(evidenced.facts().requested_url(), page.get_url());
+        }
+    }
+
+    // SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001: the canonical
+    // execution outcome — evaluated vs. target-unobserved — derived only
+    // in `audit_page` from `PageFacts::observed_status` (see the module
+    // doc's "Execution outcome" section for the signal proof). These
+    // tests pin both outcomes, the invalid-target admission boundary,
+    // and the truthful-failure-evidence invariant end to end through real
+    // local acquisitions.
+    mod execution_outcome {
+        use super::*;
+        use crate::utils::evidence::read_evidence;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        /// An HTTP fixture that serves one fixed response per connection
+        /// and counts every accepted connection — the acquisition
+        /// hit-count witness. `status_line`/`extra_headers` let each
+        /// case pin its own observed truth.
+        fn hit_counting_fixture(
+            status_line: &'static str,
+            extra_headers: &'static str,
+            html: &'static str,
+        ) -> (String, Arc<AtomicUsize>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let witness = Arc::clone(&hits);
+            thread::spawn(move || {
+                while let Ok((mut stream, _)) = listener.accept() {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = [0_u8; 4096];
+                    let _ = stream.read(&mut buf);
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 {status_line}\r\nContent-Type: text/html\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        html.len()
+                    );
+                    let _ = stream.write_all(html.as_bytes());
+                }
+            });
+            (format!("http://{addr}/"), witness)
+        }
+
+        /// A bare listener address with no live listener behind it — a
+        /// deterministic connection-refused target on 127.0.0.1.
+        fn closed_port_url() -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            format!("http://{addr}/")
+        }
+
+        /// Case A: a real observed 200 HTML acquisition is `Evaluated`,
+        /// produces exactly the deterministic findings this fixture's
+        /// facts imply (the same nine-rule sequence
+        /// `generic_analyzer::ordering_is_declaration_order_not_hashmap_dependent`
+        /// pins at the analyzer level), shares one EvidenceRef, and costs
+        /// exactly one acquisition.
+        #[tokio::test]
+        async fn observed_html_page_is_evaluated_with_deterministic_findings_and_one_acquisition() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let (url, hits) = hit_counting_fixture(
+                "200 OK",
+                "",
+                "<html><head></head><body><img src=\"/a.png\"></body></html>",
+            );
+
+            let result = audit_page(&store, &url).await.unwrap();
+
+            assert_eq!(result.outcome(), PageAuditOutcome::Evaluated);
+            let rule_ids: Vec<&str> = result.findings().iter().map(Finding::rule_id).collect();
+            assert_eq!(
+                rule_ids,
+                vec![
+                    SEO_CANONICAL_MISSING_RULE_ID,
+                    SEO_TITLE_MISSING_RULE_ID,
+                    SEO_META_DESCRIPTION_MISSING_RULE_ID,
+                    SEO_H1_MISSING_RULE_ID,
+                    SEO_HTML_LANG_MISSING_RULE_ID,
+                    SEO_IMAGE_ALT_MISSING_RULE_ID,
+                    SECURITY_HTTPS_MISSING_RULE_ID,
+                    SECURITY_CSP_MISSING_RULE_ID,
+                    SECURITY_X_CONTENT_TYPE_OPTIONS_MISSING_RULE_ID,
+                ]
+            );
+            for finding in result.findings() {
+                assert_eq!(finding.evidence(), &[result.evidence_ref()]);
+            }
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                1,
+                "exactly one acquisition per audit"
+            );
+        }
+
+        /// Case B (through the seam): a genuinely observed page that
+        /// satisfies every applicable rule except the `http`-scheme one
+        /// is `Evaluated` with exactly the `security.https.missing`
+        /// finding — never confused with `TargetUnobserved`, which is a
+        /// different *outcome*, not a different findings count.
+        #[tokio::test]
+        async fn observed_clean_page_is_evaluated_and_distinguishable_from_unobserved() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let (url, hits) = hit_counting_fixture(
+                "200 OK",
+                "Content-Security-Policy: default-src 'self'\r\nX-Content-Type-Options: nosniff\r\n",
+                r#"<html lang="en"><head><title>T</title>
+                    <meta name="description" content="d">
+                    <link rel="canonical" href="http://example.test/">
+                </head><body><h1>H</h1><img src="/a.png" alt="a"></body></html>"#,
+            );
+
+            let result = audit_page(&store, &url).await.unwrap();
+
+            assert_eq!(result.outcome(), PageAuditOutcome::Evaluated);
+            let rule_ids: Vec<&str> = result.findings().iter().map(Finding::rule_id).collect();
+            assert_eq!(rule_ids, vec![SECURITY_HTTPS_MISSING_RULE_ID]);
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+
+        /// Case B (analyzer level): an all-clean *https* page — the one
+        /// shape no plain-TcpListener fixture can serve — passes all
+        /// eleven rules, proving `Evaluated` with `findings == []` is a
+        /// real, reachable state (zero findings because every rule truly
+        /// passed), categorically distinct from `TargetUnobserved` (zero
+        /// findings because no rule ran).
+        #[tokio::test]
+        async fn every_rule_passing_yields_zero_findings_on_an_observed_page() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let page = page_with(
+                "https://example.test/",
+                r#"<html lang="en"><head><title>T</title>
+                    <meta name="description" content="d">
+                    <link rel="canonical" href="https://example.test/">
+                </head><body><h1>H</h1><img src="/a.png" alt="a"></body></html>"#,
+                "text/html",
+                reqwest::StatusCode::OK,
+                &[
+                    ("strict-transport-security", "max-age=63072000"),
+                    ("content-security-policy", "default-src 'self'"),
+                    ("x-content-type-options", "nosniff"),
+                ],
+            );
+            let evidenced = EvidencedPageFacts::record(&store, &page).await.unwrap();
+            assert!(
+                analyze_page(&evidenced).is_empty(),
+                "an observed page passing every rule produces zero findings"
+            );
+        }
+
+        /// Case C: a real observed 404 is still `Evaluated` — observation
+        /// is about a response having been seen, not about 2xx. The
+        /// observed truth is retained in evidence, and rule applicability
+        /// is unchanged (the HTML SEO rules skip per their own 2xx/HTML
+        /// predicate; the scheme rule still applies).
+        #[tokio::test]
+        async fn observed_404_is_evaluated_with_observed_truth_retained() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let (url, hits) = hit_counting_fixture(
+                "404 Not Found",
+                "",
+                "<html><head></head><body>missing</body></html>",
+            );
+
+            let result = audit_page(&store, &url).await.unwrap();
+
+            assert_eq!(result.outcome(), PageAuditOutcome::Evaluated);
+            let rule_ids: Vec<&str> = result.findings().iter().map(Finding::rule_id).collect();
+            assert_eq!(rule_ids, vec![SECURITY_HTTPS_MISSING_RULE_ID]);
+
+            let bundle = read_evidence(&store, result.evidence_ref().id())
+                .await
+                .unwrap()
+                .expect("evidence must resolve");
+            assert_eq!(bundle.observed_status_code, Some(404));
+            assert_eq!(bundle.status_code, Some(404));
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+        }
+
+        /// Case D: a valid HTTP target nothing listens on completes as
+        /// `TargetUnobserved` — findings and markers empty *because no
+        /// rule ran* — while truthful failure evidence is still recorded
+        /// exactly once: `observed_status_code: None`, a synthetic
+        /// effective failure status, no response origin.
+        #[tokio::test]
+        async fn unobserved_target_records_truthful_failure_evidence_without_evaluating() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let url = closed_port_url();
+
+            let result = audit_page(&store, &url).await.unwrap();
+
+            assert_eq!(result.outcome(), PageAuditOutcome::TargetUnobserved);
+            assert!(result.findings().is_empty());
+            assert!(result.technology_markers().is_empty());
+
+            let bundle = read_evidence(&store, result.evidence_ref().id())
+                .await
+                .unwrap()
+                .expect("truthful failure evidence must persist and resolve");
+            assert_eq!(bundle.requested_url.as_deref(), Some(url.as_str()));
+            assert_eq!(bundle.observed_status_code, None);
+            assert!(
+                matches!(bundle.status_code, Some(code) if code >= 500),
+                "a synthetic failure status, never an observed one: {:?}",
+                bundle.status_code
+            );
+            assert_eq!(bundle.response_origin, None);
+        }
+
+        /// Case E: unparseable input is rejected as `InvalidTarget`
+        /// *before* any acquisition — the hit-counting fixture proves no
+        /// fetch was attempted. The bare-address input is exactly what
+        /// `Website::new` would previously have normalized (prepended a
+        /// scheme to) and fetched; rejection must happen first now.
+        #[tokio::test]
+        async fn malformed_target_is_rejected_before_any_acquisition() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let (url, hits) =
+                hit_counting_fixture("200 OK", "", "<html><head></head><body></body></html>");
+            let bare_address = url
+                .strip_prefix("http://")
+                .unwrap()
+                .trim_end_matches('/')
+                .to_string();
+
+            for target in ["not a url", bare_address.as_str()] {
+                let error = audit_page(&store, target)
+                    .await
+                    .expect_err("malformed targets must be rejected");
+                assert!(
+                    matches!(error, AuditError::InvalidTarget(_)),
+                    "expected InvalidTarget, got {error:?}"
+                );
+            }
+            assert_eq!(
+                hits.load(Ordering::SeqCst),
+                0,
+                "rejection precedes acquisition — no evidence was minted, no fetch attempted"
+            );
+        }
+
+        /// Case F: a parseable non-HTTP(S) scheme (`ftp://`) is rejected
+        /// as `InvalidTarget` before any acquisition — no `Page`, no
+        /// EvidenceRef minted.
+        #[tokio::test]
+        async fn non_http_scheme_target_is_rejected_before_any_acquisition() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let (url, hits) =
+                hit_counting_fixture("200 OK", "", "<html><head></head><body></body></html>");
+            let ftp_target = url.replacen("http://", "ftp://", 1);
+
+            for target in [
+                ftp_target.as_str(),
+                "file:///etc/passwd",
+                "javascript:alert(1)",
+            ] {
+                let error = audit_page(&store, target)
+                    .await
+                    .expect_err("non-HTTP(S) schemes must be rejected");
+                assert!(
+                    matches!(error, AuditError::InvalidTarget(_)),
+                    "expected InvalidTarget, got {error:?}"
+                );
+            }
+            assert_eq!(hits.load(Ordering::SeqCst), 0);
+        }
+
+        /// Case G: an unobserved `http://` target never produces
+        /// `security.https.missing` — nor any other `Finding`: no rule
+        /// may fire on URL-only/synthetic facts.
+        #[tokio::test]
+        async fn unobserved_http_target_never_fires_https_missing_or_any_rule() {
+            let store = DomainPersistence::open_in_memory().await.unwrap();
+            let url = closed_port_url();
+
+            let result = audit_page(&store, &url).await.unwrap();
+
+            assert_eq!(result.outcome(), PageAuditOutcome::TargetUnobserved);
+            assert!(result
+                .findings()
+                .iter()
+                .all(|f| f.rule_id() != SECURITY_HTTPS_MISSING_RULE_ID));
+            assert!(result.findings().is_empty());
+        }
+
+        /// The outcome's wire representation is a stable, explicit
+        /// contract (`"evaluated"` / `"target_unobserved"`) — adapters
+        /// serialize it verbatim and must be able to rely on these exact
+        /// strings.
+        #[test]
+        fn outcome_wire_representation_is_stable_and_explicit() {
+            assert_eq!(
+                serde_json::to_value(PageAuditOutcome::Evaluated).unwrap(),
+                serde_json::json!("evaluated")
+            );
+            assert_eq!(
+                serde_json::to_value(PageAuditOutcome::TargetUnobserved).unwrap(),
+                serde_json::json!("target_unobserved")
+            );
+            assert_eq!(
+                serde_json::from_value::<PageAuditOutcome>(serde_json::json!("target_unobserved"))
+                    .unwrap(),
+                PageAuditOutcome::TargetUnobserved
+            );
         }
     }
 }

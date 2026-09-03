@@ -18,21 +18,28 @@
 //! process output.
 
 use serde::Serialize;
-use spider::features::audit::{audit_page, AuditError, Finding, ObservedTechnologyMarker};
+use spider::features::audit::{
+    audit_page, AuditError, Finding, ObservedTechnologyMarker, PageAuditOutcome,
+};
 use spider::features::domain_runtime::{open_shared_domain_store, DomainRuntimeError};
 use spider::features::identity::EvidenceId;
 use std::path::PathBuf;
 
 /// Thin, presentation-only wire projection of one canonical
-/// `PageAuditResult`. Reuses `Finding`'s and `ObservedTechnologyMarker`'s
-/// own `Serialize` implementations verbatim — no field is re-derived,
-/// renamed, reordered, or reinterpreted; `evidence_ref` is the exact
+/// `PageAuditResult`. Reuses `Finding`'s, `ObservedTechnologyMarker`'s,
+/// and `PageAuditOutcome`'s own `Serialize` implementations verbatim —
+/// no field is re-derived, renamed, reordered, or reinterpreted;
+/// `outcome` is the exact [`PageAuditOutcome`]
+/// `PageAuditResult::outcome()` already carries (`"evaluated"` /
+/// `"target_unobserved"`), never re-derived here from status codes,
+/// evidence fields, or content; `evidence_ref` is the exact
 /// `EvidenceId` `PageAuditResult::evidence_ref()` already carries, never
 /// a minted, hashed, or translated identity. Field-for-field identical
 /// to `spider_mcp::tools::audit::AuditPageResponse` and
 /// `scorpion_app::audit::AuditResponse`.
 #[derive(Serialize)]
 struct AuditOutput {
+    outcome: PageAuditOutcome,
     evidence_ref: EvidenceId,
     findings: Vec<Finding>,
     technology_markers: Vec<ObservedTechnologyMarker>,
@@ -68,6 +75,7 @@ async fn run_audit_with_environment(
         .map_err(|error| map_audit_error(&error))?;
 
     let output = AuditOutput {
+        outcome: result.outcome(),
         evidence_ref: result.evidence_ref().id(),
         findings: result.findings().to_vec(),
         technology_markers: result.technology_markers().to_vec(),
@@ -100,6 +108,9 @@ fn map_store_error(error: DomainRuntimeError) -> String {
 /// `scorpion_app::audit::map_canonical_audit_error` exactly.
 fn map_audit_error(error: &AuditError) -> String {
     match error {
+        AuditError::InvalidTarget(_) => {
+            "invalid audit target: the target must be a valid http(s) URL".to_string()
+        }
         AuditError::Acquisition(internal) => {
             eprintln!("scorpion audit: acquisition failed: {internal}");
             "failed to acquire the target page".to_string()
@@ -212,6 +223,7 @@ mod tests {
         let json = run_audit_with_environment(&fixture.url(), None, &lookup)
             .await
             .unwrap();
+        assert!(json.contains("\"outcome\": \"evaluated\""));
         assert!(json.contains("\"evidence_ref\": \"evid_"));
         assert!(json.contains("\"findings\": ["));
         assert!(json.contains("\"technology_markers\": ["));
@@ -244,10 +256,31 @@ mod tests {
     async fn malformed_url_fails_deterministically() {
         let path = store_path("malformed-url");
         let lookup = configured_lookup(&path);
-        let error = run_audit_with_environment("not a url", None, &lookup)
-            .await
-            .unwrap_err();
-        assert!(error.contains("failed to acquire the target page"));
+        let fixture = AuditFixture::start("200 OK", "text/html", MINIMAL_HTML);
+        // The bare-address input is exactly what acquisition would
+        // previously have normalized (scheme-prepend) and fetched;
+        // rejection by the canonical engine must precede any of that.
+        let bare_address = fixture
+            .url()
+            .strip_prefix("http://")
+            .unwrap()
+            .trim_end_matches('/')
+            .to_string();
+
+        for url in ["not a url".to_string(), bare_address] {
+            let error = run_audit_with_environment(&url, None, &lookup)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error,
+                "invalid audit target: the target must be a valid http(s) URL"
+            );
+        }
+        assert_eq!(
+            fixture.hit_count(),
+            0,
+            "rejection precedes acquisition — the fixture was never hit"
+        );
     }
 
     #[tokio::test]
@@ -371,6 +404,12 @@ mod tests {
     /// contract `spider_audit_page` (MCP) and `POST /api/audit` (Web
     /// Console) already do, proven here by resolving the produced
     /// evidence and confirming no observed status was fabricated.
+    ///
+    /// SCORPION_AUDIT_TARGET_OBSERVATION_OUTCOME_001: the canonical
+    /// engine now also classifies that completed execution explicitly —
+    /// `"outcome": "target_unobserved"` with zero findings *because no
+    /// rule ran*, projected verbatim from `PageAuditResult::outcome()`,
+    /// never derived in this adapter.
     #[tokio::test]
     async fn unreachable_target_completes_with_no_fabricated_observed_status() {
         let path = store_path("unreachable");
@@ -381,6 +420,9 @@ mod tests {
             .await
             .expect("a request that reached the wire and was refused is Ok, not Err");
         let output: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(output["outcome"], serde_json::json!("target_unobserved"));
+        assert_eq!(output["findings"], serde_json::json!([]));
+        assert_eq!(output["technology_markers"], serde_json::json!([]));
         let evidence_ref: EvidenceId = output["evidence_ref"].as_str().unwrap().parse().unwrap();
 
         let store = spider::features::domain_persistence::DomainPersistence::open(&path)
@@ -401,7 +443,8 @@ mod tests {
 
     /// Phase 5A/B (canonical engine agreement + Finding order): calling
     /// this CLI adapter and calling `audit_page` directly against the
-    /// same deterministic fixture must produce the exact same Finding
+    /// same deterministic fixture must produce the exact same outcome,
+    /// the exact same Finding
     /// sequence (rule_id/version/category/severity/target/observed/
     /// expected conditions, in order) and the exact same technology
     /// markers (source/value, in order) — the two are genuinely separate
@@ -432,6 +475,12 @@ mod tests {
             cli_output["evidence_ref"].as_str().unwrap(),
             direct.evidence_ref().id().to_string(),
             "independent acquisitions must produce distinct evidence identities"
+        );
+
+        assert_eq!(
+            cli_output["outcome"],
+            serde_json::to_value(direct.outcome()).unwrap(),
+            "the CLI adapter must project the canonical outcome verbatim"
         );
 
         let direct_findings = direct.findings();

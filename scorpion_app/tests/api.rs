@@ -1184,6 +1184,7 @@ fn valid_html_audit_returns_200_with_canonical_findings_and_ref() {
     child.kill().unwrap();
 
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("\"outcome\":\"evaluated\""));
     assert!(response.contains("\"evidence_ref\":\"evid_"));
     assert!(response.contains("\"findings\":["));
     assert!(response.contains("\"technology_markers\":["));
@@ -1226,11 +1227,57 @@ fn malformed_audit_url_fails_deterministically() {
     let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
     let response = post_audit(&base, "not a url");
     child.kill().unwrap();
+    // Rejected by the canonical engine *before* any acquisition — a
+    // client-correctable 400 with its own stable code, never a 502
+    // acquisition failure (which now means a real pre-response
+    // acquisition breakdown only) and never a fabricated 200.
     assert!(
-        response.starts_with("HTTP/1.1 502 Bad Gateway"),
+        response.starts_with("HTTP/1.1 400 Bad Request"),
         "{response}"
     );
-    assert!(response.contains("\"code\":\"audit_acquisition_failed\""));
+    assert!(response.contains("\"code\":\"invalid_audit_target\""));
+}
+
+#[test]
+fn non_http_scheme_audit_target_is_400() {
+    let path = audit_db_path("ftp-target");
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, "ftp://example.com/");
+    child.kill().unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 400 Bad Request"),
+        "{response}"
+    );
+    assert!(response.contains("\"code\":\"invalid_audit_target\""));
+}
+
+/// BUG-1 regression: an unobserved target (valid HTTP URL, nothing
+/// listening) completes truthfully as HTTP 200 with an explicit
+/// `target_unobserved` outcome and zero findings — never the
+/// indistinguishable "evaluated with zero findings" shape.
+#[test]
+fn unobserved_audit_target_is_200_with_target_unobserved_outcome() {
+    let path = audit_db_path("unobserved");
+    let _ = std::fs::remove_file(&path);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    let response = post_audit(&base, &format!("http://{addr}/"));
+    child.kill().unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        response.contains("\"outcome\":\"target_unobserved\""),
+        "{response}"
+    );
+    assert!(response.contains("\"findings\":[]"), "{response}");
+    assert!(response.contains("\"technology_markers\":[]"), "{response}");
+    assert!(response.contains("\"evidence_ref\":\"evid_"), "{response}");
+
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

@@ -1900,3 +1900,467 @@ fn one_web_fetch_causes_exactly_one_target_hit_even_with_outbound_links_in_the_b
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------
+// SCORPION_IAM_CALLBACK_INSPECTOR_WEB_UI_001
+//
+// The IAM Callback Inspector Web Console section against the real,
+// compiled `scorpion-api` binary. This section exposes only the three
+// already-shipped `scorpion_app::iam` routes (`POST /api/iam/traces`,
+// `GET /api/iam/traces/{id}`, `GET`/`POST /iam/callback/{id}`, proven by
+// their own acceptance work) through a rendering layer — no new IAM
+// protocol semantics, no new backend route.
+// ---------------------------------------------------------------------
+
+fn iam_db_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "scorpion-api-iam-ui-route-test-{}-{name}.sqlite3",
+        std::process::id()
+    ))
+}
+
+fn post_iam_trace(base: &str) -> String {
+    let url = base.strip_prefix("http://").unwrap();
+    let mut stream = TcpStream::connect(url).unwrap();
+    write!(
+        stream,
+        "POST /api/iam/traces HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn post_iam_callback_form(base: &str, trace_id: &str, form_body: &str) -> String {
+    let url = base.strip_prefix("http://").unwrap();
+    let mut stream = TcpStream::connect(url).unwrap();
+    write!(
+        stream,
+        "POST /iam/callback/{trace_id} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        form_body.len(),
+        form_body
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn extract_json_string_field(body: &str, field: &str) -> Option<String> {
+    let marker = format!("\"{field}\":\"");
+    body.split(&marker)
+        .nth(1)?
+        .split('"')
+        .next()
+        .map(str::to_string)
+}
+
+fn make_jwt(header_json: &str, payload_json: &str, signature_segment: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+    let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+    format!("{header_b64}.{payload_b64}.{signature_segment}")
+}
+
+fn encode_saml(xml: &str) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    STANDARD.encode(xml.as_bytes())
+}
+
+fn url_encode(value: &str) -> String {
+    spider::url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+const IAM_SYNTHETIC_SAML_XML: &str = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_response-ui-test" InResponseTo="_authnrequest-ui-test" Version="2.0" Destination="https://sp.example.invalid/acs">
+  <saml:Issuer>https://idp.example.invalid</saml:Issuer>
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <saml:Assertion ID="_assertion-ui-test" IssueInstant="2026-01-01T00:00:00Z" Version="2.0">
+    <saml:Issuer>https://idp.example.invalid</saml:Issuer>
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">test-user@example.invalid</saml:NameID>
+    </saml:Subject>
+    <saml:Conditions NotBefore="2026-01-01T00:00:00Z" NotOnOrAfter="2026-01-01T01:00:00Z">
+      <saml:AudienceRestriction><saml:Audience>urn:scorpion:test</saml:Audience></saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="test-attribute"><saml:AttributeValue>harmless-test-value</saml:AttributeValue></saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"#;
+
+// 1. IAM section renders.
+#[test]
+fn console_serves_the_iam_callback_inspector_section() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("id=\"iam-heading\""));
+    assert!(response.contains("IAM Callback Inspector"));
+    assert!(response.contains("id=\"iam-new-trace-button\""));
+    assert!(response.contains("id=\"iam-refresh-button\""));
+    assert!(response.contains("id=\"iam-trace-info\""));
+    assert!(response.contains("id=\"iam-timeline\""));
+}
+
+// 2. New Trace calls canonical route. 17. No new IAM backend route
+// introduced unnecessarily — exactly the three already-shipped routes
+// are referenced by this console, and main.rs itself declares no more.
+#[test]
+fn iam_console_new_trace_calls_the_canonical_create_route_and_no_new_route_exists() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.contains("fetch('/api/iam/traces', { method: 'POST' })"));
+    assert!(response.contains("fetch(`/api/iam/traces/${encodeURIComponent("));
+
+    let main_source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert_eq!(
+        main_source.matches("path == \"/api/iam/traces\"").count(),
+        1
+    );
+    assert_eq!(
+        main_source
+            .matches("path.starts_with(\"/api/iam/traces/\")")
+            .count(),
+        1
+    );
+    assert_eq!(
+        main_source
+            .matches("path.starts_with(\"/iam/callback/\")")
+            .count(),
+        1
+    );
+}
+
+// 3. Returned callback URI displayed exactly — as inert text, never
+// reconstructed or re-derived from the trace id client-side.
+#[test]
+fn iam_console_renders_the_callback_uri_verbatim_as_inert_text() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.contains("iamCallbackUri = payload.callback_uri"));
+    assert!(response.contains("uriCode.appendChild(text(iamCallbackUri))"));
+}
+
+// 4/5. AwaitingCallback and Received both shown correctly, end to end
+// against the real trace-state machine.
+#[test]
+fn iam_awaiting_and_received_states_round_trip_through_the_real_server() {
+    let path = iam_db_path("state-round-trip");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let create_response = post_iam_trace(&base);
+    assert!(
+        create_response.starts_with("HTTP/1.1 201 Created"),
+        "{create_response}"
+    );
+    let trace_id = extract_json_string_field(&create_response, "trace_id")
+        .expect("create response must contain trace_id");
+
+    let readback_before = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    assert!(
+        readback_before.contains("\"state\":\"awaiting_callback\""),
+        "{readback_before}"
+    );
+
+    let callback_response = post_iam_callback_form(&base, &trace_id, "code=abc123&state=xyz");
+    assert!(
+        callback_response.starts_with("HTTP/1.1 200 OK"),
+        "{callback_response}"
+    );
+
+    let readback_after = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    child.kill().unwrap();
+    assert!(
+        readback_after.contains("\"state\":\"received\""),
+        "{readback_after}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// The console must render AWAITING CALLBACK / RECEIVED with genuinely
+// distinct badge classes — never the same tone for both.
+#[test]
+fn iam_console_distinguishes_awaiting_and_received_state_badges() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.contains("received ? 'iam-badge-observed' : 'iam-badge-not_validated'"));
+    assert!(response.contains("received ? 'RECEIVED' : 'AWAITING CALLBACK'"));
+}
+
+// 6. A generic Observed fact is both produced by the real server and
+// rendered through the Observed badge path.
+#[test]
+fn iam_generic_observed_fact_is_persisted_and_console_renders_observed_badge() {
+    let path = iam_db_path("generic-observed");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let trace_id = extract_json_string_field(&post_iam_trace(&base), "trace_id").unwrap();
+    // `foo` is not on the sensitive-name list (unlike `code`, `state`,
+    // `id_token`, etc.), so this stays Generic protocol and Observed —
+    // a genuine plain-Observed generic fact.
+    post_iam_callback_form(&base, &trace_id, "foo=bar123");
+    let readback = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    child.kill().unwrap();
+    assert!(readback.contains("\"name\":\"foo\""), "{readback}");
+    assert!(
+        readback.contains("\"observed\":{\"value\":\"bar123\"}"),
+        "{readback}"
+    );
+
+    let console =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(console.contains("case 'observed': return 'OBSERVED';"));
+    assert!(console.contains(".iam-badge-observed { background:"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// 7. A Redacted fact's digest is persisted and the console only ever
+// reads the digest field — never a plaintext value off the Redacted
+// variant (which structurally has no such field).
+#[test]
+fn iam_redacted_fact_carries_only_a_digest_and_console_never_reads_a_plaintext_field() {
+    let path = iam_db_path("redacted-digest");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let trace_id = extract_json_string_field(&post_iam_trace(&base), "trace_id").unwrap();
+    post_iam_callback_form(&base, &trace_id, "access_token=super-secret-value");
+    let readback = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    child.kill().unwrap();
+    assert!(readback.contains("\"name\":\"access_token\""), "{readback}");
+    assert!(
+        readback.contains("\"redacted\":{\"sha256_digest\":"),
+        "{readback}"
+    );
+    assert!(!readback.contains("super-secret-value"), "{readback}");
+
+    let console =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(console.contains("case 'redacted': return `digest: ${status.redacted.sha256_digest}`;"));
+    assert!(!console.contains("status.redacted.value"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// 8. NOT_VALIDATED is visually distinct from OBSERVED — different CSS
+// classes, different colors, never sharing a "success" tone.
+#[test]
+fn iam_console_not_validated_badge_is_visually_distinct_from_observed() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.contains(".iam-badge-observed { background: #e3ecff; color: #1447b8; }"));
+    assert!(response.contains(".iam-badge-not_validated { background: #fff2d6; color: #8a5a00; }"));
+    assert_ne!(response.matches(".iam-badge-observed {").next(), None);
+    // Distinct color values (never the same background/foreground pair).
+    assert!(!response.contains(".iam-badge-not_validated { background: #e3ecff; color: #1447b8; }"));
+}
+
+// 9/10. OIDC/JWT facts render, with signature verification always
+// NOT_VALIDATED — proven end to end against the real server with a
+// synthetic id_token.
+#[test]
+fn iam_oidc_jwt_facts_render_with_signature_verification_not_validated() {
+    let path = iam_db_path("oidc-jwt");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let jwt = make_jwt(
+        r#"{"alg":"RS256","typ":"JWT","kid":"key-1"}"#,
+        r#"{"iss":"https://idp.example.invalid","aud":"scorpion-test-client","exp":4102444800,"iat":1700000000,"nonce":"nonce-value-123"}"#,
+        "fake-signature",
+    );
+    let form_body = format!("id_token={}&state=xyz", url_encode(&jwt));
+    let trace_id = extract_json_string_field(&post_iam_trace(&base), "trace_id").unwrap();
+    post_iam_callback_form(&base, &trace_id, &form_body);
+    let readback = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    child.kill().unwrap();
+
+    assert!(readback.contains("\"protocol\":\"oidc\""), "{readback}");
+    assert!(readback.contains("\"jwt.iss\""), "{readback}");
+    assert!(
+        readback.contains("\"https://idp.example.invalid\""),
+        "{readback}"
+    );
+    assert!(readback.contains("\"jwt.aud\""), "{readback}");
+    assert!(readback.contains("\"jwt.nonce\""), "{readback}");
+    assert!(
+        readback.contains(
+            "{\"name\":\"jwt.signature.verification\",\"status\":{\"not_validated\":{\"value\":\"not_attempted\"}}}"
+        ),
+        "{readback}"
+    );
+
+    let console =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(console.contains("'jwt.iss': 'Issuer'"));
+    assert!(console.contains("'jwt.signature.verification': 'Signature verification'"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// 11/12. SAML facts render, with signature verification always
+// NOT_VALIDATED — proven end to end against the real server with a
+// synthetic SAMLResponse.
+#[test]
+fn iam_saml_facts_render_with_signature_verification_not_validated() {
+    let path = iam_db_path("saml-facts");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let saml_b64 = encode_saml(IAM_SYNTHETIC_SAML_XML);
+    let form_body = format!("SAMLResponse={}", url_encode(&saml_b64));
+    let trace_id = extract_json_string_field(&post_iam_trace(&base), "trace_id").unwrap();
+    post_iam_callback_form(&base, &trace_id, &form_body);
+    let readback = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    child.kill().unwrap();
+
+    assert!(readback.contains("\"protocol\":\"saml\""), "{readback}");
+    assert!(readback.contains("\"saml.response.id\""), "{readback}");
+    assert!(readback.contains("\"_response-ui-test\""), "{readback}");
+    assert!(readback.contains("\"saml.name_id\""), "{readback}");
+    assert!(
+        readback.contains("\"test-user@example.invalid\""),
+        "{readback}"
+    );
+    assert!(
+        readback.contains("\"saml.attribute.value[test-attribute]\""),
+        "{readback}"
+    );
+    assert!(
+        readback.contains(
+            "{\"name\":\"saml.signature.verification\",\"status\":{\"not_validated\":{\"value\":\"not_attempted\"}}}"
+        ),
+        "{readback}"
+    );
+
+    let console =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(console.contains("'saml.name_id': 'NameID'"));
+    assert!(console.contains("'saml.signature.verification': 'Signature verification'"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// 13. Multiple observations on the same trace render in revision order
+// — proven by asserting the server's own JSON emits revision 1 before
+// revision 2 (the console renders `payload.observations` as received,
+// with no client-side re-sort — see `renderIamTimeline`).
+#[test]
+fn iam_multiple_observations_are_returned_in_revision_order() {
+    let path = iam_db_path("multi-observation-order");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+
+    let trace_id = extract_json_string_field(&post_iam_trace(&base), "trace_id").unwrap();
+    post_iam_callback_form(&base, &trace_id, "foo=first-callback");
+    post_iam_callback_form(&base, &trace_id, "foo=second-callback");
+    let readback = get(&base, &format!("/api/iam/traces/{trace_id}"));
+    child.kill().unwrap();
+
+    let first_index = readback
+        .find("first-callback")
+        .expect("first callback must be present");
+    let second_index = readback
+        .find("second-callback")
+        .expect("second callback must be present");
+    assert!(first_index < second_index, "{readback}");
+    let revision_1 = readback
+        .find("\"revision\":1")
+        .expect("revision 1 must be present");
+    let revision_2 = readback
+        .find("\"revision\":2")
+        .expect("revision 2 must be present");
+    assert!(revision_1 < revision_2, "{readback}");
+
+    let console =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(console.contains(
+        "for (const view of observations) list.appendChild(renderIamObservation(view));"
+    ));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// 14/15. No raw id_token or SAMLResponse reconstruction anywhere in the
+// console's JavaScript — no base64/JWT/XML decoding primitive exists in
+// the file at all; the console only ever renders the already-decoded
+// facts the server computed.
+#[test]
+fn iam_console_never_reconstructs_raw_id_token_or_saml_response_client_side() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(!response.contains("atob("));
+    assert!(!response.contains("btoa("));
+    assert!(!response.contains("DOMParser"));
+    assert!(!response.contains("jwt_decode"));
+    assert!(!response.contains(".split('.')"));
+}
+
+// 16. Existing Fetch/Audit/Evidence/Research sections remain present
+// and functional on the same page as the new IAM section.
+#[test]
+fn iam_section_coexists_with_every_pre_existing_console_section() {
+    let (mut child, base) = api_server(None);
+    let response = get(&base, "/");
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(response.contains("id=\"research-heading\""));
+    assert!(response.contains("id=\"evidence-heading\""));
+    assert!(response.contains("id=\"audit-heading\""));
+    assert!(response.contains("id=\"fetch-heading\""));
+    assert!(response.contains("id=\"iam-heading\""));
+    assert!(response.contains("fetch('/api/search'"));
+    assert!(response.contains("fetch('/api/research'"));
+    assert!(response.contains("fetch('/api/audit'"));
+    assert!(response.contains("fetch('/api/fetch'"));
+    assert!(response.contains("fetch('/api/iam/traces'"));
+}
+
+// Malformed-input error handling: a truthful readback error for an
+// unknown trace id (trace not found), never a fabricated empty-success
+// render.
+#[test]
+fn iam_readback_of_an_unknown_trace_returns_a_truthful_not_found_error() {
+    let path = iam_db_path("unknown-trace");
+    let _ = std::fs::remove_file(&path);
+    let db = path.to_string_lossy().to_string();
+    let (mut child, base) = api_server_with_env(&[("SCORPION_DOMAIN_DB", &db)]);
+    // A syntactically well-formed (correct prefix, correct hex length)
+    // but never-minted trace id — must resolve to trace_not_found, not
+    // invalid_trace_id.
+    let response = get(
+        &base,
+        "/api/iam/traces/iam_trace_00000000000000000000000000000000",
+    );
+    child.kill().unwrap();
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+    assert!(
+        response.contains("\"code\":\"trace_not_found\""),
+        "{response}"
+    );
+
+    let console =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(console
+        .contains("iamShowError(payload?.error?.message || 'Trace readback is unavailable.')"));
+
+    let _ = std::fs::remove_file(&path);
+}

@@ -509,7 +509,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .audit-field { margin: .2rem 0; overflow-wrap: anywhere; }
     .audit-finding { margin: 0 0 1rem; padding: .6rem 0 .6rem .8rem; border-left: 3px solid #d6dce3; }
     #audit-result pre { background: #eef1f5; border: 1px solid #d6dce3; border-radius: .4rem; padding: .75rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre, #audit-result pre { background: #1b222c; border-color: #536170; } .audit-finding { border-left-color: #536170; } .evidence-actions a { background: #1b222c; } .citation-link { color: #6ea8ff; } .citation-link:hover, .citation-link:focus-visible { color: #9cc4ff; } }
+    .iam-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin: 0 0 1rem; }
+    #iam-status.error { color: #b42318; }
+    .iam-field { margin: .25rem 0; overflow-wrap: anywhere; }
+    .iam-field code { background: #eef1f5; border-radius: .3rem; padding: .1rem .35rem; overflow-wrap: anywhere; }
+    /* Two-tier badge palette only: OBSERVED/VALIDATED read as neutral or
+       confirmed, NOT_VALIDATED/REDACTED read as an explicit warning/inert
+       tone — NOT_VALIDATED must never share a color with a success state,
+       and REDACTED must visually signal "sensitive material withheld". */
+    .iam-badge { display: inline-block; padding: .1rem .5rem; border-radius: .3rem; font-size: .72rem; font-weight: 700; letter-spacing: .03em; margin-right: .4rem; text-transform: uppercase; white-space: nowrap; }
+    .iam-badge-observed { background: #e3ecff; color: #1447b8; }
+    .iam-badge-validated { background: #dff5e6; color: #147a3a; }
+    .iam-badge-not_validated { background: #fff2d6; color: #8a5a00; }
+    .iam-badge-redacted { background: #eceef1; color: #45505c; }
+    .iam-fact { margin: .3rem 0; overflow-wrap: anywhere; }
+    .iam-group { margin: .8rem 0; padding: .65rem .85rem; border: 1px solid #d6dce3; border-radius: .5rem; }
+    .iam-group h5 { margin: 0 0 .3rem; }
+    .iam-notice { color: #536170; font-size: .85rem; margin: 0 0 .6rem; }
+    .iam-timeline { list-style: none; padding: 0; }
+    .iam-observation { margin: 0 0 1.4rem; padding: .85rem 1rem; border: 1px solid #d6dce3; border-radius: .6rem; }
+    @media (prefers-color-scheme: dark) { body { background: #101418; color: #e6edf3; } input { background: #1b222c; color: #e6edf3; border-color: #536170; } #evidence-result pre, #audit-result pre { background: #1b222c; border-color: #536170; } .audit-finding { border-left-color: #536170; } .evidence-actions a, .iam-field code { background: #1b222c; } .citation-link { color: #6ea8ff; } .citation-link:hover, .citation-link:focus-visible { color: #9cc4ff; } .iam-group, .iam-observation { border-color: #536170; } .iam-badge-observed { background: #16305c; color: #bcd4ff; } .iam-badge-validated { background: #123822; color: #9fe6b8; } .iam-badge-not_validated { background: #4a3600; color: #ffd98a; } .iam-badge-redacted { background: #2a2f36; color: #c7ced6; } }
   </style>
 </head>
 <body>
@@ -567,6 +586,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
       </form>
       <div id="fetch-status" role="status" aria-live="polite"></div>
       <div id="fetch-result"></div>
+    </section>
+    <section aria-labelledby="iam-heading">
+      <h2 id="iam-heading">IAM Callback Inspector</h2>
+      <p class="tagline">Inspect OAuth2/OIDC/SAML material the canonical IAM trace receiver observed at a real loopback callback — decoded structurally only, never cryptographically verified.</p>
+      <div class="iam-actions">
+        <button id="iam-new-trace-button" type="button">New Trace</button>
+        <button id="iam-refresh-button" type="button" disabled>Refresh</button>
+      </div>
+      <div id="iam-status" role="status" aria-live="polite"></div>
+      <div id="iam-trace-info"></div>
+      <div id="iam-timeline"></div>
     </section>
   </main>
   <script>
@@ -1131,6 +1161,314 @@ const INDEX_HTML: &str = r#"<!doctype html>
         renderFetchError('Fetch is temporarily unavailable.');
       } finally {
         fetchButton.disabled = false;
+      }
+    });
+
+    // IAM Callback Inspector — exposes exactly the existing canonical
+    // routes (POST /api/iam/traces, GET /api/iam/traces/{id}) already
+    // proven by scorpion_app::iam; this section adds no new IAM protocol
+    // semantics and no new backend route. Every fact value (Observed,
+    // NotValidated, or a Redacted digest) is target/callback-controlled
+    // content and is rendered exclusively through the same
+    // createTextNode-based text() helper used throughout this file —
+    // never as markup. Redacted facts only ever carry a sha256_digest
+    // field (see spider::features::iam_trace::IamFactStatus) — there is
+    // no raw value to reconstruct even if this code wanted to.
+    const iamNewTraceButton = document.getElementById('iam-new-trace-button');
+    const iamRefreshButton = document.getElementById('iam-refresh-button');
+    const iamStatus = document.getElementById('iam-status');
+    const iamTraceInfo = document.getElementById('iam-trace-info');
+    const iamTimeline = document.getElementById('iam-timeline');
+    let iamGeneration = 0;
+    let iamPollTimer = null;
+    let iamCurrentTraceId = null;
+    let iamCallbackUri = null;
+    const IAM_POLL_INTERVAL_MS = 2000;
+    const IAM_MAX_POLL_ATTEMPTS = 60; // ~2 minutes of client-side polling — no background server scheduling is introduced by this.
+
+    function iamShowError(message) {
+      iamStatus.className = 'error';
+      iamStatus.replaceChildren(text(message));
+    }
+    function iamField(label, value) {
+      const row = document.createElement('div');
+      row.className = 'iam-field';
+      const term = document.createElement('strong');
+      term.appendChild(text(label + ': '));
+      row.append(term, text(value === null || value === undefined ? '(absent)' : String(value)));
+      return row;
+    }
+    // Determines which of the four canonical IamFactStatus variants a
+    // fact carries by presence of its one wire key — mirrors the exact
+    // #[serde(rename_all = "snake_case")] enum tagging
+    // spider::features::iam_trace::IamFactStatus serializes with.
+    function iamStatusKind(status) {
+      if (!status) return 'unknown';
+      if ('observed' in status) return 'observed';
+      if ('validated' in status) return 'validated';
+      if ('not_validated' in status) return 'not_validated';
+      if ('redacted' in status) return 'redacted';
+      return 'unknown';
+    }
+    function iamStatusBadgeLabel(kind) {
+      switch (kind) {
+        case 'observed': return 'OBSERVED';
+        case 'validated': return 'VALIDATED';
+        case 'not_validated': return 'NOT VALIDATED';
+        case 'redacted': return 'REDACTED';
+        default: return 'UNKNOWN';
+      }
+    }
+    // REDACTED never renders anything but the digest field — there is no
+    // other field on that variant to accidentally expose.
+    function iamStatusValueText(status, kind) {
+      switch (kind) {
+        case 'observed': return status.observed.value;
+        case 'validated': return status.validated.value;
+        case 'not_validated': return status.not_validated.value;
+        case 'redacted': return `digest: ${status.redacted.sha256_digest}`;
+        default: return '(unrecognized status)';
+      }
+    }
+    // Purely cosmetic display names for the fixed, already-existing fact
+    // names scorpion_app::iam emits (see its jwt.*/saml.* push_fact call
+    // sites) — this map adds no new fact, and any fact name absent from
+    // it (every raw OAuth2/OIDC/generic callback parameter, plus any
+    // future fact this map hasn't been updated for) falls back to its
+    // literal wire name so nothing is ever silently hidden.
+    const iamFactLabels = {
+      'jwt.header.alg': 'JWT alg', 'jwt.header.typ': 'JWT typ', 'jwt.header.kid': 'JWT kid',
+      'jwt.iss': 'Issuer', 'jwt.aud': 'Audience', 'jwt.exp': 'Expiration',
+      'jwt.iat': 'Issued At', 'jwt.nbf': 'Not Before', 'jwt.nonce': 'Nonce',
+      'jwt.signature.present': 'Signature present', 'jwt.signature.verification': 'Signature verification',
+      'jwt.decode_error': 'Decode error',
+      'saml.response.id': 'Response ID', 'saml.response.destination': 'Destination',
+      'saml.response.version': 'Version', 'saml.response.in_response_to': 'InResponseTo',
+      'saml.issuer': 'Issuer', 'saml.status.code': 'Status', 'saml.status.message': 'Status message',
+      'saml.assertion.id': 'Assertion ID', 'saml.assertion.issue_instant': 'Assertion IssueInstant',
+      'saml.name_id': 'NameID', 'saml.name_id.format': 'NameID Format',
+      'saml.conditions.not_before': 'Conditions NotBefore', 'saml.conditions.not_on_or_after': 'Conditions NotOnOrAfter',
+      'saml.audience': 'Audience', 'saml.attribute.name': 'Attribute name',
+      'saml.response.signature.present': 'Response signature present',
+      'saml.assertion.signature.present': 'Assertion signature present',
+      'saml.signature.verification': 'Signature verification', 'saml.decode_error': 'Decode error',
+    };
+    const samlAttributeValuePattern = /^saml\.attribute\.value\[(.+)\]$/;
+    function iamFactLabel(name) {
+      if (iamFactLabels[name]) return iamFactLabels[name];
+      const match = samlAttributeValuePattern.exec(name);
+      if (match) return `Attribute: ${match[1]}`;
+      return name;
+    }
+    function iamFactRow(fact) {
+      const kind = iamStatusKind(fact.status);
+      const row = document.createElement('div');
+      row.className = `iam-fact iam-fact-${kind}`;
+      const badge = document.createElement('span');
+      badge.className = `iam-badge iam-badge-${kind}`;
+      badge.appendChild(text(iamStatusBadgeLabel(kind)));
+      const label = document.createElement('strong');
+      label.appendChild(text(iamFactLabel(fact.name) + ': '));
+      row.append(badge, label, text(iamStatusValueText(fact.status, kind)));
+      return row;
+    }
+    function iamGroup(title, notice, facts) {
+      if (!facts.length) return null;
+      const wrap = document.createElement('div');
+      wrap.className = 'iam-group';
+      const h = document.createElement('h5');
+      h.appendChild(text(title));
+      wrap.appendChild(h);
+      if (notice) {
+        const p = document.createElement('p');
+        p.className = 'iam-notice';
+        p.appendChild(text(notice));
+        wrap.appendChild(p);
+      }
+      for (const fact of facts) wrap.appendChild(iamFactRow(fact));
+      return wrap;
+    }
+    // Partitions an observation's facts into the six groups this
+    // frontier asked for. Every fact lands in exactly one group: a
+    // Redacted fact always goes to "Redacted material" regardless of
+    // name; a jwt.*/saml.*-named fact goes to its protocol group;
+    // everything else that carries a Validation-relevant status
+    // (NotValidated/Validated — e.g. the raw OAuth2 `state` parameter)
+    // goes to "Validation"; anything left over is the raw
+    // callback/OAuth parameter bucket. This is a presentation-only
+    // partition over data scorpion_app::iam already computed — it adds
+    // no new classification of its own.
+    function iamGroupFacts(facts) {
+      const buckets = { generic: [], jwt: [], saml: [], validation: [], redacted: [] };
+      for (const fact of facts) {
+        const kind = iamStatusKind(fact.status);
+        if (kind === 'redacted') { buckets.redacted.push(fact); continue; }
+        if (fact.name.startsWith('jwt.')) { buckets.jwt.push(fact); continue; }
+        if (fact.name.startsWith('saml.')) { buckets.saml.push(fact); continue; }
+        if (kind === 'not_validated' || kind === 'validated') { buckets.validation.push(fact); continue; }
+        buckets.generic.push(fact);
+      }
+      return buckets;
+    }
+    function renderIamObservation(view) {
+      const item = document.createElement('li');
+      item.className = 'iam-observation';
+      const obs = view.observation;
+      item.append(
+        iamField('Revision', view.revision),
+        iamField('Recorded at', new Date(view.recorded_at_unix_ms).toISOString()),
+        iamField('Method', obs.method),
+        iamField('Protocol', obs.protocol),
+      );
+      const buckets = iamGroupFacts(obs.facts);
+      const genericTitle = obs.protocol === 'generic' ? 'Callback' : 'OAuth / OIDC';
+      const groups = [
+        iamGroup(genericTitle, null, buckets.generic),
+        iamGroup('JWT', 'Decoded structurally only — never cryptographically verified. alg/typ are never used for a trust decision.', buckets.jwt),
+        iamGroup('SAML', 'Decoded structurally only — no XML-DSig verification is performed.', buckets.saml),
+        iamGroup('Validation', 'Anti-replay/correlation and signature-verification facts. NOT VALIDATED means Scorpion has not checked this value — never read it as a success signal.', buckets.validation),
+        iamGroup('Redacted material', 'Sensitive raw values are never persisted or displayed in plaintext — only a SHA-256 digest of the exact received value.', buckets.redacted),
+      ].filter(Boolean);
+      for (const group of groups) item.appendChild(group);
+      return item;
+    }
+    function renderIamTimeline(observations) {
+      if (!observations.length) {
+        iamTimeline.replaceChildren();
+        return;
+      }
+      // Server-ordered already (SQLite `ORDER BY revision ASC` in
+      // DomainPersistence::read_history) — rendered as received, no
+      // client-side re-sort.
+      const list = document.createElement('ol');
+      list.className = 'iam-timeline';
+      for (const view of observations) list.appendChild(renderIamObservation(view));
+      iamTimeline.replaceChildren(list);
+    }
+    // AWAITING CALLBACK reuses the same warning tone as NOT VALIDATED
+    // and RECEIVED reuses the same neutral tone as OBSERVED — a
+    // presentational choice, not a new status vocabulary: trace state
+    // is a two-value enum (state_label in scorpion_app::iam), not an
+    // IamFactStatus.
+    function renderIamTraceInfo(traceId, state) {
+      const container = document.createElement('div');
+      container.append(iamField('Trace ID', traceId));
+      if (iamCallbackUri) {
+        const uriRow = document.createElement('div');
+        uriRow.className = 'iam-field';
+        const uriTerm = document.createElement('strong');
+        uriTerm.appendChild(text('Callback URI: '));
+        const uriCode = document.createElement('code');
+        uriCode.appendChild(text(iamCallbackUri));
+        const copyButton = document.createElement('button');
+        copyButton.type = 'button';
+        copyButton.appendChild(text('Copy'));
+        copyButton.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(iamCallbackUri);
+            copyButton.replaceChildren(text('Copied'));
+            window.setTimeout(() => copyButton.replaceChildren(text('Copy')), 1500);
+          } catch (_) { /* Clipboard API unavailable — the URI remains visible as selectable text. */ }
+        });
+        uriRow.append(uriTerm, uriCode, text(' '), copyButton);
+        container.append(uriRow);
+      }
+      const stateRow = document.createElement('div');
+      stateRow.className = 'iam-field';
+      const stateTerm = document.createElement('strong');
+      stateTerm.appendChild(text('State: '));
+      const received = state === 'received';
+      const stateBadge = document.createElement('span');
+      stateBadge.className = `iam-badge ${received ? 'iam-badge-observed' : 'iam-badge-not_validated'}`;
+      stateBadge.appendChild(text(received ? 'RECEIVED' : 'AWAITING CALLBACK'));
+      stateRow.append(stateTerm, stateBadge);
+      container.append(stateRow);
+      iamTraceInfo.replaceChildren(container);
+    }
+    async function iamPollTrace(traceId, generation, attempt) {
+      if (generation !== iamGeneration) return;
+      try {
+        const response = await fetch(`/api/iam/traces/${encodeURIComponent(traceId)}`);
+        const payload = await response.json();
+        if (generation !== iamGeneration) return;
+        if (!response.ok) {
+          iamShowError(payload?.error?.message || 'Trace readback is unavailable.');
+          return;
+        }
+        renderIamTraceInfo(payload.trace_id, payload.state);
+        renderIamTimeline(payload.observations);
+        if (payload.observations.length > 0) {
+          iamStatus.className = '';
+          iamStatus.replaceChildren(text(`Trace ${payload.state.replaceAll('_', ' ')} — ${payload.observations.length} observation(s).`));
+          return; // Stop automatic polling once at least one observation has been received; Refresh remains available for later callbacks.
+        }
+        if (attempt + 1 < IAM_MAX_POLL_ATTEMPTS) {
+          iamPollTimer = window.setTimeout(() => iamPollTrace(traceId, generation, attempt + 1), IAM_POLL_INTERVAL_MS);
+        } else {
+          iamStatus.replaceChildren(text('Still awaiting callback. Use Refresh to check again.'));
+        }
+      } catch (_) {
+        if (generation === iamGeneration) iamShowError('Trace readback is temporarily unavailable.');
+      }
+    }
+    iamNewTraceButton.addEventListener('click', async () => {
+      iamGeneration += 1;
+      const generation = iamGeneration;
+      if (iamPollTimer !== null) { window.clearTimeout(iamPollTimer); iamPollTimer = null; }
+      iamNewTraceButton.disabled = true;
+      iamRefreshButton.disabled = true;
+      iamStatus.className = '';
+      iamStatus.replaceChildren(text('Creating trace…'));
+      iamTraceInfo.replaceChildren();
+      iamTimeline.replaceChildren();
+      iamCurrentTraceId = null;
+      iamCallbackUri = null;
+      try {
+        const response = await fetch('/api/iam/traces', { method: 'POST' });
+        const payload = await response.json();
+        if (generation !== iamGeneration) return;
+        if (!response.ok) {
+          iamShowError(payload?.error?.message || 'Trace creation failed.');
+          return;
+        }
+        iamCurrentTraceId = payload.trace_id;
+        iamCallbackUri = payload.callback_uri;
+        renderIamTraceInfo(payload.trace_id, payload.state);
+        iamStatus.replaceChildren(text('Trace created. Waiting for a callback…'));
+        iamRefreshButton.disabled = false;
+        await iamPollTrace(payload.trace_id, generation, 0);
+      } catch (_) {
+        if (generation === iamGeneration) iamShowError('IAM trace creation is temporarily unavailable.');
+      } finally {
+        if (generation === iamGeneration) iamNewTraceButton.disabled = false;
+      }
+    });
+    iamRefreshButton.addEventListener('click', async () => {
+      if (!iamCurrentTraceId) return;
+      // A manual Refresh is itself terminal — it does not schedule
+      // further automatic polling — but bumping the generation first
+      // still prevents a stale in-flight auto-poll response from
+      // clobbering this fresher manual read if both land out of order.
+      iamGeneration += 1;
+      const generation = iamGeneration;
+      if (iamPollTimer !== null) { window.clearTimeout(iamPollTimer); iamPollTimer = null; }
+      iamRefreshButton.disabled = true;
+      try {
+        const response = await fetch(`/api/iam/traces/${encodeURIComponent(iamCurrentTraceId)}`);
+        const payload = await response.json();
+        if (generation !== iamGeneration) return;
+        if (!response.ok) {
+          iamShowError(payload?.error?.message || 'Trace readback is unavailable.');
+          return;
+        }
+        iamStatus.className = '';
+        renderIamTraceInfo(payload.trace_id, payload.state);
+        renderIamTimeline(payload.observations);
+        iamStatus.replaceChildren(text(`Trace ${payload.state.replaceAll('_', ' ')} — ${payload.observations.length} observation(s).`));
+      } catch (_) {
+        if (generation === iamGeneration) iamShowError('Trace readback is temporarily unavailable.');
+      } finally {
+        if (generation === iamGeneration) iamRefreshButton.disabled = false;
       }
     });
   </script>

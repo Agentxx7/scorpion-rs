@@ -414,6 +414,32 @@ impl ResolvedExecutor {
             if let Some(address) = config.local_address {
                 builder = builder.local_address(address);
             }
+            // `reqwest::ClientBuilder::interface` is itself only defined on
+            // this exact platform set (see reqwest's own
+            // `#[cfg(any(...))]` on that method) — this call site had no
+            // guard at all, unlike its sibling a little further down in
+            // this same file (the wreq-backed builder, gated to
+            // ios/macos/watchos/tvos) and
+            // `spider::website::set_interface`'s already-established
+            // no-op fallback for every other platform. First real Windows
+            // build attempt (`SCORPION_WINDOWS_INSTALLABLE_APPLICATION_001`'s
+            // own CI) is what surfaced this — nothing in this workspace had
+            // ever been compiled for a non-interface-supporting target
+            // before. Mirrors that exact, already-decided fallback
+            // behavior: `network_interface` is silently a no-op on an
+            // unsupported platform, never a build failure.
+            #[cfg(any(
+                target_os = "android",
+                target_os = "fuchsia",
+                target_os = "illumos",
+                target_os = "ios",
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "solaris",
+                target_os = "tvos",
+                target_os = "visionos",
+                target_os = "watchos",
+            ))]
             if let Some(interface) = &config.network_interface {
                 builder = builder.interface(interface);
             }

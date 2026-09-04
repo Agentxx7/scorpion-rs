@@ -42,19 +42,30 @@
 //!    deliberate: the observation *is* the evidence a real IAM
 //!    troubleshooting session cares about, so it is made durable before
 //!    anything else is attempted.
-//! 3. Only if that observation's own revision is `1` (this trace's first
-//!    ever observation) is the `AwaitingCallback -> Received` transition
-//!    attempted, via a fresh `read_current`/`CurrentState::apply`/
-//!    `write_current` compare-and-swap. This step is best-effort: if the
-//!    process dies between steps 2 and 3, or the compare-and-swap loses a
-//!    race to another concurrent first callback, the observation from
-//!    step 2 is already safely durable regardless — only the trace's
-//!    coarse `Received` label can lag, and a later `read_trace` still
-//!    shows every observation truthfully. There is no scenario in which a
-//!    successfully-appended observation is lost because of this ordering.
+//! 3. The `AwaitingCallback -> Received` transition is then attempted —
+//!    **on every callback, not only the first** — via a fresh
+//!    `read_current`/`CurrentState::apply`/`write_current` compare-and-swap
+//!    (see [`try_mark_received`]). This step is best-effort and, once a
+//!    trace is genuinely `Received`, a true no-op (`ReceiveCallback`
+//!    rejects re-application; the rejection is discarded). The
+//!    observation from step 2 is always safely durable regardless of
+//!    whether this step succeeds — but the earlier version of this
+//!    module gated this attempt on "only when this observation's own
+//!    revision is `1`", which was a real correctness gap, not a harmless
+//!    simplification: if that one attempt failed (process crash, a
+//!    transient persistence error) between steps 2 and 3, no later
+//!    callback would ever retry it, because no later observation is ever
+//!    revision `1` again — the trace could stay permanently
+//!    `AwaitingCallback` forever despite real, correctly-recorded
+//!    observations accumulating underneath it. Attempting this step
+//!    unconditionally on every callback closes that gap: any subsequent
+//!    callback repairs a trace still stuck `AwaitingCallback`, so the
+//!    "harmless to lose" claim about this step is true *because* of that
+//!    retry, not despite skipping it.
 //! 4. A second (or later) observation under an already-`Received` trace
-//!    never reapplies the transition — it is simply appended at the next
-//!    revision, per `features/iam_trace.rs`'s own documented lifecycle.
+//!    never *needs* the transition to do anything (see step 3) — it is
+//!    simply appended at the next revision, per `features/iam_trace.rs`'s
+//!    own documented lifecycle.
 
 use serde::Serialize;
 use spider::features::domain_persistence::{DomainPersistence, PersistenceError};
@@ -353,14 +364,25 @@ async fn receive_callback_with_environment(
 
     // 3. Durable proof first — see this module's doc comment for the
     // full ordering/atomicity accounting.
-    let revision = append_observation(&store, &trace_id, &observation).await?;
+    let _revision = append_observation(&store, &trace_id, &observation).await?;
 
-    // 4. Only the very first successfully appended observation triggers
-    // the lifecycle transition; later ones are appended without
-    // reapplying it (features/iam_trace.rs's own documented contract).
-    if revision == 1 {
-        try_mark_received(&store, &trace_id).await;
-    }
+    // 4. Attempt the lifecycle transition on *every* callback, not only
+    // when `revision == 1`. This is deliberate self-healing, added after
+    // a real consistency gap was pointed out: gating this on `revision ==
+    // 1` alone meant that if the transition attempt for a trace's very
+    // first observation failed (process crash, transient persistence
+    // error) between steps 3 and 4, no later callback would ever retry
+    // it — `revision` would never be `1` again for that trace, so the
+    // trace could stay permanently `AwaitingCallback` forever despite
+    // real, correctly-recorded observations existing. Calling
+    // `try_mark_received` unconditionally instead costs one extra
+    // read/write on every callback after the first (cheap, and harmless
+    // since it is a no-op once already `Received`), and means any
+    // callback — not just the first — repairs a trace stuck in that
+    // window. See `try_mark_received`'s own doc for what "harmless" now
+    // actually means: it is true because of this unconditional retry,
+    // not despite it.
+    try_mark_received(&store, &trace_id).await;
 
     Ok(ReceiveCallbackOutcome {
         trace_id: trace_id.to_string(),
@@ -408,11 +430,15 @@ async fn append_observation(
     Err(IamError::PersistenceFailed)
 }
 
-/// Best-effort `AwaitingCallback -> Received` transition. Never returns an
-/// error to the caller — losing this race, or the transition being
-/// rejected because the trace is already `Received`, is harmless: the
-/// observation this call is for is already durably recorded regardless
-/// (see this module's doc comment).
+/// Best-effort `AwaitingCallback -> Received` transition, called
+/// unconditionally on *every* callback (see the caller's comment for why
+/// gating this on "only the first observation" was itself the bug). Never
+/// returns an error: losing a compare-and-swap race, or the transition
+/// being rejected because the trace is already `Received`, is a true no-op
+/// — the calling observation is already durably recorded regardless, and
+/// the very next callback (if any) will retry this exact step again, so a
+/// trace can never get permanently stuck `AwaitingCallback` while real
+/// observations accumulate underneath it.
 async fn try_mark_received(store: &DomainPersistence, trace_id: &IamTraceId) {
     let key = trace_id.to_string();
     let Ok(Some((current_revision, state_bytes))) = store.read_current(&key).await else {
@@ -927,6 +953,70 @@ mod tests {
         assert_eq!(readback.observations[1].revision, 2);
         assert_eq!(readback.observations[0].observation.facts[0].name, "first");
         assert_eq!(readback.observations[1].observation.facts[0].name, "second");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Reproduces, directly, the exact consistency gap an owner review
+    /// caught in this frontier's first version: an observation durably
+    /// appended (history has 1 record) while the transition to `Received`
+    /// never completed (current state is still `AwaitingCallback` — as if
+    /// the process had died between the two writes). Proves a *second*
+    /// callback repairs it, rather than staying stuck forever because
+    /// `revision` is never `1` again.
+    #[tokio::test]
+    async fn a_second_callback_repairs_a_trace_stuck_awaiting_callback_despite_prior_history() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+        let trace_id: IamTraceId = created.trace_id.parse().unwrap();
+        let key = trace_id.to_string();
+
+        // Manufacture the exact inconsistent state directly, bypassing
+        // receive_callback entirely: history already has one observation,
+        // but current state is still AwaitingCallback (as if the
+        // transition attempt for it had failed).
+        let store = open_store(&lookup).await.unwrap();
+        let stuck_observation = IamCallbackObservation::new(
+            trace_id,
+            "GET",
+            format!("/iam/callback/{trace_id}"),
+            now_unix_ms(),
+            IamProtocolClassification::Generic,
+            vec![IamFact::observed("stuck", "true")],
+        );
+        store
+            .append_history(
+                &key,
+                1,
+                &serde_json::to_vec(&stuck_observation).unwrap(),
+                SystemTime::now(),
+            )
+            .await
+            .unwrap();
+        // Sanity check the manufactured inconsistency actually exists
+        // before proving the repair.
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(readback.state, "awaiting_callback");
+        assert_eq!(readback.observations.len(), 1);
+
+        // A second, ordinary callback should both append its own
+        // observation *and* repair the stuck state — even though this
+        // observation's own revision is 2, not 1.
+        receive_callback_with_environment(&created.trace_id, "GET", "second=2", None, b"", &lookup)
+            .await
+            .unwrap();
+
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.state, "received",
+            "a later callback must repair a trace stuck AwaitingCallback despite prior history"
+        );
+        assert_eq!(readback.observations.len(), 2);
         let _ = std::fs::remove_file(&path);
     }
 

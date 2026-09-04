@@ -409,7 +409,27 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # itself: `wired_stage_chains_prove_real_call_adjacency_rooted_in_
 # production_source` and `production_reachable_claims_are_grep_
 # verified_against_shipping_manifests` both still pass unchanged.
-reviewed_commit = "93d398af824df6f69ffa97d1279642bdcda57d87"
+# Re-bound again, to 0fc3a5ce: SCORPION_CLI_CRAWL_REJECTED_TARGET_OUTPUT_
+# SEMANTICS_001 edited spider_cli/src/main.rs's CRAWL command
+# `--output-links` stdout handling (gating the successful-link stdout
+# write on `res.observed_status_code.is_some()`, moving the rejected-
+# target diagnostic to stderr) — unrelated to CAPTCHA/chrome semantics,
+# but spider_cli/src/main.rs is itself one of this capability's own
+# closure_relevant_files this time (`verdict_evidence` above cites
+# `crawl_with_mode`'s `website.crawl().await` call under
+# `#[cfg(feature = "chrome")]`), so that byte change alone invalidated
+# 93d398af's binding here too. Confirmed by inspection of the commit's
+# own diff, not merely assumed: the edit is confined to the `Commands::
+# CRAWL` match arm's `output_links` block inside `main()`; `crawl_with_
+# mode` (a distinct function) and every other line this capability's
+# verdict_evidence cites are byte-for-byte untouched. No CAPTCHA
+# detection, solving, provider routing, frame/OOPIF handling, or CI
+# evidence this capability cites changed at all — confirmed empirically
+# by re-running this harness itself:
+# `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
+# source` and `production_reachable_claims_are_grep_verified_against_
+# shipping_manifests` both still pass unchanged.
+reviewed_commit = "0fc3a5ce2f6a4484b3f7559fbdf9baaceafdd6d3"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -524,4 +544,13 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # the complete accounting). The CAPTCHA CI-portable evidence step
 # itself is untouched; every other closure_relevant_file is untouched;
 # no CAPTCHA-relevant fact changed.
-closed_commit = "93d398af824df6f69ffa97d1279642bdcda57d87"
+# Re-bound again, to 0fc3a5ce, for the exact same reason reviewed_
+# commit above was at that time (SCORPION_CLI_CRAWL_REJECTED_TARGET_
+# OUTPUT_SEMANTICS_001's edit to spider_cli/src/main.rs's `Commands::
+# CRAWL` `--output-links` handling, confined to that match arm and
+# confirmed not touching `crawl_with_mode` or any other line this
+# capability's verdict_evidence cites — see that field's own comment
+# in full for the complete accounting). The CAPTCHA CI-portable
+# evidence step itself is untouched; every other closure_relevant_file
+# is untouched; no CAPTCHA-relevant fact changed.
+closed_commit = "0fc3a5ce2f6a4484b3f7559fbdf9baaceafdd6d3"

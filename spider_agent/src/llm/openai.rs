@@ -224,6 +224,12 @@ fn build_completions_body(
         "temperature": options.temperature,
         "max_tokens": options.max_tokens,
     });
+    if let Some(top_p) = options.top_p {
+        body["top_p"] = serde_json::json!(top_p);
+    }
+    if let Some(seed) = options.seed {
+        body["seed"] = serde_json::json!(seed);
+    }
     if let Some(format) = options
         .response_format
         .as_ref()
@@ -304,6 +310,13 @@ fn build_responses_body(
         "input": input_items,
         "temperature": options.temperature,
     });
+
+    if let Some(top_p) = options.top_p {
+        body["top_p"] = serde_json::json!(top_p);
+    }
+    if let Some(seed) = options.seed {
+        body["seed"] = serde_json::json!(seed);
+    }
 
     if !instructions.is_empty() {
         body["instructions"] = serde_json::json!(instructions);
@@ -721,6 +734,46 @@ mod tests {
             body["response_format"],
             serde_json::json!({"type":"json_object"})
         );
+    }
+
+    // SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001:
+    // `top_p`/`seed` are omitted entirely by default, preserving every
+    // existing caller's behavior unchanged (the backend applies its own
+    // default), and present verbatim only when a caller opts in.
+    #[test]
+    fn test_build_completions_body_omits_top_p_and_seed_by_default() {
+        let opts = CompletionOptions::default();
+        let body = build_completions_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("seed").is_none());
+    }
+
+    #[test]
+    fn test_build_completions_body_includes_explicit_top_p_and_seed() {
+        let mut opts = CompletionOptions::default();
+        opts.top_p = Some(1.0);
+        opts.seed = Some(0);
+        let body = build_completions_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert_eq!(body["top_p"], serde_json::json!(1.0));
+        assert_eq!(body["seed"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn test_build_responses_body_omits_top_p_and_seed_by_default() {
+        let opts = CompletionOptions::default();
+        let body = build_responses_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert!(body.get("top_p").is_none());
+        assert!(body.get("seed").is_none());
+    }
+
+    #[test]
+    fn test_build_responses_body_includes_explicit_top_p_and_seed() {
+        let mut opts = CompletionOptions::default();
+        opts.top_p = Some(1.0);
+        opts.seed = Some(0);
+        let body = build_responses_body("gpt-4o", &[Message::user("Hi")], &opts);
+        assert_eq!(body["top_p"], serde_json::json!(1.0));
+        assert_eq!(body["seed"], serde_json::json!(0));
     }
 
     #[test]

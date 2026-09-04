@@ -186,6 +186,13 @@ impl Agent {
             max_tokens: self.config.max_tokens,
             json_mode: self.config.json_mode,
             response_format: None,
+            // Explicitly out of scope for this generic entry point
+            // (`SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001`
+            // deliberately scopes explicit sampling only to Research
+            // synthesis) — `None` preserves this call site's prior,
+            // unchanged behavior.
+            top_p: None,
+            seed: None,
         };
         self.complete_with_options(messages, options).await
     }
@@ -283,6 +290,12 @@ impl Agent {
                 StructuredOutputConfig::strict(research_extraction_schema())
                     .with_name("research_extraction"),
             ),
+            // Per-source extraction is a distinct call site from Research
+            // synthesis and is explicitly out of scope for this frontier
+            // (`SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001`)
+            // — `None` preserves its prior, unchanged behavior.
+            top_p: None,
+            seed: None,
         };
         let response = self.complete_with_options(messages, options).await?;
         if response.content.trim().is_empty() {
@@ -645,6 +658,23 @@ impl Agent {
             )),
         ];
 
+        // Research synthesis is an evidence-derived product output: for
+        // identical topic/acquired-sources/model/prompt/sampling-contract
+        // inputs, Scorpion prefers a reproducible request over inherited
+        // backend/model sampling defaults
+        // (`SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001`).
+        // `top_p = 1.0` disables nucleus truncation as an independent
+        // source of variability, leaving `temperature` as the one active
+        // randomness lever; `RESEARCH_SYNTHESIS_SEED` is a fixed, documented
+        // constant (its exact value carries no semantic meaning). Together
+        // these make Scorpion's own request byte-for-byte reproducible for
+        // identical inputs -- they do NOT and cannot guarantee
+        // byte-identical output from GPU/kernel-level backend execution,
+        // and they are not a substitute for measuring actual model
+        // language-instruction adherence.
+        const RESEARCH_SYNTHESIS_TOP_P: f32 = 1.0;
+        const RESEARCH_SYNTHESIS_SEED: u64 = 0;
+
         let input_bytes = context.len();
         let options = CompletionOptions {
             temperature: self.config.temperature,
@@ -654,6 +684,8 @@ impl Agent {
                 StructuredOutputConfig::strict(research_synthesis_schema(extractions.len()))
                     .with_name("research_synthesis"),
             ),
+            top_p: Some(RESEARCH_SYNTHESIS_TOP_P),
+            seed: Some(RESEARCH_SYNTHESIS_SEED),
         };
         let response = self
             .complete_with_options(messages, options)
@@ -2878,19 +2910,39 @@ mod tests {
         struct ScriptedLlm {
             responses: Mutex<VecDeque<String>>,
             messages: Arc<Mutex<Vec<Vec<Message>>>>,
+            options: Arc<Mutex<Vec<CompletionOptions>>>,
         }
 
         impl ScriptedLlm {
             fn new(responses: &[&str]) -> (Self, Arc<Mutex<Vec<Vec<Message>>>>) {
+                let (llm, messages, _options) = Self::new_capturing_options(responses);
+                (llm, messages)
+            }
+
+            /// Like `new`, but also exposes every `CompletionOptions` the
+            /// agent actually passed to the provider — the contract-level
+            /// proof that explicit sampling fields (`top_p`, `seed`) reached
+            /// the request, independent of message/prompt content
+            /// (`SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001`).
+            fn new_capturing_options(
+                responses: &[&str],
+            ) -> (
+                Self,
+                Arc<Mutex<Vec<Vec<Message>>>>,
+                Arc<Mutex<Vec<CompletionOptions>>>,
+            ) {
                 let messages = Arc::new(Mutex::new(Vec::new()));
+                let options = Arc::new(Mutex::new(Vec::new()));
                 (
                     Self {
                         responses: Mutex::new(
                             responses.iter().map(|value| value.to_string()).collect(),
                         ),
                         messages: messages.clone(),
+                        options: options.clone(),
                     },
                     messages,
+                    options,
                 )
             }
         }
@@ -2900,10 +2952,11 @@ mod tests {
             async fn complete(
                 &self,
                 messages: Vec<Message>,
-                _options: &CompletionOptions,
+                options: &CompletionOptions,
                 _client: &reqwest::Client,
             ) -> AgentResult<CompletionResponse> {
                 self.messages.lock().unwrap().push(messages);
+                self.options.lock().unwrap().push(options.clone());
                 let content = self
                     .responses
                     .lock()
@@ -3571,6 +3624,91 @@ mod tests {
             let user = message_text(&calls[0][1]);
             assert!(system.contains(LANGUAGE_OVERRIDE_CLAUSE));
             assert!(user.contains(&format!("Topic: {topic}")));
+        }
+
+        // ---------------------------------------------------------------
+        // SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001
+        //
+        // CONTRACT CONFORMANCE ONLY: these tests prove Scorpion's own
+        // request carries explicit, reproducible sampling fields. They
+        // prove nothing about whether the real model actually follows the
+        // language instruction -- that is MODEL CONFORMANCE, measured
+        // separately via a bounded real-model reproduction against the
+        // live GPU-backed runtime, never by a unit test against a
+        // scripted/fake LLM.
+        // ---------------------------------------------------------------
+
+        // D. Research synthesis explicitly sets top_p and a fixed seed --
+        // it does not rely on whatever default the backend/model would
+        // otherwise silently apply.
+        #[tokio::test]
+        async fn synthesis_request_sets_explicit_reproducible_sampling_contract() {
+            let (llm, _messages, options) = ScriptedLlm::new_capturing_options(&[
+                r#"{"sufficient":true,"summary":"Gröna, blå och röda färger [Source 1]","source_ids":["Source 1"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let sources = vec![extraction("https://example.test/final", Some("evid_test"))];
+
+            agent
+                .synthesize_research("Madagaskar gecko färger", &sources)
+                .await
+                .unwrap();
+
+            let calls = options.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].top_p, Some(1.0));
+            assert_eq!(calls[0].seed, Some(0));
+            assert!(calls[0].response_format.is_some());
+        }
+
+        // E. The identical fixed seed/top_p apply regardless of the
+        // topic's language -- proving the sampling contract, like the
+        // language instruction itself (tests A/B), carries no per-language
+        // branch.
+        #[tokio::test]
+        async fn synthesis_request_sampling_contract_is_language_independent() {
+            let (llm, _messages, options) = ScriptedLlm::new_capturing_options(&[
+                r#"{"sufficient":true,"summary":"Green, blue, and red colors [Source 1]","source_ids":["Source 1"]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+            let sources = vec![extraction("https://example.test/final", Some("evid_test"))];
+
+            agent
+                .synthesize_research("Colors of Madagascar geckos", &sources)
+                .await
+                .unwrap();
+
+            let calls = options.lock().unwrap();
+            assert_eq!(calls[0].top_p, Some(1.0));
+            assert_eq!(calls[0].seed, Some(0));
+        }
+
+        // F. Scope boundary: per-source extraction is a distinct call site
+        // sharing `CompletionOptions` and must NOT silently inherit
+        // synthesis's explicit sampling contract -- it keeps relying on
+        // backend defaults exactly as before this frontier.
+        #[tokio::test]
+        async fn extraction_request_leaves_sampling_contract_unset() {
+            let (llm, _messages, options) = ScriptedLlm::new_capturing_options(&[
+                r#"{"facts":[{"topic":"Runtime","finding":"Supported"}],"missing_evidence":[]}"#,
+            ]);
+            let mut builder = Agent::builder();
+            builder.llm = Some(Box::new(llm));
+            let agent = builder.build().unwrap();
+
+            agent
+                .extract_research_prepared("source content", "topic", "request")
+                .await
+                .unwrap();
+
+            let calls = options.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].top_p, None);
+            assert_eq!(calls[0].seed, None);
         }
 
         #[tokio::test]

@@ -172,6 +172,22 @@ pub struct CompletionOptions {
     /// Optional structured response format. When set, this takes precedence
     /// over the compatibility `json_mode` flag.
     pub response_format: Option<StructuredOutputConfig>,
+    /// Explicit nucleus-sampling threshold. `None` (the default) omits
+    /// `top_p` from the request entirely, preserving every existing call
+    /// site's behavior unchanged — the backend/model applies its own
+    /// compiled-in default. `Some(_)` makes the value part of Scorpion's
+    /// own request contract instead of an inherited backend default
+    /// (`SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001`).
+    pub top_p: Option<f32>,
+    /// Explicit sampling seed. `None` (the default) omits `seed` from the
+    /// request entirely, preserving every existing call site's behavior
+    /// unchanged — the backend assigns its own (typically randomized) seed.
+    /// `Some(_)` makes Scorpion's own request reproducible for identical
+    /// topic/sources/model/prompt/sampling-contract inputs. This governs
+    /// only the request Scorpion sends; it does not and cannot guarantee
+    /// byte-identical output from GPU/kernel-level backend execution
+    /// (`SCORPION_CANONICAL_RESEARCH_SYNTHESIS_LANGUAGE_CONFORMANCE_CORRECTION_001`).
+    pub seed: Option<u64>,
 }
 
 impl Default for CompletionOptions {
@@ -181,6 +197,8 @@ impl Default for CompletionOptions {
             max_tokens: 4096,
             json_mode: true,
             response_format: None,
+            top_p: None,
+            seed: None,
         }
     }
 }

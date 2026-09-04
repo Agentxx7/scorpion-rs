@@ -4,6 +4,10 @@ use scorpion_app::evidence::{
     export_filename, EvidenceError,
 };
 use scorpion_app::fetch::{fetch_error_json, fetch_error_status, run_fetch, FetchRequest};
+use scorpion_app::iam::{
+    callback_received_page, create_trace, iam_error_json, iam_error_status, read_trace,
+    receive_callback,
+};
 use scorpion_app::{
     error_json, error_status, research_availability, research_error_json, research_error_status,
     search, ResearchAvailability, ResearchError, ResearchRequest, ResearchService, SearchError,
@@ -68,13 +72,27 @@ async fn handle(
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default().to_string();
     let path = parts.next().unwrap_or_default().to_string();
-    let content_length = lines
-        .find_map(|line| {
-            line.strip_prefix("Content-Length:")
-                .or_else(|| line.strip_prefix("content-length:"))
-        })
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+    // Single pass over the remaining header lines: Content-Length was the
+    // only header any existing route needed; the IAM callback receiver
+    // additionally needs Content-Type to distinguish
+    // application/x-www-form-urlencoded from application/json (see
+    // `scorpion_app::iam`). Purely additive — no existing route reads
+    // `content_type`, so this changes nothing for them.
+    let mut content_length: usize = 0;
+    let mut content_type: Option<String> = None;
+    for line in lines {
+        if let Some(value) = line
+            .strip_prefix("Content-Length:")
+            .or_else(|| line.strip_prefix("content-length:"))
+        {
+            content_length = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = line
+            .strip_prefix("Content-Type:")
+            .or_else(|| line.strip_prefix("content-type:"))
+        {
+            content_type = Some(value.trim().to_string());
+        }
+    }
     if content_length > MAX_BODY_BYTES {
         return write_json(
             &mut stream,
@@ -231,6 +249,57 @@ async fn handle(
             .map_err(Into::into),
         };
     }
+    if method == "POST" && path == "/api/iam/traces" {
+        return match create_trace().await {
+            Ok(response) => write_json(&mut stream, 201, &serde_json::to_string(&response)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                iam_error_status(&error),
+                &iam_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
+    if method == "GET" && path.starts_with("/api/iam/traces/") {
+        let raw_id = &path["/api/iam/traces/".len()..];
+        return match read_trace(raw_id).await {
+            Ok(view) => write_json(&mut stream, 200, &serde_json::to_string(&view)?)
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                iam_error_status(&error),
+                &iam_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
+    if (method == "GET" || method == "POST") && path.starts_with("/iam/callback/") {
+        let rest = &path["/iam/callback/".len()..];
+        // Passive receiver: split the trace id off any GET query string
+        // locally, here, rather than changing how the shared `path`
+        // variable above is matched for every other route.
+        let (raw_id, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let body = bytes
+            .get(body_offset..body_offset + content_length)
+            .unwrap_or_default();
+        return match receive_callback(raw_id, &method, query, content_type.as_deref(), body).await {
+            Ok(outcome) => write_html(&mut stream, &callback_received_page(&outcome.trace_id))
+                .await
+                .map_err(Into::into),
+            Err(error) => write_json(
+                &mut stream,
+                iam_error_status(&error),
+                &iam_error_json(&error),
+            )
+            .await
+            .map_err(Into::into),
+        };
+    }
     if method != "POST" || path != "/api/search" {
         return write_json(
             &mut stream,
@@ -358,6 +427,7 @@ async fn write_download(
 async fn write_json(stream: &mut TcpStream, status: u16, body: &str) -> Result<(), std::io::Error> {
     let reason = match status {
         200 => "OK",
+        201 => "Created",
         202 => "Accepted",
         400 => "Bad Request",
         404 => "Not Found",

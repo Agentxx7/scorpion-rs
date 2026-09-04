@@ -16,6 +16,7 @@
 pub mod audit;
 pub mod evidence;
 pub mod fetch;
+pub mod iam;
 
 use serde::{Deserialize, Serialize};
 use spider::agent::{AgentBuilder, ResearchOptions};

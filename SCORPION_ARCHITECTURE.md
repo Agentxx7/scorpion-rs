@@ -189,6 +189,72 @@ not authorized, not defective and not intentionally restricted.
 | Area | Status | Rule |
 |---|---|---|
 | WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14), cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15), change detection (`ChangeResult`/`ChangeEvent`, §3.16), and operational health (`HealthStatus`/`ChangeDetectionReadiness`, §3.17) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, a scheduled run executes through the canonical acquisition/evidence/transition path idempotently, two of a watch's own durable evidence records can be truthfully compared and durably recorded, and the complete pipeline's truthful operational status can be read back without owning any of it. Still blocked, pending its own future frontier: a background scheduler daemon deciding *when* a trigger fires, and a notification system. |
+| IAM Callback Inspector | **DECIDED — NOT STARTED** | Canonical operator-facing diagnostic capability for inspecting what an IAM/federation/IdP/application flow actually sent and received during a callback/redirect exchange (real IAM troubleshooting, not a protocol implementation). See clarification below for the full decision record — V1 protocol scope, the required OBSERVED/VALIDATED/NOT_VALIDATED/REDACTED fact model, and the security contract. No route, schema, persistence table, or test exists yet; nothing here is implemented, surfaced, or live. |
+| Installable Application (Windows-first distribution) | **DECIDED — NOT STARTED** | Scorpion shall be distributable as a normal installable end-user application (Windows first: MSI or signed EXE) that launches the existing `scorpion_app`/`scorpion-api` architecture locally — a distribution/runtime boundary around the existing application, never a second backend. See clarification below for the full decision record — desired operator experience, default runtime posture, and packaging direction. No installer, packaging pipeline, or distribution artifact exists yet. |
+
+**Clarification on IAM Callback Inspector (owner decision,
+`SCORPION_IAM_CALLBACK_INSPECTOR_AND_INSTALLABLE_APPLICATION_OWNER_DECISION_001`):**
+purpose is real IAM/federation troubleshooting — understanding what an IdP,
+application, or federation flow actually sent and received during a
+callback/redirect exchange, not implementing any party's protocol logic.
+V1 protocol scope: generic HTTP GET callback, generic HTTP POST callback,
+`application/x-www-form-urlencoded`, JSON, OAuth2/OIDC callback parameters,
+JWT/OIDC claim inspection, and SAML 2.0 Response/Assertion inspection. V1
+diagnostic facts should be able to include, where applicable: request
+method, callback URL, query/form parameter names, timestamps, trace/
+correlation identity, state comparison, nonce comparison (where an
+originating request is known), issuer, audience, redirect_uri/destination,
+`InResponseTo`, SAML status, `NameID`, assertion attributes, `NotBefore`,
+`NotOnOrAfter`, JWT `exp`/`iat`/`nbf`, signature presence, and signature
+verification result when verification material is explicitly available.
+Every diagnostic fact must be labeled one of `OBSERVED`, `VALIDATED`,
+`NOT_VALIDATED`, or `REDACTED` — an unverified protocol fact must never be
+represented as verified. Security contract: no secret persists by
+default — authorization codes, access tokens, refresh tokens, session
+cookies, client secrets, passwords, and BankID/Freja (or equivalent
+sensitive authentication material) are redacted or non-persisted; a
+one-way digest may be retained instead of a secret value when useful for
+correlation; no automatic credential replay; no automatic token reuse; no
+public listener by default; default network binding stays local/loopback
+unless a later, separate, explicit security decision authorizes
+otherwise. Evidence: IAM diagnostic observations are intended to reuse
+Scorpion's canonical evidence/persistence architecture (§3.6, §3.11)
+rather than introduce a second, unrelated log/evidence system — the exact
+canonical model and redaction boundary is explicitly deferred to a future
+implementation frontier, not decided here. Explicitly out of scope for
+this decision: implementation, BankID-specific protocol logic,
+Freja-specific protocol logic, public internet callback relay/tunnel,
+automatic token exchange/replay, and a credential vault. This is a
+decision record only — nothing described here is implemented, surfaced,
+tested, or live.
+
+**Clarification on Installable Application (owner decision, same
+record):** Scorpion shall be distributable as a normal end-user
+application, Windows first. Desired operator experience: download
+installer, install, launch from the Start Menu/Desktop, local Scorpion
+backend starts automatically, the Scorpion Web UI opens — no repository
+checkout, Cargo installation, WSL setup, or manual build required for
+normal operation. Architecture constraint: this does not create a second
+application/backend architecture — it reuses the existing `scorpion_app`,
+`scorpion-api`, and canonical Spider/Scorpion capabilities (§3.7's Web
+Console row) exactly as they exist today; the installable shell is a
+distribution/runtime boundary around that existing architecture, not a
+duplicate implementation. Default runtime: local execution, loopback
+binding by default, a local application data directory, local SQLite
+persistence where required (§3.11's existing mechanism, not a second
+one), explicit configuration UI/file for external services, truthful
+health/startup status, and no silently bundled credentials. Packaging
+direction: first-class Windows installer (MSI or signed installer EXE);
+later targets may include Linux `.deb` and AppImage, neither required for
+the first Windows milestone. IAM Callback UX target: the installed
+application should eventually expose an IAM debugging area (IAM Callback
+Inspector → New Trace → show callback URI → receive callback → protocol
+detection → decoded facts → validation results → timeline → redacted
+Evidence) built on the capability decided above — this is a future UX
+target, not a current one. Explicitly out of scope for this decision:
+implementation, installer technology selection, and auto-update
+implementation. This is a decision record only — nothing described here
+is implemented, packaged, or distributable yet.
 
 ### 3.9 Identity
 

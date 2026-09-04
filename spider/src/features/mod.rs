@@ -178,10 +178,18 @@ pub mod github_source_provider;
 /// Provider-native Hugging Face model discovery through the official Hub API.
 #[cfg(feature = "source_hugging_face")]
 pub mod hugging_face_source_provider;
+/// Canonical IAM Callback Inspector trace/observation/redaction model —
+/// `IamTraceState`/`ReceiveCallback` (built on `domain_state::Transition`),
+/// `IamCallbackObservation`, and the `IamFactStatus`
+/// OBSERVED/VALIDATED/NOT_VALIDATED/REDACTED vocabulary. Model only: no
+/// network, no HTTP parsing, no JWT/SAML decoding, no persistence I/O.
+/// See `SCORPION_ARCHITECTURE.md` §3.8.
+pub mod iam_trace;
 /// Canonical identity for persisted Scorpion domain objects: `EvidenceId`,
-/// `ResearchId`, `WatchId`, and `AuthSessionId`. Identity only — no
-/// persistence, no state/lifecycle, no domain object. Always available. See
-/// `SCORPION.md` §3 (`EvidenceId`) and `SCORPION_SDD.md` §5.2 (`WatchId`).
+/// `ResearchId`, `WatchId`, `AuthSessionId`, and `IamTraceId`. Identity
+/// only — no persistence, no state/lifecycle, no domain object. Always
+/// available. See `SCORPION.md` §3 (`EvidenceId`) and `SCORPION_SDD.md`
+/// §5.2 (`WatchId`).
 pub mod identity;
 /// Provider-neutral immutable local multi-file model installation, identity,
 /// qualification and offline runtime lifecycle contract.

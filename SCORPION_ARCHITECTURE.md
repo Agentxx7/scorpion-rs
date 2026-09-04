@@ -189,7 +189,7 @@ not authorized, not defective and not intentionally restricted.
 | Area | Status | Rule |
 |---|---|---|
 | WATCH/MONITOR | **PARTIALLY BLOCKED** | `WatchDefinition`/`WatchState` (§3.14), cadence/execution (`WatchSchedule`, `execute_scheduled_watch_run`, §3.15), change detection (`ChangeResult`/`ChangeEvent`, §3.16), and operational health (`HealthStatus`/`ChangeDetectionReadiness`, §3.17) now exist and are canonically owned — `WatchId → WatchDefinition → WatchState → Snapshot(ObserveEvidence) → Transition` is realized end-to-end and persisted, a scheduled run executes through the canonical acquisition/evidence/transition path idempotently, two of a watch's own durable evidence records can be truthfully compared and durably recorded, and the complete pipeline's truthful operational status can be read back without owning any of it. Still blocked, pending its own future frontier: a background scheduler daemon deciding *when* a trigger fires, and a notification system. |
-| IAM Callback Inspector | **DECIDED — NOT STARTED** | Canonical operator-facing diagnostic capability for inspecting what an IAM/federation/IdP/application flow actually sent and received during a callback/redirect exchange (real IAM troubleshooting, not a protocol implementation). See clarification below for the full decision record — V1 protocol scope, the required OBSERVED/VALIDATED/NOT_VALIDATED/REDACTED fact model, and the security contract. No route, schema, persistence table, or test exists yet; nothing here is implemented, surfaced, or live. |
+| IAM Callback Inspector | **PARTIALLY BLOCKED** | Canonical operator-facing diagnostic capability for inspecting what an IAM/federation/IdP/application flow actually sent and received during a callback/redirect exchange (real IAM troubleshooting, not a protocol implementation). See clarification below for the full decision record — V1 protocol scope, the required OBSERVED/VALIDATED/NOT_VALIDATED/REDACTED fact model, and the security contract. `SCORPION_CANONICAL_IAM_TRACE_AND_OBSERVATION_MODEL_001` implemented the pure canonical model — `IamTraceId` (`features/identity.rs`), the `AwaitingCallback`/`Received` trace lifecycle (`features/iam_trace.rs`, built on `domain_state::Transition`), the provider-neutral `IamCallbackObservation`/`IamFact` shape, the `IamFactStatus` OBSERVED/VALIDATED/NOT_VALIDATED/REDACTED vocabulary, and the SHA-256 redaction helper — all with no network, no HTTP route, no JWT/SAML decoding, no persistence I/O, and no Web UI. Still blocked, pending separate future frontiers: the callback receiver/HTTP route, OIDC/JWT and SAML fact decoding, actual `DomainPersistence` wiring, and the Web UI — none of that exists yet, and none of it is claimed here. |
 | Installable Application (Windows-first distribution) | **DECIDED — NOT STARTED** | Scorpion shall be distributable as a normal installable end-user application (Windows first: MSI or signed EXE) that launches the existing `scorpion_app`/`scorpion-api` architecture locally — a distribution/runtime boundary around the existing application, never a second backend. See clarification below for the full decision record — desired operator experience, default runtime posture, and packaging direction. No installer, packaging pipeline, or distribution artifact exists yet. |
 
 **Clarification on IAM Callback Inspector (owner decision,
@@ -224,9 +224,13 @@ canonical model and redaction boundary is explicitly deferred to a future
 implementation frontier, not decided here. Explicitly out of scope for
 this decision: implementation, BankID-specific protocol logic,
 Freja-specific protocol logic, public internet callback relay/tunnel,
-automatic token exchange/replay, and a credential vault. This is a
-decision record only — nothing described here is implemented, surfaced,
-tested, or live.
+automatic token exchange/replay, and a credential vault. This was
+originally a decision record only; `SCORPION_CANONICAL_IAM_TRACE_AND_
+OBSERVATION_MODEL_001` (see the table row above) has since implemented
+the pure canonical trace/observation/redaction model this record
+describes — nothing else described here (the callback receiver, protocol
+decoding, persistence wiring, or Web UI) is implemented, surfaced, tested,
+or live.
 
 **Clarification on Installable Application (owner decision, same
 record):** Scorpion shall be distributable as a normal end-user

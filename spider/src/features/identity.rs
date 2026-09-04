@@ -46,12 +46,29 @@
 //!   authentication). None of those three are redefined, renamed, or
 //!   touched by this type.
 //!
-//! Only these four identity types exist. Do not add `CrawlId`, `FetchId`, a
-//! bare `SessionId`, `JobId`, `OperationId`, or any other identity "for
-//! symmetry" — each new identity type is its own frontier, scoped to a
-//! concept that is actually locked and actually needed next. [`ResearchId`]
-//! names one canonical durable research invocation; its session record and
-//! persistence remain outside this identity-only module.
+//! - [`IamTraceId`] realizes the identity half of the owner-decided IAM
+//!   Callback Inspector (`SCORPION_CANONICAL_IAM_TRACE_AND_OBSERVATION_
+//!   MODEL_001`, `SCORPION_ARCHITECTURE.md` §3.8). Justified by a real
+//!   correlation need, not symmetry: one operator-created troubleshooting
+//!   trace may accumulate multiple callback observations over its
+//!   lifetime, and those observations need a stable identity independent
+//!   of any single one of them — the same relationship [`ResearchId`]
+//!   already has to the many `EvidenceId`s one research invocation
+//!   produces. Lifecycle state and the observation record live in
+//!   `features/iam_trace.rs`, built on this identity and on
+//!   [`crate::features::domain_state`]'s transition contract, exactly as
+//!   [`AuthSessionId`]/`features/auth_session.rs` are related. No
+//!   `IamObservationId` exists — one trace's observations are
+//!   distinguished by persistence revision (see `iam_trace.rs`'s own
+//!   doc), not by a second identity type.
+//!
+//! Only these five identity types exist. Do not add `CrawlId`, `FetchId`,
+//! `IamObservationId`, a bare `SessionId`, `JobId`, `OperationId`, or any
+//! other identity "for symmetry" — each new identity type is its own
+//! frontier, scoped to a concept that is actually locked and actually
+//! needed next. [`ResearchId`] names one canonical durable research
+//! invocation; its session record and persistence remain outside this
+//! identity-only module.
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -517,6 +534,91 @@ impl<'de> serde::Deserialize<'de> for AuthSessionId {
     }
 }
 
+/// Canonical identity for one operator-created IAM Callback Inspector
+/// trace. See this module's own doc comment for the full justification.
+/// Identity only — 16 opaque random bytes, exactly like every other
+/// identity in this module; it cannot hold a callback parameter, a
+/// decoded claim, a token, or any other observed/redacted material,
+/// because there is no field, variant, or constructor through which one
+/// could ever be supplied.
+///
+/// Serialized form: `iam_trace_` followed by 32 lowercase hex characters,
+/// e.g. `iam_trace_0123456789abcdef0123456789abcdef`. The format is fixed
+/// and deterministic — [`IamTraceId::to_string`] always produces it and
+/// [`IamTraceId::from_str`] accepts only it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IamTraceId([u8; ID_BYTES]);
+
+impl IamTraceId {
+    /// Wire-format prefix. Part of the type's serialization contract.
+    pub const PREFIX: &'static str = "iam_trace_";
+
+    /// Mint a fresh, unused-so-far identity. Pure value construction —
+    /// this performs no I/O and records nothing anywhere.
+    pub fn new() -> Self {
+        Self(random_bytes())
+    }
+}
+
+impl Default for IamTraceId {
+    /// Same as [`IamTraceId::new`] — a fresh identity, not a sentinel
+    /// "empty" value (this identity kind has none).
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for IamTraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&format_id(Self::PREFIX, &self.0))
+    }
+}
+
+impl fmt::Debug for IamTraceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "IamTraceId({self})")
+    }
+}
+
+impl FromStr for IamTraceId {
+    type Err = IdentityParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_id(Self::PREFIX, s).map(Self)
+    }
+}
+
+impl TryFrom<&str> for IamTraceId {
+    type Error = IdentityParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl TryFrom<String> for IamTraceId {
+    type Error = IdentityParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for IamTraceId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for IamTraceId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -560,6 +662,37 @@ mod tests {
         assert!(EvidenceId::from_str(&research).is_err());
         assert!(WatchId::from_str(&research).is_err());
         assert!(AuthSessionId::from_str(&research).is_err());
+    }
+
+    #[test]
+    fn iam_trace_id_round_trips_through_display_and_parse() {
+        let id = IamTraceId::new();
+        let text = id.to_string();
+        assert!(text.starts_with(IamTraceId::PREFIX));
+        assert_eq!(text.len(), IamTraceId::PREFIX.len() + ID_BYTES * 2);
+        let parsed: IamTraceId = text.parse().expect("round trip must parse");
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn iam_trace_id_is_distinct_from_every_existing_identity_kind() {
+        assert_ne!(IamTraceId::PREFIX, EvidenceId::PREFIX);
+        assert_ne!(IamTraceId::PREFIX, ResearchId::PREFIX);
+        assert_ne!(IamTraceId::PREFIX, WatchId::PREFIX);
+        assert_ne!(IamTraceId::PREFIX, AuthSessionId::PREFIX);
+        let trace = IamTraceId::new().to_string();
+        assert!(EvidenceId::from_str(&trace).is_err());
+        assert!(ResearchId::from_str(&trace).is_err());
+        assert!(WatchId::from_str(&trace).is_err());
+        assert!(AuthSessionId::from_str(&trace).is_err());
+    }
+
+    #[test]
+    fn distinct_iam_trace_ids_remain_distinct() {
+        let a = IamTraceId::new();
+        let b = IamTraceId::new();
+        assert_ne!(a, b);
+        assert_ne!(a.to_string(), b.to_string());
     }
 
     #[test]

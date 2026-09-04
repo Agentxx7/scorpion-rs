@@ -483,7 +483,10 @@ fn parse_query_facts(query: &str) -> Result<(IamProtocolClassification, Vec<IamF
     let raw_id_token = url::form_urlencoded::parse(query.as_bytes())
         .find(|(name, _)| name == "id_token")
         .map(|(_, value)| value.into_owned());
-    let protocol = finalize_oauth_oidc_facts(&mut facts, raw_id_token)?;
+    let raw_saml_response = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name.eq_ignore_ascii_case("SAMLResponse"))
+        .map(|(_, value)| value.into_owned());
+    let protocol = finalize_iam_facts(&mut facts, raw_id_token, raw_saml_response)?;
     Ok((protocol, facts))
 }
 
@@ -501,7 +504,7 @@ fn parse_post_facts(
                 .to_ascii_lowercase()
         })
         .unwrap_or_default();
-    let (mut facts, raw_id_token) = match media_type.as_str() {
+    let (mut facts, raw_id_token, raw_saml_response) = match media_type.as_str() {
         "application/x-www-form-urlencoded" => {
             let raw = std::str::from_utf8(body).map_err(|_| IamError::MalformedFormEncoding)?;
             validate_percent_encoding(raw)?;
@@ -509,15 +512,22 @@ fn parse_post_facts(
             let raw_id_token = url::form_urlencoded::parse(body)
                 .find(|(name, _)| name == "id_token")
                 .map(|(_, value)| value.into_owned());
-            (facts, raw_id_token)
+            // The primary scope of this frontier: the common SAML 2.0
+            // HTTP-POST binding shape (`application/x-www-form-urlencoded`,
+            // `SAMLResponse=<base64 XML>`). Matched case-insensitively,
+            // unlike `id_token`, since real IdPs vary in casing here.
+            let raw_saml_response = url::form_urlencoded::parse(body)
+                .find(|(name, _)| name.eq_ignore_ascii_case("SAMLResponse"))
+                .map(|(_, value)| value.into_owned());
+            (facts, raw_id_token, raw_saml_response)
         }
         "application/json" => {
             let value: serde_json::Value =
                 serde_json::from_slice(body).map_err(|_| IamError::MalformedJson)?;
             let mut facts = Vec::new();
             flatten_json_facts(&value, "", 0, &mut facts)?;
-            // Only a top-level string `id_token` field is treated as a
-            // JWT to decode — this matches every real OIDC callback
+            // Only a top-level string `id_token`/`SAMLResponse` field is
+            // treated as decodable — this matches every real callback
             // shape and avoids guessing at a nested field's meaning.
             let raw_id_token = match &value {
                 serde_json::Value::Object(map) => map
@@ -526,28 +536,43 @@ fn parse_post_facts(
                     .map(str::to_string),
                 _ => None,
             };
-            (facts, raw_id_token)
+            let raw_saml_response = match &value {
+                serde_json::Value::Object(map) => map
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("SAMLResponse"))
+                    .and_then(|(_, v)| v.as_str())
+                    .map(str::to_string),
+                _ => None,
+            };
+            (facts, raw_id_token, raw_saml_response)
         }
         _ => return Err(IamError::UnsupportedContentType),
     };
-    let protocol = finalize_oauth_oidc_facts(&mut facts, raw_id_token)?;
+    let protocol = finalize_iam_facts(&mut facts, raw_id_token, raw_saml_response)?;
     Ok((protocol, facts))
 }
 
 /// Classify this callback's protocol from the fact *names* already
 /// present (survive redaction — see [`push_fact`]'s own doc), mark the
 /// generic `state` fact `NotValidated` when it is playing its OAuth2/OIDC
-/// correlation role, and append bounded, decode-only `id_token` (JWT)
-/// facts when one was observed. Mutates `facts` in place; returns the
-/// classification.
-fn finalize_oauth_oidc_facts(
+/// correlation role, and append bounded, decode-only `id_token` (JWT) or
+/// `SAMLResponse` facts when one was observed. Mutates `facts` in place;
+/// returns the classification.
+fn finalize_iam_facts(
     facts: &mut Vec<IamFact>,
     raw_id_token: Option<String>,
+    raw_saml_response: Option<String>,
 ) -> Result<IamProtocolClassification, IamError> {
     let has_code = facts.iter().any(|fact| fact.name == "code");
     let has_error = facts.iter().any(|fact| fact.name == "error");
     let has_state = facts.iter().any(|fact| fact.name == "state");
-    let protocol = classify_protocol(raw_id_token.is_some(), has_code, has_error, has_state);
+    let protocol = classify_protocol(
+        raw_saml_response.is_some(),
+        raw_id_token.is_some(),
+        has_code,
+        has_error,
+        has_state,
+    );
     if matches!(
         protocol,
         IamProtocolClassification::OAuth2 | IamProtocolClassification::Oidc
@@ -557,21 +582,30 @@ fn finalize_oauth_oidc_facts(
     if let Some(raw_jwt) = raw_id_token {
         append_id_token_facts(facts, &raw_jwt)?;
     }
+    if let Some(raw_saml) = raw_saml_response {
+        append_saml_response_facts(facts, &raw_saml)?;
+    }
     Ok(protocol)
 }
 
-/// Documented classification precedence: `id_token` presence always wins
-/// (an OIDC callback carrying `code` too is still `Oidc`, never
-/// downgraded to `OAuth2`); otherwise any of `code`/`error`/`state`
+/// Documented classification precedence, in the exact order the owner
+/// decision specifies: `SAMLResponse` presence wins over everything else
+/// (the one deterministic choice for a callback that somehow carries both
+/// a `SAMLResponse` and an `id_token` — contrived, but must resolve one
+/// way); otherwise `id_token` presence classifies `Oidc` (even with
+/// `code`/`state` also present); otherwise any of `code`/`error`/`state`
 /// classifies `OAuth2`; otherwise `Generic`. Never derives from the route
 /// itself — only from these observed names.
 fn classify_protocol(
+    has_saml_response: bool,
     has_id_token: bool,
     has_code: bool,
     has_error: bool,
     has_state: bool,
 ) -> IamProtocolClassification {
-    if has_id_token {
+    if has_saml_response {
+        IamProtocolClassification::Saml
+    } else if has_id_token {
         IamProtocolClassification::Oidc
     } else if has_code || has_error || has_state {
         IamProtocolClassification::OAuth2
@@ -729,6 +763,443 @@ fn decode_id_token(raw_jwt: &str) -> Result<Vec<IamFact>, &'static str> {
     ));
 
     Ok(facts)
+}
+
+// ---------------------------------------------------------------------
+// Bounded, decode-only SAML 2.0 Response/Assertion structural inspection.
+//
+// `SCORPION_IAM_SAML_RESPONSE_INSPECTION_001`. Inspection only: no
+// XML-DSig verification, no X.509 handling, no SAML login/AuthnRequest
+// implementation of any kind. Reuses `spider::quick_xml` (already a
+// re-exported workspace dependency, already used identically for
+// RSS/Atom/sitemap parsing in `spider::features::feed`/`sitemap` —
+// no new dependency). `spider::quick_xml::Reader` performs no DTD/entity
+// resolution and no external I/O of any kind — it is a pure in-memory
+// pull-parser over the byte slice it is given, so "resolve external
+// entities" / "fetch external resources" are structurally impossible
+// here, not merely disabled by configuration; `Event::DocType` is matched
+// and unconditionally ignored below regardless, documenting the decision
+// rather than relying on it silently.
+//
+// NameID/attribute privacy decision (audited, not silently invented):
+// the original owner decision
+// (`SCORPION_IAM_CALLBACK_INSPECTOR_AND_INSTALLABLE_APPLICATION_OWNER_
+// DECISION_001`) explicitly lists `NameID` and "assertion attributes" as
+// required V1 diagnostic facts, and this frontier's own owner-runtime
+// procedure uses a real-shaped NameID (`test-user@example.invalid`) and
+// a literal test attribute, both expected to be directly observable in
+// the result — unlike the OIDC frontier's *new*, narrower exclusion of
+// JWT custom claims (`sub`/`email`/`name`/…), nothing here excludes
+// NameID or attribute values. They are therefore surfaced as ordinary
+// `Observed` facts, bounded exactly like every other value in this
+// module, and (defense in depth) still redacted if an attribute's own
+// name happens to match the existing [`SENSITIVE_NAMES`] list.
+//
+// `saml.response.in_response_to` is `NotValidated`, not `Observed` — the
+// same rationale as `state`/`nonce` in the OIDC frontier: it is a pure
+// anti-replay correlation token with no independent informational value
+// beyond "did this match what we sent," and no expectation-storage model
+// exists to compare it against (see the OIDC frontier's own "state/nonce
+// finding" — unchanged here, nothing new invented). `saml.response.
+// destination`/`saml.audience`/`saml.conditions.not_before`/`saml.
+// conditions.not_on_or_after` are `Observed`, matching how `jwt.aud`/
+// `jwt.exp`/`jwt.iat`/`jwt.nbf` were treated — informational claims with
+// real value even unverified, unlike a bare correlation token.
+// ---------------------------------------------------------------------
+
+/// Maximum raw (base64) `SAMLResponse` bytes. Reuses the existing
+/// per-value callback bound — in practice a `raw_base64` longer than this
+/// already failed the generic per-parameter bound (`IAM_MAX_VALUE_BYTES`)
+/// before reaching here, since `SAMLResponse`'s own value is checked
+/// there too (mirrors [`JWT_MAX_RAW_BYTES`]'s identical reasoning).
+const SAML_MAX_RAW_BASE64_BYTES: usize = IAM_MAX_VALUE_BYTES;
+/// Maximum decoded XML bytes. Deliberately smaller than
+/// [`SAML_MAX_RAW_BASE64_BYTES`] by more than base64's ~4/3 expansion
+/// factor — otherwise, exactly like [`JWT_MAX_DECODED_PAYLOAD_BYTES`],
+/// this bound could never actually be reached.
+const SAML_MAX_DECODED_XML_BYTES: usize = 8 * 1024;
+/// Maximum XML element nesting depth.
+const SAML_MAX_XML_DEPTH: usize = 32;
+/// Maximum number of `Attribute` elements inspected.
+const SAML_MAX_ATTRIBUTES: usize = 32;
+/// Maximum bytes for one captured text value (Issuer, NameID,
+/// StatusMessage, Audience, one AttributeValue, …).
+const SAML_MAX_TEXT_BYTES: usize = IAM_MAX_VALUE_BYTES;
+
+/// Which SAML element (by local name — namespace prefix stripped, exactly
+/// like `spider::features::feed`'s own `local_name()` use) this module
+/// recognizes. Everything else is `Other` — walked over for depth/nesting
+/// accounting only, never inspected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SamlElementKind {
+    Response,
+    Issuer,
+    StatusCode,
+    StatusMessage,
+    Assertion,
+    NameId,
+    Conditions,
+    Audience,
+    Attribute,
+    AttributeValue,
+    Signature,
+    Other,
+}
+
+fn classify_saml_element(local_name: &[u8]) -> SamlElementKind {
+    match local_name {
+        b"Response" => SamlElementKind::Response,
+        b"Issuer" => SamlElementKind::Issuer,
+        b"StatusCode" => SamlElementKind::StatusCode,
+        b"StatusMessage" => SamlElementKind::StatusMessage,
+        b"Assertion" => SamlElementKind::Assertion,
+        b"NameID" => SamlElementKind::NameId,
+        b"Conditions" => SamlElementKind::Conditions,
+        b"Audience" => SamlElementKind::Audience,
+        b"Attribute" => SamlElementKind::Attribute,
+        b"AttributeValue" => SamlElementKind::AttributeValue,
+        b"Signature" => SamlElementKind::Signature,
+        _ => SamlElementKind::Other,
+    }
+}
+
+/// Append this `SAMLResponse`'s derived facts (or, on any decode
+/// failure, one truthful diagnostic fact) to `facts`. Mirrors
+/// [`append_id_token_facts`] exactly: never returns an error for a
+/// malformed/oversized SAMLResponse itself — the callback observation,
+/// `SAMLResponse`'s own `Redacted` fact (from the pre-existing generic
+/// path, untouched), and the `Saml` classification all remain intact
+/// regardless. The only error this can return is the pre-existing global
+/// per-callback fact-count bound.
+fn append_saml_response_facts(facts: &mut Vec<IamFact>, raw_base64: &str) -> Result<(), IamError> {
+    let new_facts = match decode_saml_response(raw_base64) {
+        Ok(decoded) => decoded,
+        Err(reason) => vec![IamFact::not_validated("saml.decode_error", reason)],
+    };
+    if facts.len() + new_facts.len() > IAM_MAX_FACTS {
+        return Err(IamError::ParameterLimitExceeded);
+    }
+    facts.extend(new_facts);
+    Ok(())
+}
+
+/// Decode the base64 `SAMLResponse` parameter into raw XML bytes. Ordinary
+/// (non-URL-safe) Base64, per the SAML 2.0 HTTP-POST binding — distinct
+/// from JWT's base64url. Some real IdPs wrap the base64 across lines;
+/// embedded ASCII whitespace is stripped before decoding (whitespace is
+/// never part of the base64 alphabet, so this cannot mask a genuine
+/// encoding error).
+fn decode_saml_response(raw_base64: &str) -> Result<Vec<IamFact>, &'static str> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    if raw_base64.len() > SAML_MAX_RAW_BASE64_BYTES {
+        return Err("oversized_response");
+    }
+    let cleaned: String = raw_base64.chars().filter(|c| !c.is_whitespace()).collect();
+    let xml_bytes = STANDARD.decode(&cleaned).map_err(|_| "malformed_base64")?;
+    if xml_bytes.len() > SAML_MAX_DECODED_XML_BYTES {
+        return Err("oversized_decoded_xml");
+    }
+    parse_saml_xml(&xml_bytes)
+}
+
+/// One pending text capture: which fact this text belongs to, the stack
+/// depth of the element that opened it (so the matching `End` — and only
+/// that one — closes it, even if unrelated elements happen to nest
+/// inside), and the bounded buffer accumulated so far.
+struct SamlTextCapture {
+    kind: SamlElementKind,
+    depth: usize,
+    buffer: String,
+    attribute_name: Option<String>,
+}
+
+fn attribute_value<'a>(
+    element: &'a spider::quick_xml::events::BytesStart<'a>,
+    reader: &spider::quick_xml::Reader<&[u8]>,
+    name: &[u8],
+) -> Option<String> {
+    element.attributes().flatten().find_map(|attribute| {
+        if attribute.key.local_name().as_ref() == name {
+            attribute
+                .decoded_and_normalized_value(
+                    spider::quick_xml::XmlVersion::Implicit1_0,
+                    reader.decoder(),
+                )
+                .ok()
+                .map(|value| value.into_owned())
+        } else {
+            None
+        }
+    })
+}
+
+/// Bounded, single-pass structural walk of the decoded SAML XML. Fails
+/// closed and truthfully on any malformed XML, excessive nesting, or too
+/// many attributes — never partially fabricates a structural fact it did
+/// not actually observe, never panics.
+fn parse_saml_xml(xml_bytes: &[u8]) -> Result<Vec<IamFact>, &'static str> {
+    use spider::quick_xml::events::Event;
+
+    let mut reader = spider::quick_xml::Reader::from_reader(xml_bytes);
+    reader.config_mut().trim_text(true);
+
+    let mut facts = Vec::new();
+    let mut stack: Vec<SamlElementKind> = Vec::new();
+    let mut capture: Option<SamlTextCapture> = None;
+    let mut saw_issuer = false;
+    let mut saw_name_id = false;
+    let mut saw_audience = false;
+    let mut saw_status_code = false;
+    let mut attribute_count = 0usize;
+    let mut current_attribute_name: Option<String> = None;
+    let mut response_signature_present = false;
+    let mut assertion_signature_present = false;
+
+    loop {
+        let event = reader.read_event().map_err(|_| "malformed_xml")?;
+        let is_empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Eof => break,
+            // Explicitly ignored, never expanded, never resolved — see
+            // this section's module doc for why this is structurally
+            // safe, not merely policy.
+            Event::DocType(_) => continue,
+            Event::Start(element) | Event::Empty(element) => {
+                let kind = classify_saml_element(element.local_name().as_ref());
+                let depth = stack.len();
+
+                match kind {
+                    SamlElementKind::Response if depth == 0 => {
+                        for (name, target) in [
+                            ("ID", "saml.response.id"),
+                            ("Destination", "saml.response.destination"),
+                            ("Version", "saml.response.version"),
+                        ] {
+                            if let Some(value) = attribute_value(&element, &reader, name.as_bytes())
+                            {
+                                push_saml_text_fact(&mut facts, target, value, false)?;
+                            }
+                        }
+                        if let Some(value) = attribute_value(&element, &reader, b"InResponseTo") {
+                            // Pure anti-replay correlation token — see
+                            // this section's module doc.
+                            push_saml_text_fact(
+                                &mut facts,
+                                "saml.response.in_response_to",
+                                value,
+                                true,
+                            )?;
+                        }
+                    }
+                    SamlElementKind::Assertion => {
+                        if let Some(value) = attribute_value(&element, &reader, b"ID") {
+                            push_saml_text_fact(&mut facts, "saml.assertion.id", value, false)?;
+                        }
+                        if let Some(value) = attribute_value(&element, &reader, b"IssueInstant") {
+                            push_saml_text_fact(
+                                &mut facts,
+                                "saml.assertion.issue_instant",
+                                value,
+                                false,
+                            )?;
+                        }
+                    }
+                    SamlElementKind::Conditions => {
+                        if let Some(value) = attribute_value(&element, &reader, b"NotBefore") {
+                            push_saml_text_fact(
+                                &mut facts,
+                                "saml.conditions.not_before",
+                                value,
+                                false,
+                            )?;
+                        }
+                        if let Some(value) = attribute_value(&element, &reader, b"NotOnOrAfter") {
+                            push_saml_text_fact(
+                                &mut facts,
+                                "saml.conditions.not_on_or_after",
+                                value,
+                                false,
+                            )?;
+                        }
+                    }
+                    SamlElementKind::StatusCode if !saw_status_code => {
+                        saw_status_code = true;
+                        if let Some(value) = attribute_value(&element, &reader, b"Value") {
+                            push_saml_text_fact(&mut facts, "saml.status.code", value, false)?;
+                        }
+                    }
+                    SamlElementKind::NameId if !saw_name_id => {
+                        saw_name_id = true;
+                        if let Some(value) = attribute_value(&element, &reader, b"Format") {
+                            push_saml_text_fact(&mut facts, "saml.name_id.format", value, false)?;
+                        }
+                    }
+                    SamlElementKind::Attribute => {
+                        attribute_count += 1;
+                        if attribute_count > SAML_MAX_ATTRIBUTES {
+                            return Err("too_many_attributes");
+                        }
+                        current_attribute_name = attribute_value(&element, &reader, b"Name");
+                        if let Some(name) = &current_attribute_name {
+                            push_saml_text_fact(
+                                &mut facts,
+                                "saml.attribute.name",
+                                name.clone(),
+                                false,
+                            )?;
+                        }
+                    }
+                    SamlElementKind::Signature => {
+                        if stack.contains(&SamlElementKind::Assertion) {
+                            assertion_signature_present = true;
+                        } else {
+                            response_signature_present = true;
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Begin bounded text capture for the element kinds that
+                // carry meaningful text content. `Issuer`/`Audience` only
+                // capture their first occurrence — SAML documents may
+                // legitimately repeat Issuer per-assertion, or Audience
+                // per-restriction, but this bounded inspection surfaces
+                // one representative value, not every repetition.
+                let starts_capture = matches!(
+                    kind,
+                    SamlElementKind::Issuer
+                        | SamlElementKind::StatusMessage
+                        | SamlElementKind::NameId
+                        | SamlElementKind::AttributeValue
+                ) || (kind == SamlElementKind::Audience && !saw_audience);
+                if kind == SamlElementKind::Issuer && saw_issuer {
+                    // already captured; skip
+                } else if starts_capture {
+                    if kind == SamlElementKind::Issuer {
+                        saw_issuer = true;
+                    }
+                    if kind == SamlElementKind::Audience {
+                        saw_audience = true;
+                    }
+                    capture = Some(SamlTextCapture {
+                        kind,
+                        depth,
+                        buffer: String::new(),
+                        attribute_name: current_attribute_name.clone(),
+                    });
+                    if is_empty {
+                        finalize_saml_capture(capture.take(), &mut facts)?;
+                    }
+                }
+
+                if !is_empty {
+                    stack.push(kind);
+                    if stack.len() > SAML_MAX_XML_DEPTH {
+                        return Err("excessive_nesting");
+                    }
+                }
+            }
+            Event::Text(text) => {
+                if let Some(active) = capture.as_mut() {
+                    let decoded = text.decode().map_err(|_| "malformed_xml")?;
+                    if active.buffer.len() + decoded.len() > SAML_MAX_TEXT_BYTES {
+                        return Err("oversized_text_value");
+                    }
+                    active.buffer.push_str(&decoded);
+                }
+            }
+            Event::End(element) => {
+                let kind = classify_saml_element(element.local_name().as_ref());
+                if let Some(active) = &capture {
+                    if active.kind == kind && active.depth == stack.len().saturating_sub(1) {
+                        finalize_saml_capture(capture.take(), &mut facts)?;
+                    }
+                }
+                if kind == SamlElementKind::Attribute {
+                    current_attribute_name = None;
+                }
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+
+    facts.push(IamFact::observed(
+        "saml.response.signature.present",
+        response_signature_present.to_string(),
+    ));
+    facts.push(IamFact::observed(
+        "saml.assertion.signature.present",
+        assertion_signature_present.to_string(),
+    ));
+    facts.push(IamFact::not_validated(
+        "saml.signature.verification",
+        "not_attempted",
+    ));
+
+    Ok(facts)
+}
+
+fn finalize_saml_capture(
+    capture: Option<SamlTextCapture>,
+    facts: &mut Vec<IamFact>,
+) -> Result<(), &'static str> {
+    let Some(capture) = capture else {
+        return Ok(());
+    };
+    match capture.kind {
+        SamlElementKind::Issuer => push_saml_text_fact(facts, "saml.issuer", capture.buffer, false),
+        SamlElementKind::StatusMessage => {
+            push_saml_text_fact(facts, "saml.status.message", capture.buffer, false)
+        }
+        SamlElementKind::NameId => {
+            // See this section's module doc: authorized as a plaintext
+            // Observed fact by the original owner decision and this
+            // frontier's own owner-runtime example, not a new policy.
+            push_saml_text_fact(facts, "saml.name_id", capture.buffer, false)
+        }
+        SamlElementKind::Audience => {
+            push_saml_text_fact(facts, "saml.audience", capture.buffer, false)
+        }
+        SamlElementKind::AttributeValue => {
+            let name = capture
+                .attribute_name
+                .as_deref()
+                .unwrap_or("saml.attribute.value");
+            let fact_name = format!("saml.attribute.value[{name}]");
+            push_saml_text_fact(facts, &fact_name, capture.buffer, false)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Push one SAML-derived fact, applying the same bounds and the same
+/// [`SENSITIVE_NAMES`] redaction check every other fact in this module
+/// gets (defense in depth: an attribute literally named e.g.
+/// `client_secret` is still redacted). `force_not_validated` marks a pure
+/// correlation-token fact `NotValidated` instead of `Observed` — see this
+/// section's module doc for exactly which fields use it and why.
+fn push_saml_text_fact(
+    facts: &mut Vec<IamFact>,
+    name: &str,
+    value: String,
+    force_not_validated: bool,
+) -> Result<(), &'static str> {
+    if facts.len() >= IAM_MAX_FACTS {
+        return Err("too_many_facts");
+    }
+    if value.len() > SAML_MAX_TEXT_BYTES {
+        return Err("oversized_text_value");
+    }
+    if is_sensitive_name(name) {
+        facts.push(IamFact::redacted(name, value));
+    } else if force_not_validated {
+        facts.push(IamFact::not_validated(name, value));
+    } else {
+        facts.push(IamFact::observed(name, value));
+    }
+    Ok(())
 }
 
 /// Reject a query/form string containing a `%` not followed by exactly
@@ -2206,6 +2677,493 @@ mod tests {
                 value: "bar".into()
             }
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // =================================================================
+    // SCORPION_IAM_SAML_RESPONSE_INSPECTION_001
+    // =================================================================
+
+    fn synthetic_saml_xml(signed_response: bool, signed_assertion: bool) -> String {
+        let response_sig = if signed_response {
+            r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo/><ds:SignatureValue>sig</ds:SignatureValue></ds:Signature>"#
+        } else {
+            ""
+        };
+        let assertion_sig = if signed_assertion {
+            r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:SignedInfo/><ds:SignatureValue>sig</ds:SignatureValue></ds:Signature>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_response123" InResponseTo="_authnrequest456" Version="2.0" Destination="https://sp.example.invalid/acs">
+  <saml:Issuer>https://idp.example.invalid</saml:Issuer>
+  {response_sig}
+  <samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status>
+  <saml:Assertion ID="_assertion789" IssueInstant="2026-01-01T00:00:00Z" Version="2.0">
+    <saml:Issuer>https://idp.example.invalid</saml:Issuer>
+    {assertion_sig}
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">test-user@example.invalid</saml:NameID>
+    </saml:Subject>
+    <saml:Conditions NotBefore="2026-01-01T00:00:00Z" NotOnOrAfter="2026-01-01T01:00:00Z">
+      <saml:AudienceRestriction><saml:Audience>urn:scorpion:test</saml:Audience></saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="test-attribute"><saml:AttributeValue>test-value</saml:AttributeValue></saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"#
+        )
+    }
+
+    fn encode_saml(xml: &str) -> String {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        STANDARD.encode(xml.as_bytes())
+    }
+
+    // ---------------------------------------------------------------
+    // 4/5/6/7/8/9/10/11/12/13/14/15/16/17/18/19/20: full structural
+    // decode of a realistic synthetic Response
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn valid_saml_response_decodes_every_structural_fact() {
+        let xml = synthetic_saml_xml(true, false);
+        let facts = decode_saml_response(&encode_saml(&xml)).unwrap();
+
+        let expect = |name: &str, value: &str| {
+            assert_eq!(
+                fact(&facts, name).status,
+                IamFactStatus::Observed {
+                    value: value.into()
+                },
+                "fact {name:?} in {facts:?}"
+            );
+        };
+
+        expect("saml.response.id", "_response123");
+        expect(
+            "saml.response.destination",
+            "https://sp.example.invalid/acs",
+        );
+        expect("saml.response.version", "2.0");
+        expect("saml.issuer", "https://idp.example.invalid");
+        expect(
+            "saml.status.code",
+            "urn:oasis:names:tc:SAML:2.0:status:Success",
+        );
+        expect("saml.assertion.id", "_assertion789");
+        expect("saml.assertion.issue_instant", "2026-01-01T00:00:00Z");
+        expect("saml.name_id", "test-user@example.invalid");
+        expect(
+            "saml.name_id.format",
+            "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+        );
+        expect("saml.conditions.not_before", "2026-01-01T00:00:00Z");
+        expect("saml.conditions.not_on_or_after", "2026-01-01T01:00:00Z");
+        expect("saml.audience", "urn:scorpion:test");
+        expect("saml.attribute.name", "test-attribute");
+        expect("saml.attribute.value[test-attribute]", "test-value");
+
+        // 7: InResponseTo is surfaced but NotValidated (pure correlation
+        // token — see this section's module doc).
+        assert_eq!(
+            fact(&facts, "saml.response.in_response_to").status,
+            IamFactStatus::NotValidated {
+                value: "_authnrequest456".into()
+            }
+        );
+
+        // 18/19: signature presence, scoped correctly (response signed,
+        // assertion not).
+        assert_eq!(
+            fact(&facts, "saml.response.signature.present").status,
+            IamFactStatus::Observed {
+                value: "true".into()
+            }
+        );
+        assert_eq!(
+            fact(&facts, "saml.assertion.signature.present").status,
+            IamFactStatus::Observed {
+                value: "false".into()
+            }
+        );
+        // 20: verification is always NotValidated.
+        assert_eq!(
+            fact(&facts, "saml.signature.verification").status,
+            IamFactStatus::NotValidated {
+                value: "not_attempted".into()
+            }
+        );
+
+        assert_no_validated(&facts);
+    }
+
+    #[test]
+    fn assertion_level_signature_is_distinguished_from_response_level() {
+        let xml = synthetic_saml_xml(false, true);
+        let facts = decode_saml_response(&encode_saml(&xml)).unwrap();
+        assert_eq!(
+            fact(&facts, "saml.response.signature.present").status,
+            IamFactStatus::Observed {
+                value: "false".into()
+            }
+        );
+        assert_eq!(
+            fact(&facts, "saml.assertion.signature.present").status,
+            IamFactStatus::Observed {
+                value: "true".into()
+            }
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 1/2/3: end-to-end classification, redaction, digest via the real
+    // callback route
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn saml_callback_classifies_saml_redacts_response_and_digest_matches() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        let xml = synthetic_saml_xml(true, false);
+        let encoded = encode_saml(&xml);
+        let body = format!("SAMLResponse={}", url_encode(&encoded));
+        receive_callback_with_environment(
+            &created.trace_id,
+            "POST",
+            "",
+            Some("application/x-www-form-urlencoded"),
+            body.as_bytes(),
+            &lookup,
+        )
+        .await
+        .unwrap();
+
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::Saml
+        );
+        let facts = &readback.observations[0].observation.facts;
+        let saml_response_fact = fact(facts, "SAMLResponse");
+        let expected_digest = match spider::features::iam_trace::redact(encoded.clone()) {
+            IamFactStatus::Redacted { sha256_digest } => sha256_digest,
+            _ => unreachable!(),
+        };
+        match &saml_response_fact.status {
+            IamFactStatus::Redacted { sha256_digest } => {
+                assert_eq!(sha256_digest, &expected_digest)
+            }
+            other => panic!("expected Redacted, got {other:?}"),
+        }
+        assert!(
+            fact(facts, "saml.name_id").status
+                == IamFactStatus::Observed {
+                    value: "test-user@example.invalid".into()
+                }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn url_encode(value: &str) -> String {
+        url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    }
+
+    // ---------------------------------------------------------------
+    // 21/22/32/33: malformed base64/XML — truthful diagnostics, never a
+    // fabricated fact, never a panic
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn malformed_base64_is_diagnosed_truthfully() {
+        assert_eq!(
+            decode_saml_response("not-valid-base64!!!"),
+            Err("malformed_base64")
+        );
+    }
+
+    #[test]
+    fn malformed_xml_is_diagnosed_truthfully() {
+        let encoded = encode_saml("not xml at all <<<");
+        assert_eq!(decode_saml_response(&encoded), Err("malformed_xml"));
+    }
+
+    #[tokio::test]
+    async fn malformed_saml_response_still_durably_records_the_callback_never_fabricates_never_panics(
+    ) {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        let body = "SAMLResponse=not-valid-base64!!!";
+        receive_callback_with_environment(
+            &created.trace_id,
+            "POST",
+            "",
+            Some("application/x-www-form-urlencoded"),
+            body.as_bytes(),
+            &lookup,
+        )
+        .await
+        .unwrap();
+
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.observations.len(),
+            1,
+            "callback still durably recorded"
+        );
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::Saml,
+            "protocol stays Saml regardless of decode success"
+        );
+        let facts = &readback.observations[0].observation.facts;
+        assert!(matches!(
+            fact(facts, "SAMLResponse").status,
+            IamFactStatus::Redacted { .. }
+        ));
+        assert_eq!(
+            fact(facts, "saml.decode_error").status,
+            IamFactStatus::NotValidated {
+                value: "malformed_base64".into()
+            }
+        );
+        // No fabricated structural fact of any kind.
+        assert!(find_fact(facts, "saml.issuer").is_none());
+        assert!(find_fact(facts, "saml.name_id").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------------------------------------------------------------
+    // 23/24/25/26: SAML-specific bounds
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn oversized_raw_saml_response_is_rejected() {
+        let huge = "a".repeat(SAML_MAX_RAW_BASE64_BYTES + 1);
+        assert_eq!(decode_saml_response(&huge), Err("oversized_response"));
+    }
+
+    #[test]
+    fn oversized_decoded_xml_is_rejected() {
+        let huge_xml = format!(
+            "<Response>{}</Response>",
+            "a".repeat(SAML_MAX_DECODED_XML_BYTES + 1)
+        );
+        let encoded = encode_saml(&huge_xml);
+        assert_eq!(decode_saml_response(&encoded), Err("oversized_decoded_xml"));
+    }
+
+    #[test]
+    fn excessive_nesting_is_rejected() {
+        let mut xml = String::new();
+        for _ in 0..(SAML_MAX_XML_DEPTH + 2) {
+            xml.push_str("<a>");
+        }
+        for _ in 0..(SAML_MAX_XML_DEPTH + 2) {
+            xml.push_str("</a>");
+        }
+        let encoded = encode_saml(&xml);
+        assert_eq!(decode_saml_response(&encoded), Err("excessive_nesting"));
+    }
+
+    #[test]
+    fn excessive_attributes_is_rejected() {
+        let mut xml = String::from("<Response><Assertion><AttributeStatement>");
+        for i in 0..(SAML_MAX_ATTRIBUTES + 1) {
+            xml.push_str(&format!(
+                "<Attribute Name=\"a{i}\"><AttributeValue>v</AttributeValue></Attribute>"
+            ));
+        }
+        xml.push_str("</AttributeStatement></Assertion></Response>");
+        let encoded = encode_saml(&xml);
+        assert_eq!(decode_saml_response(&encoded), Err("too_many_attributes"));
+    }
+
+    // ---------------------------------------------------------------
+    // 27: DOCTYPE/ENTITY input never triggers entity expansion or
+    // external I/O — structurally impossible with quick_xml (a pure
+    // in-memory parser with no file/network primitive at all), proven
+    // here by confirming decoding completes (no hang) and never
+    // fabricates an expanded value.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn doctype_and_entity_declarations_never_expand_or_hang() {
+        let xxe_xml = r#"<?xml version="1.0"?>
+<!DOCTYPE Response [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<Response><Issuer>&xxe;</Issuer></Response>"#;
+        let encoded = encode_saml(xxe_xml);
+        // Either a truthful decode failure (undefined entity is not one
+        // of the five predefined XML entities, so `.decode()` errors) or
+        // — never — a fabricated Issuer value containing expanded file
+        // content. Whichever it is, it returns promptly (this call not
+        // hanging is itself part of the proof) and never panics.
+        if let Ok(facts) = decode_saml_response(&encoded) {
+            if let Some(issuer) = find_fact(&facts, "saml.issuer") {
+                if let IamFactStatus::Observed { value } = &issuer.status {
+                    assert!(!value.contains("root:"), "must never read /etc/passwd");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doctype_without_any_entity_reference_is_safely_ignored() {
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE Response>
+<Response ID="_r1"><Issuer>https://idp.example.invalid</Issuer></Response>"#;
+        let encoded = encode_saml(xml);
+        let facts = decode_saml_response(&encoded).unwrap();
+        assert_eq!(
+            fact(&facts, "saml.issuer").status,
+            IamFactStatus::Observed {
+                value: "https://idp.example.invalid".into()
+            }
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 28/29/30/31: no SignatureValue/X509Certificate/raw XML/raw
+    // SAMLResponse ever persisted, read back, or logged
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn no_signature_value_certificate_or_raw_xml_is_ever_persisted_or_logged() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        const SIGNATURE_SENTINEL: &str = "unique-signature-value-sentinel-bytes";
+        const CERT_SENTINEL: &str = "unique-x509-certificate-sentinel-bytes";
+        let xml = format!(
+            r#"<Response ID="_r1"><Issuer>https://idp.example.invalid</Issuer>
+<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+<ds:SignedInfo/><ds:SignatureValue>{SIGNATURE_SENTINEL}</ds:SignatureValue>
+<ds:KeyInfo><ds:X509Data><ds:X509Certificate>{CERT_SENTINEL}</ds:X509Certificate></ds:X509Data></ds:KeyInfo>
+</ds:Signature></Response>"#
+        );
+        let encoded = encode_saml(&xml);
+        let body = format!("SAMLResponse={}", url_encode(&encoded));
+        receive_callback_with_environment(
+            &created.trace_id,
+            "POST",
+            "",
+            Some("application/x-www-form-urlencoded"),
+            body.as_bytes(),
+            &lookup,
+        )
+        .await
+        .unwrap();
+
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        let debug = format!("{readback:?}");
+        assert!(!debug.contains(SIGNATURE_SENTINEL));
+        assert!(!debug.contains(CERT_SENTINEL));
+        assert!(!debug.contains(&xml));
+        assert!(!debug.contains(&encoded));
+
+        let store = open_store(&lookup).await.unwrap();
+        let history = store.read_history(&created.trace_id).await.unwrap();
+        for (_, bytes, _) in &history {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(!text.contains(SIGNATURE_SENTINEL));
+            assert!(!text.contains(CERT_SENTINEL));
+            assert!(!text.contains(&xml));
+            assert!(!text.contains(&encoded));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn no_eprintln_in_saml_inspection_ever_references_raw_material() {
+        let source = include_str!("iam.rs");
+        let start = source
+            .find("SCORPION_IAM_SAML_RESPONSE_INSPECTION_001")
+            .unwrap();
+        let saml_section = &source[start..];
+        let production = saml_section.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("eprintln!"));
+        assert!(!production.contains("println!"));
+        assert!(!production.contains("IamFactStatus::Validated"));
+    }
+
+    // ---------------------------------------------------------------
+    // 12/17: NameID and attribute value privacy contract (Observed, per
+    // this section's own documented decision) — also directly proven by
+    // `valid_saml_response_decodes_every_structural_fact` above.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn name_id_and_attribute_values_are_observed_not_redacted_per_the_documented_privacy_decision()
+    {
+        let xml = synthetic_saml_xml(false, false);
+        let facts = decode_saml_response(&encode_saml(&xml)).unwrap();
+        assert!(matches!(
+            fact(&facts, "saml.name_id").status,
+            IamFactStatus::Observed { .. }
+        ));
+        assert!(matches!(
+            fact(&facts, "saml.attribute.value[test-attribute]").status,
+            IamFactStatus::Observed { .. }
+        ));
+    }
+
+    // ---------------------------------------------------------------
+    // 36/37/38: multiple SAML observations still append correctly; state
+    // reaches/remains Received; persistence survives reopen (generic
+    // mechanism already proven elsewhere — this exercises it with SAML
+    // specifically, end to end)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn multiple_saml_callbacks_append_and_state_survives_reopen() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        let body = format!(
+            "SAMLResponse={}",
+            url_encode(&encode_saml(&synthetic_saml_xml(true, false)))
+        );
+        for _ in 0..2 {
+            receive_callback_with_environment(
+                &created.trace_id,
+                "POST",
+                "",
+                Some("application/x-www-form-urlencoded"),
+                body.as_bytes(),
+                &lookup,
+            )
+            .await
+            .unwrap();
+        }
+
+        let reopened_lookup = configured_lookup(&path);
+        let readback = read_trace_with_environment(&created.trace_id, &reopened_lookup)
+            .await
+            .unwrap();
+        assert_eq!(readback.state, "received");
+        assert_eq!(readback.observations.len(), 2);
+        assert_eq!(readback.observations[0].revision, 1);
+        assert_eq!(readback.observations[1].revision, 2);
         let _ = std::fs::remove_file(&path);
     }
 }

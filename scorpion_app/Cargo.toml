@@ -6,6 +6,13 @@ description = "Small server-side application boundary over Scorpion's canonical 
 license = "MIT"
 
 [dependencies]
+# JWT (id_token) is compact-base64url, three dot-separated segments. Used
+# only for base64url decoding of the header/payload segments in
+# scorpion_app/src/iam.rs's bounded, decode-only JWT inspection — the same
+# pinned version already used identically by spider/spider_agent/
+# spider_mcp/spider_cli (spider_cli/src/oauth.rs's own loopback OAuth
+# callback). No JWT/JWS/verification crate: this is base64 decoding only.
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 spider = { path = "../spider", default-features = false, features = ["search_searxng", "agent_acquisition", "agent_search_searxng", "agent_openai", "disk", "serde", "evidence"] }

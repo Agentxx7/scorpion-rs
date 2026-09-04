@@ -72,7 +72,8 @@ use spider::features::domain_persistence::{DomainPersistence, PersistenceError};
 use spider::features::domain_runtime::{open_shared_domain_store, DomainRuntimeError};
 use spider::features::domain_state::CurrentState;
 use spider::features::iam_trace::{
-    IamCallbackObservation, IamFact, IamProtocolClassification, IamTraceState, ReceiveCallback,
+    IamCallbackObservation, IamFact, IamFactStatus, IamProtocolClassification, IamTraceState,
+    ReceiveCallback,
 };
 use spider::features::identity::IamTraceId;
 use spider::url;
@@ -343,9 +344,9 @@ async fn receive_callback_with_environment(
         return Err(IamError::NotFound);
     }
 
-    // 2. Parse and redact — no protocol interpretation, every fact stays
-    // `IamProtocolClassification::Generic`.
-    let facts = match method {
+    // 2. Parse, classify (OAuth2/OIDC/Generic — see this module's own
+    // classification doc for the exact precedence), and redact.
+    let (protocol, facts) = match method {
         "GET" => parse_query_facts(query)?,
         "POST" => parse_post_facts(content_type, body)?,
         _ => return Err(IamError::UnsupportedContentType),
@@ -358,7 +359,7 @@ async fn receive_callback_with_environment(
         method,
         target,
         observed_at_unix_ms,
-        IamProtocolClassification::Generic,
+        protocol,
         facts,
     );
 
@@ -461,15 +462,35 @@ async fn try_mark_received(store: &DomainPersistence, trace_id: &IamTraceId) {
 }
 
 // ---------------------------------------------------------------------
-// Generic callback parsing (GET query / POST form / POST JSON)
+// Generic callback parsing (GET query / POST form / POST JSON), OAuth2/
+// OIDC classification, and bounded, decode-only id_token (JWT) inspection.
+//
+// `SCORPION_IAM_OIDC_AND_JWT_INSPECTION_001`. Classification derives only
+// from parameter/field *names* actually observed in this callback — never
+// from the route being an IAM route, and never from prior calls. Per the
+// documented precedence, `id_token` presence classifies `Oidc` even when
+// `code`/`state` also appear; otherwise `code`/`error`/`state` classify
+// `OAuth2`; otherwise `Generic`. `error`/`error_description` need no
+// special-casing beyond this: they are ordinary, bounded, never-rendered-
+// as-HTML Observed facts like any other unrecognized name, and an
+// upstream OAuth error never becomes a Scorpion-side failure — Scorpion's
+// job is to observe the callback, not judge the flow it came from.
 // ---------------------------------------------------------------------
 
-fn parse_query_facts(query: &str) -> Result<Vec<IamFact>, IamError> {
+fn parse_query_facts(query: &str) -> Result<(IamProtocolClassification, Vec<IamFact>), IamError> {
     validate_percent_encoding(query)?;
-    facts_from_pairs(url::form_urlencoded::parse(query.as_bytes()))
+    let mut facts = facts_from_pairs(url::form_urlencoded::parse(query.as_bytes()))?;
+    let raw_id_token = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(name, _)| name == "id_token")
+        .map(|(_, value)| value.into_owned());
+    let protocol = finalize_oauth_oidc_facts(&mut facts, raw_id_token)?;
+    Ok((protocol, facts))
 }
 
-fn parse_post_facts(content_type: Option<&str>, body: &[u8]) -> Result<Vec<IamFact>, IamError> {
+fn parse_post_facts(
+    content_type: Option<&str>,
+    body: &[u8],
+) -> Result<(IamProtocolClassification, Vec<IamFact>), IamError> {
     let media_type = content_type
         .map(|value| {
             value
@@ -480,21 +501,234 @@ fn parse_post_facts(content_type: Option<&str>, body: &[u8]) -> Result<Vec<IamFa
                 .to_ascii_lowercase()
         })
         .unwrap_or_default();
-    match media_type.as_str() {
+    let (mut facts, raw_id_token) = match media_type.as_str() {
         "application/x-www-form-urlencoded" => {
             let raw = std::str::from_utf8(body).map_err(|_| IamError::MalformedFormEncoding)?;
             validate_percent_encoding(raw)?;
-            facts_from_pairs(url::form_urlencoded::parse(body))
+            let facts = facts_from_pairs(url::form_urlencoded::parse(body))?;
+            let raw_id_token = url::form_urlencoded::parse(body)
+                .find(|(name, _)| name == "id_token")
+                .map(|(_, value)| value.into_owned());
+            (facts, raw_id_token)
         }
         "application/json" => {
             let value: serde_json::Value =
                 serde_json::from_slice(body).map_err(|_| IamError::MalformedJson)?;
             let mut facts = Vec::new();
             flatten_json_facts(&value, "", 0, &mut facts)?;
-            Ok(facts)
+            // Only a top-level string `id_token` field is treated as a
+            // JWT to decode — this matches every real OIDC callback
+            // shape and avoids guessing at a nested field's meaning.
+            let raw_id_token = match &value {
+                serde_json::Value::Object(map) => map
+                    .get("id_token")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                _ => None,
+            };
+            (facts, raw_id_token)
         }
-        _ => Err(IamError::UnsupportedContentType),
+        _ => return Err(IamError::UnsupportedContentType),
+    };
+    let protocol = finalize_oauth_oidc_facts(&mut facts, raw_id_token)?;
+    Ok((protocol, facts))
+}
+
+/// Classify this callback's protocol from the fact *names* already
+/// present (survive redaction — see [`push_fact`]'s own doc), mark the
+/// generic `state` fact `NotValidated` when it is playing its OAuth2/OIDC
+/// correlation role, and append bounded, decode-only `id_token` (JWT)
+/// facts when one was observed. Mutates `facts` in place; returns the
+/// classification.
+fn finalize_oauth_oidc_facts(
+    facts: &mut Vec<IamFact>,
+    raw_id_token: Option<String>,
+) -> Result<IamProtocolClassification, IamError> {
+    let has_code = facts.iter().any(|fact| fact.name == "code");
+    let has_error = facts.iter().any(|fact| fact.name == "error");
+    let has_state = facts.iter().any(|fact| fact.name == "state");
+    let protocol = classify_protocol(raw_id_token.is_some(), has_code, has_error, has_state);
+    if matches!(
+        protocol,
+        IamProtocolClassification::OAuth2 | IamProtocolClassification::Oidc
+    ) {
+        mark_state_not_validated(facts);
     }
+    if let Some(raw_jwt) = raw_id_token {
+        append_id_token_facts(facts, &raw_jwt)?;
+    }
+    Ok(protocol)
+}
+
+/// Documented classification precedence: `id_token` presence always wins
+/// (an OIDC callback carrying `code` too is still `Oidc`, never
+/// downgraded to `OAuth2`); otherwise any of `code`/`error`/`state`
+/// classifies `OAuth2`; otherwise `Generic`. Never derives from the route
+/// itself — only from these observed names.
+fn classify_protocol(
+    has_id_token: bool,
+    has_code: bool,
+    has_error: bool,
+    has_state: bool,
+) -> IamProtocolClassification {
+    if has_id_token {
+        IamProtocolClassification::Oidc
+    } else if has_code || has_error || has_state {
+        IamProtocolClassification::OAuth2
+    } else {
+        IamProtocolClassification::Generic
+    }
+}
+
+/// `state` has no expectation-storage model to compare against yet —
+/// trace creation accepts no input and `IamTraceState` carries no payload
+/// (audited, not invented, by this frontier; see its own closure report's
+/// "state/nonce finding"). Relabeling it `NotValidated` uses only the
+/// existing truth vocabulary's own "no expectation: NOT_VALIDATED" case —
+/// no new field, no new storage — so a real OAuth2/OIDC `state` parameter
+/// is never presented as if Scorpion had verified it just because the
+/// parameter exists.
+fn mark_state_not_validated(facts: &mut [IamFact]) {
+    for fact in facts.iter_mut() {
+        if fact.name == "state" {
+            if let IamFactStatus::Observed { value } = &fact.status {
+                fact.status = IamFactStatus::NotValidated {
+                    value: value.clone(),
+                };
+            }
+        }
+    }
+}
+
+/// Maximum raw compact-JWT bytes this module will attempt to decode.
+/// Reuses the existing per-value callback bound: in practice a
+/// `raw_jwt` longer than this already failed the generic per-parameter
+/// bound (`IAM_MAX_VALUE_BYTES`) before reaching here, since `id_token`'s
+/// own value is checked there too — this constant exists as an explicit,
+/// independently-documented, directly-testable bound rather than relying
+/// on that as an implicit side effect.
+const JWT_MAX_RAW_BYTES: usize = IAM_MAX_VALUE_BYTES;
+/// Maximum decoded (post-base64url) header bytes. Real JWT headers are a
+/// handful of short fields (`alg`/`typ`/`kid`); this is generous while
+/// still bounding memory from an attacker-controlled decode.
+const JWT_MAX_DECODED_HEADER_BYTES: usize = 4 * 1024;
+/// Maximum decoded (post-base64url) payload bytes. Deliberately smaller
+/// than [`JWT_MAX_RAW_BYTES`] by more than base64's ~4/3 expansion factor
+/// — otherwise this bound could never actually be reached (any decoded
+/// payload large enough to exceed an *equal* raw-byte bound would already
+/// have failed the raw-length check first, on its larger base64 form).
+const JWT_MAX_DECODED_PAYLOAD_BYTES: usize = 8 * 1024;
+
+/// Allowed JWT header claim names — see this frontier's own scope: no
+/// other header field is ever surfaced.
+const JWT_HEADER_FACTS: &[&str] = &["alg", "typ", "kid"];
+/// Allowed JWT payload claim names, minus `nonce` (handled separately —
+/// see [`finalize_oauth_oidc_facts`]'s sibling reasoning for `state`). No
+/// other claim (`sub`, `email`, `name`, `groups`, `roles`, or any other
+/// custom claim) is ever surfaced — that requires a future, separate
+/// privacy/scope decision.
+const JWT_PAYLOAD_FACTS: &[&str] = &["iss", "aud", "exp", "iat", "nbf"];
+
+/// Append this `id_token`'s derived facts (or, on any decode failure, one
+/// truthful diagnostic fact) to `facts`. Never returns an error for a
+/// malformed/oversized JWT itself — per this frontier's explicit
+/// requirement, a callback carrying an unparseable `id_token` must still
+/// be durably recorded, `id_token` remains `Redacted` (handled entirely
+/// by the pre-existing generic redaction path, unrelated to this
+/// function), and `protocol` stays `Oidc` regardless. The only error this
+/// can return is the pre-existing global per-callback fact-count bound.
+fn append_id_token_facts(facts: &mut Vec<IamFact>, raw_jwt: &str) -> Result<(), IamError> {
+    let new_facts = match decode_id_token(raw_jwt) {
+        Ok(decoded) => decoded,
+        Err(reason) => vec![IamFact::not_validated("jwt.decode_error", reason)],
+    };
+    if facts.len() + new_facts.len() > IAM_MAX_FACTS {
+        return Err(IamError::ParameterLimitExceeded);
+    }
+    facts.extend(new_facts);
+    Ok(())
+}
+
+/// Decode-only compact-JWT inspection. Never verifies a signature, never
+/// fetches a key, never negotiates on `alg` — `alg` is attacker-controlled
+/// observed data (surfaced as `jwt.header.alg`, nothing more) and is never
+/// used to select any cryptographic behavior, because none exists here at
+/// all. Fails closed and truthfully on any malformed/oversized input;
+/// never panics, never partially fabricates a claim it could not actually
+/// decode.
+fn decode_id_token(raw_jwt: &str) -> Result<Vec<IamFact>, &'static str> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    if raw_jwt.len() > JWT_MAX_RAW_BYTES {
+        return Err("oversized_token");
+    }
+    let segments: Vec<&str> = raw_jwt.split('.').collect();
+    if segments.len() != 3 {
+        return Err("malformed_segment_count");
+    }
+
+    let header_bytes = URL_SAFE_NO_PAD
+        .decode(segments[0])
+        .map_err(|_| "malformed_base64url_header")?;
+    if header_bytes.len() > JWT_MAX_DECODED_HEADER_BYTES {
+        return Err("oversized_decoded_header");
+    }
+    let header: serde_json::Value =
+        serde_json::from_slice(&header_bytes).map_err(|_| "malformed_header_json")?;
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(segments[1])
+        .map_err(|_| "malformed_base64url_payload")?;
+    if payload_bytes.len() > JWT_MAX_DECODED_PAYLOAD_BYTES {
+        return Err("oversized_decoded_payload");
+    }
+    let payload: serde_json::Value =
+        serde_json::from_slice(&payload_bytes).map_err(|_| "malformed_payload_json")?;
+
+    let mut facts = Vec::new();
+    for key in JWT_HEADER_FACTS {
+        if let Some(value) = header.get(*key) {
+            facts.push(IamFact::observed(
+                format!("jwt.header.{key}"),
+                json_scalar_to_string(value),
+            ));
+        }
+    }
+    for key in JWT_PAYLOAD_FACTS {
+        if let Some(value) = payload.get(*key) {
+            facts.push(IamFact::observed(
+                format!("jwt.{key}"),
+                json_scalar_to_string(value),
+            ));
+        }
+    }
+    if let Some(value) = payload.get("nonce") {
+        // Same reasoning as `state` above: no expectation-storage model
+        // exists yet, so this is NotValidated, never bare Observed —
+        // using only the existing truth vocabulary, no new field.
+        facts.push(IamFact::not_validated(
+            "jwt.nonce",
+            json_scalar_to_string(value),
+        ));
+    }
+
+    // Signature: presence is a plain, truthful, structural observation
+    // (the third segment may legitimately be empty for an unsigned
+    // `alg: "none"` token). Verification is unconditionally
+    // `NotValidated` — no key lookup, no JWKS fetch, no X.509 validation,
+    // no cryptographic verification of any kind exists in this frontier,
+    // so nothing could ever justify `Validated` here.
+    let signature_present = !segments[2].is_empty();
+    facts.push(IamFact::observed(
+        "jwt.signature.present",
+        signature_present.to_string(),
+    ));
+    facts.push(IamFact::not_validated(
+        "jwt.signature.verification",
+        "not_attempted",
+    ));
+
+    Ok(facts)
 }
 
 /// Reject a query/form string containing a `%` not followed by exactly
@@ -764,6 +998,27 @@ mod tests {
         );
     }
 
+    fn fact<'a>(facts: &'a [IamFact], name: &str) -> &'a IamFact {
+        facts
+            .iter()
+            .find(|fact| fact.name == name)
+            .unwrap_or_else(|| panic!("no fact named {name:?} in {facts:?}"))
+    }
+
+    fn find_fact<'a>(facts: &'a [IamFact], name: &str) -> Option<&'a IamFact> {
+        facts.iter().find(|fact| fact.name == name)
+    }
+
+    /// Build a real compact three-segment JWT string from raw header/
+    /// payload JSON text and a raw (never re-encoded) signature segment —
+    /// exactly the shape a real OIDC provider would deliver.
+    fn make_jwt(header_json: &str, payload_json: &str, signature_segment: &str) -> String {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let header_b64 = URL_SAFE_NO_PAD.encode(header_json.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        format!("{header_b64}.{payload_b64}.{signature_segment}")
+    }
+
     // ---------------------------------------------------------------
     // 1/2: create trace
     // ---------------------------------------------------------------
@@ -865,12 +1120,20 @@ mod tests {
         let readback = read_trace_with_environment(&created.trace_id, &lookup)
             .await
             .unwrap();
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::OAuth2
+        );
         let facts = &readback.observations[0].observation.facts;
         assert_no_validated(facts);
+        // This callback carries `state`, one of the documented OAuth2
+        // signals, so it classifies OAuth2 — and `state` itself becomes
+        // NotValidated (SCORPION_IAM_OIDC_AND_JWT_INSPECTION_001: no
+        // expectation-storage model exists to compare it against).
         let state = facts.iter().find(|f| f.name == "state").unwrap();
         assert_eq!(
             state.status,
-            IamFactStatus::Observed {
+            IamFactStatus::NotValidated {
                 value: "xyz".into()
             }
         );
@@ -1383,5 +1646,566 @@ mod tests {
                 .unwrap_err(),
             IamError::NotConfigured
         ));
+    }
+
+    // =================================================================
+    // SCORPION_IAM_OIDC_AND_JWT_INSPECTION_001
+    // =================================================================
+
+    // ---------------------------------------------------------------
+    // 1/2/3: classification and its documented precedence
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn callback_with_code_classifies_oauth2() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+        receive_callback_with_environment(&created.trace_id, "GET", "code=abc", None, b"", &lookup)
+            .await
+            .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::OAuth2
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn callback_with_id_token_classifies_oidc() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+        let jwt = make_jwt(
+            r#"{"alg":"none"}"#,
+            r#"{"iss":"https://issuer.example"}"#,
+            "",
+        );
+        receive_callback_with_environment(
+            &created.trace_id,
+            "GET",
+            &format!("id_token={jwt}"),
+            None,
+            b"",
+            &lookup,
+        )
+        .await
+        .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::Oidc
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn id_token_presence_takes_precedence_over_code_and_state() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+        let jwt = make_jwt(
+            r#"{"alg":"none"}"#,
+            r#"{"iss":"https://issuer.example"}"#,
+            "",
+        );
+        let query = format!("code=abc&state=xyz&id_token={jwt}");
+        receive_callback_with_environment(&created.trace_id, "GET", &query, None, b"", &lookup)
+            .await
+            .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::Oidc,
+            "id_token presence must classify Oidc even with code/state also present"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------------------------------------------------------------
+    // 4-17: JWT decode — header/payload facts, audience shapes, nonce,
+    // signature presence/verification semantics
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn valid_jwt_decodes_header_and_payload_facts_with_string_audience() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        let header = r#"{"alg":"none","typ":"JWT","kid":"scorpion-test-key"}"#;
+        let payload = r#"{"iss":"https://issuer.example","aud":"scorpion-test","exp":9999999999,"iat":1000000000,"nbf":999999999,"nonce":"test-nonce"}"#;
+        let jwt = make_jwt(header, payload, "sig");
+
+        receive_callback_with_environment(
+            &created.trace_id,
+            "GET",
+            &format!("id_token={jwt}"),
+            None,
+            b"",
+            &lookup,
+        )
+        .await
+        .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        let facts = &readback.observations[0].observation.facts;
+        assert_no_validated(facts);
+
+        // id_token itself stays Redacted (pre-existing generic redaction,
+        // unrelated to this frontier's own code).
+        assert!(matches!(
+            fact(facts, "id_token").status,
+            IamFactStatus::Redacted { .. }
+        ));
+
+        // Header facts (6/7/8).
+        assert_eq!(
+            fact(facts, "jwt.header.alg").status,
+            IamFactStatus::Observed {
+                value: "none".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.header.typ").status,
+            IamFactStatus::Observed {
+                value: "JWT".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.header.kid").status,
+            IamFactStatus::Observed {
+                value: "scorpion-test-key".into()
+            }
+        );
+
+        // Payload facts (9/10/12/13/14).
+        assert_eq!(
+            fact(facts, "jwt.iss").status,
+            IamFactStatus::Observed {
+                value: "https://issuer.example".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.aud").status,
+            IamFactStatus::Observed {
+                value: "scorpion-test".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.exp").status,
+            IamFactStatus::Observed {
+                value: "9999999999".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.iat").status,
+            IamFactStatus::Observed {
+                value: "1000000000".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.nbf").status,
+            IamFactStatus::Observed {
+                value: "999999999".into()
+            }
+        );
+
+        // 15: nonce is surfaced but NotValidated (no expectation model —
+        // see this frontier's own state/nonce finding), never Observed.
+        assert_eq!(
+            fact(facts, "jwt.nonce").status,
+            IamFactStatus::NotValidated {
+                value: "test-nonce".into()
+            }
+        );
+
+        // 16/17: signature presence is truthful; verification is always
+        // NotValidated.
+        assert_eq!(
+            fact(facts, "jwt.signature.present").status,
+            IamFactStatus::Observed {
+                value: "true".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.signature.verification").status,
+            IamFactStatus::NotValidated {
+                value: "not_attempted".into()
+            }
+        );
+
+        // Not persisted at all per this frontier's scope: raw claims
+        // object, sub/email/name/groups/roles were never in the payload
+        // above, but confirm the generic claim allowlist itself excludes
+        // anything not explicitly named.
+        assert!(find_fact(facts, "sub").is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn jwt_audience_array_is_surfaced_truthfully() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        let payload = r#"{"iss":"https://issuer.example","aud":["a","b"]}"#;
+        let jwt = make_jwt(r#"{"alg":"none"}"#, payload, "sig");
+        receive_callback_with_environment(
+            &created.trace_id,
+            "GET",
+            &format!("id_token={jwt}"),
+            None,
+            b"",
+            &lookup,
+        )
+        .await
+        .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        let facts = &readback.observations[0].observation.facts;
+        // Represented deterministically and losslessly as the exact JSON
+        // array text — never silently collapsed to one element or joined
+        // ambiguously.
+        assert_eq!(
+            fact(facts, "jwt.aud").status,
+            IamFactStatus::Observed {
+                value: r#"["a","b"]"#.into()
+            }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn missing_optional_header_and_payload_fields_are_simply_absent() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        // No typ/kid in the header; no aud/exp/iat/nbf/nonce in the payload.
+        let jwt = make_jwt(
+            r#"{"alg":"none"}"#,
+            r#"{"iss":"https://issuer.example"}"#,
+            "",
+        );
+        receive_callback_with_environment(
+            &created.trace_id,
+            "GET",
+            &format!("id_token={jwt}"),
+            None,
+            b"",
+            &lookup,
+        )
+        .await
+        .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        let facts = &readback.observations[0].observation.facts;
+        assert!(find_fact(facts, "jwt.header.typ").is_none());
+        assert!(find_fact(facts, "jwt.header.kid").is_none());
+        assert!(find_fact(facts, "jwt.aud").is_none());
+        assert!(find_fact(facts, "jwt.nonce").is_none());
+        // Signature segment is empty here — presence must say so truthfully.
+        assert_eq!(
+            fact(facts, "jwt.signature.present").status,
+            IamFactStatus::Observed {
+                value: "false".into()
+            }
+        );
+        assert_eq!(
+            fact(facts, "jwt.signature.verification").status,
+            IamFactStatus::NotValidated {
+                value: "not_attempted".into()
+            }
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------------------------------------------------------------
+    // 18-21/33/34: malformed JWT — truthful diagnostics, never a panic,
+    // never fabricated claims, callback still durably recorded
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn malformed_jwt_shapes_produce_a_truthful_diagnostic_never_a_fabricated_claim() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+
+        let cases: &[(&str, &str)] = &[
+            ("only.two", "malformed_segment_count"),
+            (
+                "not-base64!.also-not-base64!.sig",
+                "malformed_base64url_header",
+            ),
+        ];
+        for (raw_id_token, expected_reason) in cases {
+            let created = create_trace_with_environment(&lookup).await.unwrap();
+            receive_callback_with_environment(
+                &created.trace_id,
+                "GET",
+                &format!("id_token={raw_id_token}"),
+                None,
+                b"",
+                &lookup,
+            )
+            .await
+            .unwrap();
+            let readback = read_trace_with_environment(&created.trace_id, &lookup)
+                .await
+                .unwrap();
+            // 33: the callback observation is still durably recorded —
+            // it never disappears merely because JWT inspection failed.
+            assert_eq!(readback.observations.len(), 1);
+            assert_eq!(
+                readback.observations[0].observation.protocol,
+                IamProtocolClassification::Oidc,
+                "protocol stays Oidc on id_token presence regardless of decode success"
+            );
+            let facts = &readback.observations[0].observation.facts;
+            assert!(matches!(
+                fact(facts, "id_token").status,
+                IamFactStatus::Redacted { .. }
+            ));
+            assert_eq!(
+                fact(facts, "jwt.decode_error").status,
+                IamFactStatus::NotValidated {
+                    value: (*expected_reason).into()
+                }
+            );
+            // No fabricated claim of any kind.
+            assert!(find_fact(facts, "jwt.iss").is_none());
+            assert!(find_fact(facts, "jwt.header.alg").is_none());
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn malformed_header_json_and_payload_json_are_diagnosed_truthfully_and_never_panic() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        // Valid base64url, but the decoded bytes are not JSON at all.
+        let not_json_header = URL_SAFE_NO_PAD.encode(b"not json");
+        let valid_payload = URL_SAFE_NO_PAD.encode(br#"{"iss":"x"}"#);
+        let jwt = format!("{not_json_header}.{valid_payload}.sig");
+        assert_eq!(decode_id_token(&jwt), Err("malformed_header_json"));
+
+        let valid_header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let not_json_payload = URL_SAFE_NO_PAD.encode(b"also not json");
+        let jwt = format!("{valid_header}.{not_json_payload}.sig");
+        assert_eq!(decode_id_token(&jwt), Err("malformed_payload_json"));
+
+        // 34: garbage input of every shape must never panic.
+        for garbage in ["", ".", "..", "a.b.c.d", "🙂.🙂.🙂", "a..c"] {
+            let _ = decode_id_token(garbage);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // 22/23/24: JWT-specific bounds
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn oversized_raw_jwt_is_rejected() {
+        let huge = "a".repeat(JWT_MAX_RAW_BYTES + 1);
+        assert_eq!(decode_id_token(&huge), Err("oversized_token"));
+    }
+
+    #[test]
+    fn oversized_decoded_header_is_rejected() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        // A header whose *decoded* JSON exceeds the header bound, built
+        // from one oversized string field so it still parses as valid
+        // JSON right up until the size check rejects it first.
+        let big_header = format!(
+            r#"{{"alg":"none","pad":"{}"}}"#,
+            "a".repeat(JWT_MAX_DECODED_HEADER_BYTES + 1)
+        );
+        let header_b64 = URL_SAFE_NO_PAD.encode(big_header.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(br#"{"iss":"x"}"#);
+        let jwt = format!("{header_b64}.{payload_b64}.sig");
+        assert_eq!(decode_id_token(&jwt), Err("oversized_decoded_header"));
+    }
+
+    #[test]
+    fn oversized_decoded_payload_is_rejected() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let big_payload = format!(
+            r#"{{"iss":"x","pad":"{}"}}"#,
+            "a".repeat(JWT_MAX_DECODED_PAYLOAD_BYTES + 1)
+        );
+        let payload_b64 = URL_SAFE_NO_PAD.encode(big_payload.as_bytes());
+        let jwt = format!("{header_b64}.{payload_b64}.sig");
+        assert_eq!(decode_id_token(&jwt), Err("oversized_decoded_payload"));
+    }
+
+    // ---------------------------------------------------------------
+    // 25/26/27: raw id_token absent from persisted form, Debug, and any
+    // logging path
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn raw_id_token_absent_from_persisted_readback_and_debug_output() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        let jwt = make_jwt(
+            r#"{"alg":"none"}"#,
+            r#"{"iss":"https://issuer.example","nonce":"test-nonce"}"#,
+            "unique-signature-sentinel-bytes",
+        );
+        receive_callback_with_environment(
+            &created.trace_id,
+            "GET",
+            &format!("id_token={jwt}"),
+            None,
+            b"",
+            &lookup,
+        )
+        .await
+        .unwrap();
+
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        // 26: Debug output of the whole readback.
+        let debug = format!("{readback:?}");
+        assert!(!debug.contains(&jwt));
+
+        // 25: the exact durably persisted bytes.
+        let store = open_store(&lookup).await.unwrap();
+        let history = store.read_history(&created.trace_id).await.unwrap();
+        for (_, bytes, _) in &history {
+            let text = String::from_utf8_lossy(bytes);
+            assert!(!text.contains(&jwt));
+            assert!(!text.contains("unique-signature-sentinel-bytes"));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn no_eprintln_in_jwt_inspection_ever_references_raw_token_material() {
+        // 27: this module's only logging calls are `eprintln!` on
+        // persistence-backend errors (sqlx internals), never on request
+        // content. Confirm no `eprintln!`/`println!` call exists anywhere
+        // between the OIDC/JWT section markers at all.
+        let source = include_str!("iam.rs");
+        let start = source
+            .find("SCORPION_IAM_OIDC_AND_JWT_INSPECTION_001")
+            .unwrap();
+        let jwt_section = &source[start..];
+        let production = jwt_section.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("eprintln!"));
+        assert!(!production.contains("println!"));
+    }
+
+    // ---------------------------------------------------------------
+    // 28/29/30: existing sensitive-name redaction stays intact;
+    // access_token is never JWT-decoded even when JWT-shaped
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn code_access_token_refresh_token_remain_redacted_and_access_token_is_never_jwt_decoded()
+    {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+
+        // access_token is JWT-*shaped* (three dot-separated segments) —
+        // it must still only ever be Redacted, never decoded.
+        let jwt_shaped_access_token = make_jwt(r#"{"alg":"none"}"#, r#"{"iss":"x"}"#, "sig");
+        let query = format!(
+            "code=auth-code-sentinel&refresh_token=refresh-sentinel&access_token={jwt_shaped_access_token}"
+        );
+        receive_callback_with_environment(&created.trace_id, "GET", &query, None, b"", &lookup)
+            .await
+            .unwrap();
+
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        let facts = &readback.observations[0].observation.facts;
+        assert!(matches!(
+            fact(facts, "code").status,
+            IamFactStatus::Redacted { .. }
+        ));
+        assert!(matches!(
+            fact(facts, "access_token").status,
+            IamFactStatus::Redacted { .. }
+        ));
+        assert!(matches!(
+            fact(facts, "refresh_token").status,
+            IamFactStatus::Redacted { .. }
+        ));
+        // No jwt.* fact exists at all — access_token was never decoded.
+        assert!(!facts.iter().any(|f| f.name.starts_with("jwt.")));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---------------------------------------------------------------
+    // 31: no signature-authenticity path constructs Validated (also
+    // covered generally by `source_never_constructs_a_validated_fact`,
+    // which scans this entire file including the OIDC/JWT section)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn jwt_section_never_constructs_a_validated_fact() {
+        let source = include_str!("iam.rs");
+        let start = source
+            .find("SCORPION_IAM_OIDC_AND_JWT_INSPECTION_001")
+            .unwrap();
+        let jwt_section = &source[start..];
+        let production = jwt_section.split("#[cfg(test)]").next().unwrap();
+        assert!(!production.contains("IamFactStatus::Validated"));
+    }
+
+    // ---------------------------------------------------------------
+    // 32: generic non-IAM-looking callback still works, classified
+    // Generic, exactly as before this frontier
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn plain_generic_callback_with_no_oauth_oidc_signals_stays_generic() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+        receive_callback_with_environment(&created.trace_id, "GET", "foo=bar", None, b"", &lookup)
+            .await
+            .unwrap();
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.observations[0].observation.protocol,
+            IamProtocolClassification::Generic
+        );
+        assert_eq!(
+            fact(&readback.observations[0].observation.facts, "foo").status,
+            IamFactStatus::Observed {
+                value: "bar".into()
+            }
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

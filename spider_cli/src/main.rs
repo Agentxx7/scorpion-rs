@@ -913,14 +913,32 @@ async fn main() {
                         }
 
                         if output_links {
-                            if return_headers {
-                                let headers_json = handle_headers(&res);
+                            // `--output-links` stdout is a successful-link
+                            // record stream only — a page with no observed
+                            // HTTP response (preflight-rejected, refused,
+                            // unresolvable, …) is a synthetic, never-fetched
+                            // `Page` and must never be echoed in the same
+                            // URL-shaped format a real crawled link uses
+                            // (`SCORPION_CLI_CRAWL_REJECTED_TARGET_OUTPUT_
+                            // SEMANTICS_001`). The attempted target is not
+                            // hidden — it moves to stderr, an explicitly
+                            // diagnostic channel, alongside the nonzero exit
+                            // this loop already guarantees below.
+                            if res.observed_status_code.is_some() {
+                                if return_headers {
+                                    let headers_json = handle_headers(&res);
 
-                                let _ = stdout
-                                    .write_all(format!("{} - {}\n", res.get_url(), headers_json).as_bytes())
-                                    .await;
+                                    let _ = stdout
+                                        .write_all(format!("{} - {}\n", res.get_url(), headers_json).as_bytes())
+                                        .await;
+                                } else {
+                                    let _ = stdout.write_all(string_concat!(res.get_url(), "\n").as_bytes()).await;
+                                }
                             } else {
-                                let _ = stdout.write_all(string_concat!(res.get_url(), "\n").as_bytes()).await;
+                                eprintln!(
+                                    "{} - rejected: no HTTP response was observed for this target",
+                                    res.get_url()
+                                );
                             }
                         }
                     }

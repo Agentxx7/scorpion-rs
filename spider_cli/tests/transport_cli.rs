@@ -599,10 +599,13 @@ fn crawl_with_observed_response_outputs_url_and_exits_zero() {
     assert!(http.hit_count() >= 1, "the local server was never reached");
 }
 
-/// A refused Crawl preserves the existing attempted-page link output, but
-/// cannot report shell success when no HTTP response was observed.
+/// A refused Crawl never echoes the attempted target as successful-link-
+/// shaped stdout output — `--output-links` stdout is a successful-link
+/// record stream only. The attempted target still surfaces, truthfully, on
+/// stderr, alongside the nonzero exit this codebase has always guaranteed
+/// (`SCORPION_CLI_CRAWL_REJECTED_TARGET_OUTPUT_SEMANTICS_001`).
 #[test]
-fn refused_crawl_preserves_link_output_and_exits_nonzero() {
+fn refused_crawl_emits_no_successful_link_stdout_and_exits_nonzero() {
     let unused = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = unused.local_addr().unwrap();
     drop(unused);
@@ -614,8 +617,47 @@ fn refused_crawl_preserves_link_output_and_exits_nonzero() {
         .expect("scorpion must run");
 
     assert_eq!(output.status.code(), Some(2), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), url);
-    assert!(String::from_utf8_lossy(&output.stderr).contains("server error"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "stdout must contain no successful-link record for a refused target: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("server error"));
+    assert!(
+        stderr.contains(&url) && stderr.contains("rejected"),
+        "stderr must truthfully identify the rejected target: {stderr}"
+    );
+}
+
+/// A syntactically-parseable but unresolvable/invalid target (no transport-
+/// policy rejection involved — this reaches acquisition and fails there)
+/// is exactly the case the owner observed producing misleading
+/// `https://htp://broken`-shaped stdout before this fix.
+#[test]
+fn invalid_target_emits_no_successful_link_stdout_and_exits_nonzero() {
+    let output = scorpion()
+        .args([
+            "--url",
+            "htp://broken",
+            "--limit",
+            "1",
+            "--http",
+            "crawl",
+            "--output-links",
+        ])
+        .output()
+        .expect("scorpion must run");
+
+    assert_ne!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "stdout must contain no successful-link record for an invalid target: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("htp://broken") && stderr.contains("rejected"),
+        "stderr must truthfully identify the rejected target: {stderr}"
+    );
 }
 
 /// A Download succeeds only after bytes from an observed HTTP response are

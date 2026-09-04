@@ -546,16 +546,19 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn windows_app_data_dir_uses_localappdata_and_the_scorpion_subdirectory() {
-        // `resolve_app_data_dir`'s Windows branch is exercised
-        // unconditionally here (via `cfg!(windows)` inside the function
-        // itself the branch only *runs* on a real Windows target — this
-        // test instead proves the pure path-joining logic a Windows run
-        // would take, by calling the same function and asserting on
-        // its non-Windows fallback shape is different/well-formed; the
-        // Windows-specific branch itself is exercised for real by the
-        // owner's Windows acceptance run).
+    fn app_data_dir_resolves_and_ends_with_scorpion_on_this_platform() {
+        // `resolve_app_data_dir` branches on `cfg!(windows)` at runtime,
+        // not compile time — this genuinely takes the Windows branch
+        // when this test itself runs on a real Windows target (proven
+        // the hard way: an earlier version of this test only supplied
+        // "HOME", which is correct for the non-Windows dev fallback but
+        // caused a real panic when this test actually executed on
+        // Windows CI, since that branch reads "LOCALAPPDATA" instead).
+        // Supplying both keys unconditionally is harmless (only the one
+        // the active platform's branch actually reads is used) and
+        // makes this test correct on every platform it can run on.
         let dir = resolve_app_data_dir(&|name| match name {
+            "LOCALAPPDATA" => Some("C:\\Users\\test-user\\AppData\\Local".to_string()),
             "HOME" => Some("/home/test-user".to_string()),
             _ => None,
         })

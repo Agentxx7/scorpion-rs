@@ -32,11 +32,7 @@ pub struct HuggingFaceArtifactsParams {
 }
 
 fn identity_kind_label(kind: ArtifactIdentityKind) -> &'static str {
-    match kind {
-        ArtifactIdentityKind::GitBlobOid => "git_blob_oid",
-        ArtifactIdentityKind::LfsSha256 => "lfs_sha256",
-        ArtifactIdentityKind::XetHash => "xet_hash",
-    }
+    kind.as_label()
 }
 
 /// Project one canonical [`ArtifactReference`] into JSON, verbatim — every

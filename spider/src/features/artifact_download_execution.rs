@@ -112,6 +112,12 @@ pub struct AcquiredArtifact {
     pub status_code: u16,
     /// The response's `Content-Type` header, verbatim, when present.
     pub content_type: Option<String>,
+    /// The response's own `Content-Length` header, verbatim, when present.
+    /// Already reconciled against `bytes_written` during execution (see
+    /// [`ArtifactDownloadExecutionError::SizeMismatch`]) — exposed here so
+    /// a caller can report it truthfully without re-deriving it from
+    /// response headers itself.
+    pub declared_content_length: Option<u64>,
     /// Exact path the completed artifact was atomically finalized to.
     pub destination: PathBuf,
     /// Exact number of bytes written — always equal to the response body
@@ -162,6 +168,19 @@ pub enum ArtifactDownloadExecutionError {
     /// already established (network drop, decode error, truncated
     /// chunked body). The temp file was removed.
     StreamFailed(String),
+    /// An operator-supplied `max_bytes` ceiling (e.g. a CLI `--max-bytes`
+    /// flag) would have been exceeded. Detected mid-stream, before the
+    /// excess chunk was written to disk — never as post-download
+    /// validation. Nothing was finalized to `destination`; the temp file
+    /// was removed. Distinct from [`Self::SizeMismatch`], which compares
+    /// against provider/HTTP-declared sizes, not an operator ceiling.
+    MaxBytesExceeded {
+        /// The operator-supplied ceiling.
+        max_bytes: u64,
+        /// How many bytes would have been written had the chunk that
+        /// crossed the ceiling been accepted.
+        attempted_bytes: u64,
+    },
     /// A declared byte count — either the response's own `Content-Length`
     /// or [`ArtifactReference::size_bytes`] — did not match the exact
     /// number of bytes actually streamed. The temp file was removed.
@@ -228,6 +247,13 @@ impl std::fmt::Display for ArtifactDownloadExecutionError {
                 write!(f, "artifact destination I/O failed: {message}")
             }
             Self::StreamFailed(message) => write!(f, "artifact body stream failed: {message}"),
+            Self::MaxBytesExceeded {
+                max_bytes,
+                attempted_bytes,
+            } => write!(
+                f,
+                "artifact download exceeded the {max_bytes}-byte budget ({attempted_bytes} bytes attempted); aborted mid-stream"
+            ),
             Self::SizeMismatch {
                 source,
                 declared,
@@ -354,9 +380,19 @@ async fn cleanup_and_fail_with(
 /// [`transport::execute_streaming_request`], reused exactly as the prior
 /// frontier defined it, honoring `binding.transport` and
 /// `binding.headers` exactly as supplied.
+///
+/// `max_bytes`, when supplied, is an operator-controlled ceiling (e.g. a
+/// CLI `--max-bytes` flag) enforced while streaming: the check happens
+/// before each chunk is written to disk, so a budget crossed by an
+/// incoming chunk fails with [`ArtifactDownloadExecutionError::MaxBytesExceeded`]
+/// before that chunk — or the destination — is ever touched. `None` means
+/// no operator ceiling was supplied and preserves this function's prior,
+/// unbounded-by-this-parameter behavior exactly
+/// (`SCORPION_CANONICAL_ARTIFACT_DOWNLOAD_CLI_SURFACE_001`).
 pub async fn execute(
     binding: &ArtifactDownloadBinding,
     destination: &Path,
+    max_bytes: Option<u64>,
 ) -> Result<AcquiredArtifact, ArtifactDownloadExecutionError> {
     let empty_headers = SecretRequestHeaders::new();
     let headers = binding.headers.as_ref().unwrap_or(&empty_headers);
@@ -408,6 +444,19 @@ pub async fn execute(
                 .await);
             }
         };
+        if let Some(max) = max_bytes {
+            let attempted_bytes = bytes_written + chunk.len() as u64;
+            if attempted_bytes > max {
+                return Err(cleanup_and_fail_with(
+                    &temp_path,
+                    ArtifactDownloadExecutionError::MaxBytesExceeded {
+                        max_bytes: max,
+                        attempted_bytes,
+                    },
+                )
+                .await);
+            }
+        }
         if let Err(error) = writer.write(&chunk).await {
             return Err(cleanup_and_fail_with(
                 &temp_path,
@@ -497,6 +546,7 @@ pub async fn execute(
         final_url,
         status_code: status.as_u16(),
         content_type,
+        declared_content_length,
         destination: destination.to_path_buf(),
         bytes_written,
         sha256_hex,
@@ -631,7 +681,7 @@ mod tests {
         let destination = scratch.path("model.bin");
         let binding = binding_for(fixture.url(), artifact(None, Vec::new()));
 
-        let acquired = execute(&binding, &destination).await.unwrap();
+        let acquired = execute(&binding, &destination, None).await.unwrap();
 
         assert_eq!(acquired.status_code, 200);
         assert_eq!(acquired.bytes_written, PAYLOAD.len() as u64);
@@ -660,7 +710,7 @@ mod tests {
         }];
         let binding = binding_for(fixture.url(), artifact(None, identities));
 
-        let acquired = execute(&binding, &destination).await.unwrap();
+        let acquired = execute(&binding, &destination, None).await.unwrap();
 
         assert_eq!(acquired.identity_verifications.len(), 1);
         assert_eq!(
@@ -684,7 +734,7 @@ mod tests {
         }];
         let binding = binding_for(fixture.url(), artifact(None, identities));
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         assert!(matches!(
             error,
             ArtifactDownloadExecutionError::IdentityMismatch { .. }
@@ -710,7 +760,7 @@ mod tests {
         ];
         let binding = binding_for(fixture.url(), artifact(None, identities));
 
-        let acquired = execute(&binding, &destination).await.unwrap();
+        let acquired = execute(&binding, &destination, None).await.unwrap();
 
         assert_eq!(acquired.identity_verifications.len(), 2);
         for verification in &acquired.identity_verifications {
@@ -730,6 +780,52 @@ mod tests {
         );
     }
 
+    // SCORPION_CANONICAL_ARTIFACT_DOWNLOAD_CLI_SURFACE_001
+
+    #[tokio::test]
+    async fn max_bytes_at_or_above_payload_size_succeeds() {
+        let fixture = HttpFixture::start("200 OK", "", PAYLOAD).await;
+        let scratch = ScratchDir::new("max_bytes_ok");
+        let destination = scratch.path("model.bin");
+        let binding = binding_for(fixture.url(), artifact(None, Vec::new()));
+
+        let acquired = execute(&binding, &destination, Some(PAYLOAD.len() as u64))
+            .await
+            .unwrap();
+
+        assert_eq!(acquired.bytes_written, PAYLOAD.len() as u64);
+        assert!(destination.exists());
+    }
+
+    #[tokio::test]
+    async fn max_bytes_below_payload_size_fails_mid_stream_and_leaves_no_finalized_file() {
+        let fixture = HttpFixture::start("200 OK", "", PAYLOAD).await;
+        let scratch = ScratchDir::new("max_bytes_exceeded");
+        let destination = scratch.path("model.bin");
+        let binding = binding_for(fixture.url(), artifact(None, Vec::new()));
+        let budget = (PAYLOAD.len() as u64) - 1;
+
+        let error = execute(&binding, &destination, Some(budget))
+            .await
+            .unwrap_err();
+
+        match error {
+            ArtifactDownloadExecutionError::MaxBytesExceeded {
+                max_bytes,
+                attempted_bytes,
+            } => {
+                assert_eq!(max_bytes, budget);
+                assert!(attempted_bytes > budget);
+            }
+            other => panic!("expected MaxBytesExceeded, got {other:?}"),
+        }
+        // Fails closed: no finalized destination file, and this was
+        // detected during streaming (not post-download) -- the temp file
+        // this executor briefly held was cleaned up, never renamed.
+        assert!(!destination.exists());
+        assert!(scratch.entries().is_empty(), "no leftover temp file");
+    }
+
     #[tokio::test]
     async fn non_success_status_writes_nothing() {
         let fixture = HttpFixture::start("404 Not Found", "", b"not found").await;
@@ -737,7 +833,7 @@ mod tests {
         let destination = scratch.path("model.bin");
         let binding = binding_for(fixture.url(), artifact(None, Vec::new()));
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         match error {
             ArtifactDownloadExecutionError::NonSuccessStatus { status, .. } => {
                 assert_eq!(status, 404)
@@ -755,7 +851,7 @@ mod tests {
         std::fs::write(&destination, b"pre-existing completed artifact").unwrap();
         let binding = binding_for(fixture.url(), artifact(None, Vec::new()));
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         assert!(matches!(
             error,
             ArtifactDownloadExecutionError::DestinationAlreadyExists(_)
@@ -776,7 +872,7 @@ mod tests {
             artifact(Some(PAYLOAD.len() as u64 + 1), Vec::new()),
         );
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         match error {
             ArtifactDownloadExecutionError::SizeMismatch {
                 source,
@@ -818,7 +914,7 @@ mod tests {
         let url = url::Url::parse(&format!("http://{addr}/artifact")).unwrap();
         let binding = binding_for(url, artifact(None, Vec::new()));
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         assert!(matches!(
             error,
             ArtifactDownloadExecutionError::StreamFailed(_)
@@ -839,7 +935,7 @@ mod tests {
             url::Url::parse("http://exampleexampleexampleexamp.onion/model.bin").unwrap();
         let binding = binding_for(onion_url, artifact(None, Vec::new()));
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         assert!(matches!(
             error,
             ArtifactDownloadExecutionError::Transport(TransportError::OnionRequiresTor)
@@ -880,7 +976,7 @@ mod tests {
         let binding = binding_for(fixture.url(), artifact(None, identities));
 
         let _guard = ForceCleanupFailureGuard::new();
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
 
         match error {
             ArtifactDownloadExecutionError::CleanupFailed { primary, cleanup } => {
@@ -922,7 +1018,7 @@ mod tests {
         let destination = scratch.path("missing_parent/model.bin");
         let binding = binding_for(fixture.url(), artifact(None, Vec::new()));
 
-        let error = execute(&binding, &destination).await.unwrap_err();
+        let error = execute(&binding, &destination, None).await.unwrap_err();
         assert!(
             matches!(
                 error,
@@ -1028,7 +1124,7 @@ mod tests {
                 headers: None,
             };
 
-            let acquired = execute(&binding, &destination).await.unwrap();
+            let acquired = execute(&binding, &destination, None).await.unwrap();
 
             assert_eq!(acquired.bytes_written, PAYLOAD.len() as u64);
             assert_eq!(acquired.sha256_hex, sha256_of(PAYLOAD));

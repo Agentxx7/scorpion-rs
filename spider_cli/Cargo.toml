@@ -120,6 +120,18 @@ remote_addr = ["spider/remote_addr"]
 # gate on `hugging_face_source_provider`, itself just `serde`) — the only
 # genuine compile prerequisite this capability has.
 hugging_face_artifacts = ["spider/source_hugging_face"]
+# Canonical bounded, owner-controlled artifact download
+# (`scorpion artifact-download --reference-file ... --destination ...
+# --max-bytes ...`) — CLI-only surface for the already-existing
+# `artifact_download_binding`/`artifact_download_execution` seam. Not part
+# of `default`: this is the first public-interface exposure of this
+# capability (SCORPION_CANONICAL_ARTIFACT_DOWNLOAD_CLI_SURFACE_001), MCP/
+# Web exposure is explicitly out of scope. Forwards to `spider/evidence`
+# (the canonical execution seam's own requirement — streaming SHA-256 and
+# this type's `serde` (de)serialization both come from that one feature);
+# provider-neutral by construction, so it deliberately does not depend on
+# `hugging_face_artifacts`.
+artifact_download = ["spider/evidence"]
 # Canonical local PaliGemma CAPTCHA provider (SigLIP + Gemma). Not part of
 # `default`: an 11+ GB pinned model checkpoint is not something an ordinary
 # `scorpion` build should pull in silently. Forwards only the library

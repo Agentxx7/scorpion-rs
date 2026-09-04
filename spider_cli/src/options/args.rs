@@ -552,5 +552,9 @@ mod tests {
         assert!(names.contains(&"research"), "{names:?}");
         #[cfg(feature = "mcp")]
         assert!(names.contains(&"mcp"), "{names:?}");
+        #[cfg(feature = "hugging_face_artifacts")]
+        assert!(names.contains(&"hugging-face-artifacts"), "{names:?}");
+        #[cfg(feature = "artifact_download")]
+        assert!(names.contains(&"artifact-download"), "{names:?}");
     }
 }

@@ -23,6 +23,8 @@ extern crate env_logger;
 extern crate serde_json;
 extern crate spider;
 
+#[cfg(feature = "artifact_download")]
+pub mod artifact_download;
 #[cfg(feature = "audit")]
 pub mod audit;
 pub mod build_folders;
@@ -589,6 +591,20 @@ async fn main() {
             };
             return print_discovery_result(hugging_face_artifacts::run(params).await).await;
         }
+        #[cfg(feature = "artifact_download")]
+        if let Some(Commands::ARTIFACT_DOWNLOAD {
+            reference_file,
+            destination,
+            max_bytes,
+        }) = &cli.command
+        {
+            let params = artifact_download::ArtifactDownloadParams {
+                reference_file: reference_file.clone(),
+                destination: destination.clone(),
+                max_bytes: *max_bytes,
+            };
+            return print_discovery_result(artifact_download::run(params).await).await;
+        }
     }
 
     if cli.url.is_empty() {
@@ -1072,7 +1088,9 @@ async fn main() {
                     feature = "robots_sitemap",
                     feature = "search_searxng",
                     feature = "research",
-                    feature = "mcp"
+                    feature = "mcp",
+                    feature = "hugging_face_artifacts",
+                    feature = "artifact_download"
                 ))]
                 Some(_) => unreachable!(
                     "discovery/fetch/mcp commands return early, before this match"

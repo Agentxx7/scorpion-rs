@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 /// Identity is independent of presentation: changing a provider's display
 /// name does not change registry lookup or duplicate detection.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ProviderId(String);
 
 impl ProviderId {

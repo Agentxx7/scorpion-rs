@@ -265,6 +265,33 @@ pub enum Commands {
         #[clap(long)]
         limit: Option<usize>,
     },
+    /// Download exactly one artifact through the canonical artifact-
+    /// download binding/execution seam, from a serialized
+    /// `ArtifactReference` JSON file to an exact, operator-chosen
+    /// destination path. CLI-only surface (no MCP/Web exposure); no
+    /// provider filename is ever automatically written, no existing
+    /// destination is overwritten, and no archive is ever extracted.
+    /// `--max-bytes` is required: there is no unbounded download.
+    #[cfg(feature = "artifact_download")]
+    #[clap(name = "artifact-download")]
+    #[allow(non_camel_case_types)]
+    ARTIFACT_DOWNLOAD {
+        /// Path to a JSON file holding exactly one serialized
+        /// `ArtifactReference` — e.g. one element of the `"artifacts"`
+        /// array `scorpion hugging-face-artifacts` prints, saved verbatim.
+        #[clap(long)]
+        reference_file: String,
+        /// Exact destination file path. Never a directory; never derived
+        /// from provider-declared metadata. Fails closed if it already
+        /// exists.
+        #[clap(long)]
+        destination: String,
+        /// Maximum bytes this download may stream before it fails closed,
+        /// mid-stream, before the excess bytes are written to disk.
+        /// Required.
+        #[clap(long)]
+        max_bytes: u64,
+    },
     /// Launch the canonical Spider MCP server over stdio — the same
     /// server implementation the standalone `spider-mcp` binary runs.
     /// Stdout is reserved for MCP protocol traffic; logs go to stderr.

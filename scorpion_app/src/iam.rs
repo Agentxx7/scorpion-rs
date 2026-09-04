@@ -652,12 +652,42 @@ async fn read_trace_with_environment(
     else {
         return Err(IamError::NotFound);
     };
-    let state = deserialize_state(&state_bytes)?;
+    let mut state = deserialize_state(&state_bytes)?;
 
     let history = store
         .read_history(&key)
         .await
         .map_err(map_persistence_error)?;
+
+    // Explicit, durable recovery for the one crash window `receive_
+    // callback`'s own self-healing (SCORPION_IAM_CALLBACK_RECEIVER_AND_
+    // PERSISTENCE_001's follow-up fix) cannot close: an observation
+    // durably appended, the process dying before AwaitingCallback ->
+    // Received was persisted, and no later callback ever arriving to
+    // trigger that self-healing retry. Readback is the one access path
+    // guaranteed to be exercised for any trace an operator actually
+    // cares about, so it repairs the condition here -- via the exact
+    // same `try_mark_received`/`write_current` path `receive_callback`
+    // uses, never a value fabricated only in this response -- before
+    // returning. History is the authority for *whether* a repair is
+    // due: this only fires when real, already-durable observation
+    // history exists alongside a still-`AwaitingCallback` state; a trace
+    // genuinely still awaiting its first callback (empty history) is
+    // untouched. No process-local flag records that a repair happened —
+    // this check is re-derived from durable state on every call, so it
+    // is safe to run again even if a previous repair attempt itself
+    // failed.
+    if matches!(state, IamTraceState::AwaitingCallback) && !history.is_empty() {
+        try_mark_received(&store, &trace_id).await;
+        if let Some((_, refreshed_bytes)) = store
+            .read_current(&key)
+            .await
+            .map_err(map_persistence_error)?
+        {
+            state = deserialize_state(&refreshed_bytes)?;
+        }
+    }
+
     let mut observations = Vec::with_capacity(history.len());
     for (revision, bytes, recorded_at) in history {
         let observation: IamCallbackObservation =
@@ -994,13 +1024,18 @@ mod tests {
             )
             .await
             .unwrap();
-        // Sanity check the manufactured inconsistency actually exists
-        // before proving the repair.
-        let readback = read_trace_with_environment(&created.trace_id, &lookup)
-            .await
-            .unwrap();
-        assert_eq!(readback.state, "awaiting_callback");
-        assert_eq!(readback.observations.len(), 1);
+        // Sanity check the manufactured inconsistency actually exists —
+        // reading the *raw* persisted state directly, not through
+        // `read_trace`, since (after
+        // SCORPION_IAM_CALLBACK_TRACE_STATE_RECOVERY_001) `read_trace`
+        // itself now repairs exactly this condition; going through it
+        // here would repair the state before this test ever exercises
+        // the second-callback repair path it means to prove.
+        let (_, raw_state_bytes) = store.read_current(&key).await.unwrap().unwrap();
+        let raw_state: IamTraceState = serde_json::from_slice(&raw_state_bytes).unwrap();
+        assert_eq!(raw_state, IamTraceState::AwaitingCallback);
+        let history = store.read_history(&key).await.unwrap();
+        assert_eq!(history.len(), 1);
 
         // A second, ordinary callback should both append its own
         // observation *and* repair the stuck state — even though this
@@ -1231,6 +1266,81 @@ mod tests {
             .unwrap();
         assert_eq!(readback.state, "received");
         assert_eq!(readback.observations.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// SCORPION_IAM_CALLBACK_TRACE_STATE_RECOVERY_001: proves the crash
+    /// window the prior self-healing-on-callback fix could not close —
+    /// an observation durably appended, the state transition never
+    /// persisted, and *no second callback ever arriving* — is repaired
+    /// by the normal readback path instead, and that the repair is a
+    /// real durable write, not a value fabricated only in one response.
+    #[tokio::test]
+    async fn readback_repairs_a_stuck_trace_and_the_repair_survives_reopening_the_database() {
+        let path = store_path();
+        let _ = std::fs::remove_file(&path);
+        let lookup = configured_lookup(&path);
+        let created = create_trace_with_environment(&lookup).await.unwrap();
+        let trace_id: IamTraceId = created.trace_id.parse().unwrap();
+        let key = trace_id.to_string();
+
+        // Manufacture the exact scenario directly, with no second
+        // callback anywhere in this test: one real, durable observation
+        // in history; current state left at AwaitingCallback, exactly as
+        // a process crash between the two writes would leave it.
+        {
+            let store = open_store(&lookup).await.unwrap();
+            let stuck_observation = IamCallbackObservation::new(
+                trace_id,
+                "GET",
+                format!("/iam/callback/{trace_id}"),
+                now_unix_ms(),
+                IamProtocolClassification::Generic,
+                vec![IamFact::observed("stuck", "true")],
+            );
+            store
+                .append_history(
+                    &key,
+                    1,
+                    &serde_json::to_vec(&stuck_observation).unwrap(),
+                    SystemTime::now(),
+                )
+                .await
+                .unwrap();
+            // `store` dropped here — close persistence explicitly before
+            // the next step reopens it fresh.
+        }
+
+        // Reopen persistence independently and perform the *normal*
+        // readback path — no test-only recovery function, the same
+        // `read_trace` a real API call would use.
+        let readback = read_trace_with_environment(&created.trace_id, &lookup)
+            .await
+            .unwrap();
+        assert_eq!(
+            readback.state, "received",
+            "readback must repair a trace stuck AwaitingCallback despite durable history, \
+             even with no second callback ever arriving"
+        );
+        assert_eq!(
+            readback.observations.len(),
+            1,
+            "no observation may be lost by the repair"
+        );
+
+        // Reopen again, independently, and read the raw persisted state
+        // directly — proving the repair was actually durably written,
+        // not merely returned once by the call above.
+        let reopened_lookup = configured_lookup(&path);
+        let store = open_store(&reopened_lookup).await.unwrap();
+        let (_, state_bytes) = store.read_current(&key).await.unwrap().unwrap();
+        let state: IamTraceState = serde_json::from_slice(&state_bytes).unwrap();
+        assert_eq!(
+            state,
+            IamTraceState::Received,
+            "the repair must survive a process restart, not just live in one response"
+        );
+
         let _ = std::fs::remove_file(&path);
     }
 

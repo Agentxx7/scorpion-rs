@@ -386,7 +386,30 @@ capability_id = "SCORPION_CANONICAL_CAPTCHA_MACHINE_READABLE_CAPABILITY_COVERAGE
 # `wired_stage_chains_prove_real_call_adjacency_rooted_in_production_
 # source` and `production_reachable_claims_are_grep_verified_against_
 # shipping_manifests` both still pass unchanged.
-reviewed_commit = "fad7c07bc564e49486f48a63862eb34900f7833f"
+# Re-bound again, to 93d398af: SCORPION_CANONICAL_ARTIFACT_DOWNLOAD_CLI_
+# SURFACE_001 added a new `artifact_download` feature block to
+# spider_cli/Cargo.toml (forwarding only `spider/evidence`) — unrelated
+# to CAPTCHA/chrome semantics, but spider_cli/Cargo.toml is itself one
+# of this capability's own closure_relevant_files (`verdict_evidence`
+# above quotes its `default = [..., "chrome", ...]` line), so that byte
+# change alone invalidated fad7c07b's binding here too. The new feature
+# block is purely additive, added after the existing
+# `hugging_face_artifacts` entry and before the existing
+# `local_paligemma` entry; it does not touch the `default = [...]`
+# line, the `chrome = [...]` line, or any other line this capability's
+# verdict_evidence cites — confirmed by inspection of the commit's own
+# diff, not merely assumed. That commit's other changes (spider/src/
+# features/artifact_reference.rs, artifact_download_execution.rs,
+# source_provider.rs, spider_cli/src/artifact_download.rs,
+# hugging_face_artifacts.rs, main.rs, options/args.rs,
+# options/sub_command.rs) are entirely artifact-download/serde/CLI
+# surface, not CAPTCHA/chrome. No CAPTCHA detection, solving, provider
+# routing, frame/OOPIF handling, or CI evidence this capability cites
+# changed at all — confirmed empirically by re-running this harness
+# itself: `wired_stage_chains_prove_real_call_adjacency_rooted_in_
+# production_source` and `production_reachable_claims_are_grep_
+# verified_against_shipping_manifests` both still pass unchanged.
+reviewed_commit = "93d398af824df6f69ffa97d1279642bdcda57d87"
 bypass_attempts = [
     "inject a deterministic wrong/out-of-bounds click point instead of the real solution -> action rejected or dispatches zero actions, never a false solve (spider/tests/captcha_browser_production_binding_real.rs:deterministic_wrong_point_action_negative_test, out_of_bounds_solution_dispatches_zero_actions; spider/tests/captcha_browser_frame_action_real.rs:raw_top_level_click_at_frame_local_coordinates_does_not_solve_the_iframe; spider/tests/captcha_browser_oopif_action_real.rs:same_point_on_parent_context_does_not_solve_the_oopif)",
     "act through a stale/detached frame or OOPIF target identity -> typed failure, zero actions dispatched, never a fallback to a different target (spider/tests/captcha_browser_frame_action_real.rs:stale_frame_id_fails_typed_with_no_action, detached_frame_before_action_fails_typed_with_no_action; spider/tests/captcha_browser_oopif_action_real.rs:detached_oopif_target_before_action_fails_typed_with_no_action)",
@@ -493,4 +516,12 @@ ci_workflow_file = ".github/workflows/rust.yml"
 # full for the complete accounting). The CAPTCHA CI-portable evidence
 # step itself is untouched; every other closure_relevant_file is
 # untouched; no CAPTCHA-relevant fact changed.
-closed_commit = "fad7c07bc564e49486f48a63862eb34900f7833f"
+# Re-bound again, to 93d398af, for the exact same reason reviewed_
+# commit above was at that time (SCORPION_CANONICAL_ARTIFACT_DOWNLOAD_
+# CLI_SURFACE_001's purely additive new feature block in
+# spider_cli/Cargo.toml, plus otherwise-unrelated artifact-download/
+# serde/CLI surface changes — see that field's own comment in full for
+# the complete accounting). The CAPTCHA CI-portable evidence step
+# itself is untouched; every other closure_relevant_file is untouched;
+# no CAPTCHA-relevant fact changed.
+closed_commit = "93d398af824df6f69ffa97d1279642bdcda57d87"

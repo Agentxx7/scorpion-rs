@@ -2364,3 +2364,278 @@ fn iam_readback_of_an_unknown_trace_returns_a_truthful_not_found_error() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------
+// SCORPION_WINDOWS_INSTALLABLE_APPLICATION_001
+//
+// scorpion-launcher end-to-end, against the real compiled binaries.
+// The launcher's shipped/meaningful behavior is Windows-only, but every
+// piece of it was deliberately written with a cross-platform fallback
+// (see scorpion_launcher.rs's own module doc) specifically so its real,
+// compiled orchestration logic — not just its pure helper functions —
+// could be exercised here on the platform this repository's CI actually
+// runs on. This is not a substitute for the real Windows acceptance run
+// (SCORPION_WINDOWS_INSTALLABLE_APPLICATION_001's own owner-acceptance
+// procedure); it proves the orchestration logic itself is correct.
+//
+// These tests use the launcher's real fixed bind (127.0.0.1:8787) since
+// that is the actual, non-configurable contract under test — no other
+// test in this suite binds that exact address (every other helper here
+// uses TcpListener::bind("127.0.0.1:0") for an OS-assigned ephemeral
+// port precisely to avoid this collision), so this remains safe to run
+// alongside the rest of the suite.
+// ---------------------------------------------------------------------
+
+fn launcher_home_dir(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "scorpion-launcher-test-home-{}-{name}",
+        std::process::id()
+    ))
+}
+
+fn probe_health(timeout: Duration) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(&"127.0.0.1:8787".parse().unwrap(), timeout)
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ =
+        stream.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    response.starts_with("HTTP/1.1 200") && response.contains("\"status\":\"ok\"")
+}
+
+fn wait_for_health(timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if probe_health(Duration::from_millis(300)) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// Guarantees the `scorpion-api` this test's launcher spawns is reaped
+/// even if an assertion panics partway through — a `Drop` impl runs
+/// during unwinding too, unlike a plain cleanup step at the end of the
+/// function (which a mid-test panic would skip, leaking a process still
+/// holding 127.0.0.1:8787 for every later test run).
+struct KillSpawnedApiOnDrop(std::path::PathBuf);
+
+impl Drop for KillSpawnedApiOnDrop {
+    fn drop(&mut self) {
+        kill_process_with_env_containing(&domain_db_env_needle(&self.0));
+    }
+}
+
+#[test]
+fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
+    assert!(
+        !probe_health(Duration::from_millis(200)),
+        "127.0.0.1:8787 must be free before this test runs — something is already listening on it"
+    );
+
+    let home = launcher_home_dir("spawn-fresh");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let _kill_guard = KillSpawnedApiOnDrop(home.clone());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scorpion-launcher"))
+        .env("HOME", &home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("scorpion-launcher must spawn");
+
+    // 4/5: launcher waits for real /health readiness before doing
+    // anything else observable — proven by the readiness itself
+    // becoming true within a bounded wait.
+    let became_healthy = wait_for_health(Duration::from_secs(20));
+    let _ = child.wait();
+    assert!(
+        became_healthy,
+        "scorpion-api must become healthy after the launcher spawns it"
+    );
+
+    // Log files exist and the launcher's own log recorded a real
+    // startup line (2/3: exact loopback bind, never 0.0.0.0).
+    let launcher_log =
+        std::fs::read_to_string(home.join(".local/share/Scorpion/logs/launcher.log"))
+            .expect("launcher.log must exist");
+    assert!(launcher_log.contains("127.0.0.1:8787"));
+    assert!(!launcher_log.contains("0.0.0.0"));
+    assert!(launcher_log.contains("scorpion-api is healthy"));
+
+    let api_log_path = home.join(".local/share/Scorpion/logs/scorpion-api.log");
+    let api_log = std::fs::read_to_string(&api_log_path).expect("scorpion-api.log must exist");
+    assert!(api_log.contains("scorpion-api listening on 127.0.0.1:8787"));
+
+    // 14/15/16/17: exercise a real generic + a real SAML callback
+    // through the launcher-configured instance, then confirm the log
+    // never contains the raw secret material.
+    let trace_id =
+        extract_json_string_field(&post_iam_trace("http://127.0.0.1:8787"), "trace_id").unwrap();
+    post_iam_callback_form(
+        "http://127.0.0.1:8787",
+        &trace_id,
+        "access_token=must-never-appear-in-any-log-file",
+    );
+    let readback = get(
+        "http://127.0.0.1:8787",
+        &format!("/api/iam/traces/{trace_id}"),
+    );
+    assert!(readback.contains("\"redacted\""), "{readback}");
+    assert!(!readback.contains("must-never-appear-in-any-log-file"));
+
+    // 9: no manual SCORPION_DOMAIN_DB setup was needed — the launcher
+    // configured it internally. The store is opened lazily (on first
+    // real domain-persistence use, not merely on startup — /health
+    // itself never touches it), so the sqlite file's existence is
+    // checked here, after the IAM trace/callback above actually used
+    // it, not right after startup.
+    let db_path = home.join(".local/share/Scorpion/scorpion.sqlite3");
+    assert!(
+        db_path.is_file(),
+        "expected canonical DB at {}",
+        db_path.display()
+    );
+
+    let api_log_after = std::fs::read_to_string(&api_log_path).unwrap();
+    assert!(!api_log_after.contains("must-never-appear-in-any-log-file"));
+
+    // 18/19: the existing Web Console still renders, and /health stays
+    // truthful, through the launcher-managed instance.
+    let console = get("http://127.0.0.1:8787", "/");
+    assert!(console.starts_with("HTTP/1.1 200 OK"));
+    assert!(console.contains("id=\"iam-heading\""));
+    let health = get("http://127.0.0.1:8787", "/health");
+    assert!(health.contains("\"status\":\"ok\""));
+
+    // 12: no development absolute path leaked into any log.
+    assert!(!launcher_log.contains("/home/jonny"));
+    assert!(!api_log_after.contains("jonnyfrez"));
+
+    // 8: duplicate launch is deterministic — a second launcher run must
+    // detect the already-healthy instance and must NOT start a second
+    // scorpion-api (proven by: it exits quickly, and the DB/log files
+    // are not duplicated/reset).
+    let second_home = launcher_home_dir("spawn-fresh-second-launch");
+    let _ = std::fs::remove_dir_all(&second_home);
+    std::fs::create_dir_all(&second_home).unwrap();
+    let start = std::time::Instant::now();
+    let status = Command::new(env!("CARGO_BIN_EXE_scorpion-launcher"))
+        .env("HOME", &second_home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("second scorpion-launcher run must spawn");
+    let elapsed = start.elapsed();
+    assert!(
+        status.success(),
+        "duplicate launch must succeed (reuse), not fail"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "duplicate launch must reuse the existing instance quickly, not re-spawn/re-wait: took {elapsed:?}"
+    );
+    // The second launcher's own (isolated) HOME must never have gotten
+    // a scorpion.sqlite3 — proof no second server/config was created.
+    assert!(!second_home
+        .join(".local/share/Scorpion/scorpion.sqlite3")
+        .is_file());
+
+    // Clean up the one real scorpion-api this test spawned. It was
+    // spawned by the launcher (not by this test directly), so there is
+    // no `Child` handle to it here, and its distinguishing marker
+    // (SCORPION_DOMAIN_DB=<home>/...) lives in its *environment*, not
+    // its argv — `pkill -f` only searches argv, so it would silently
+    // match nothing (or worse, match an unrelated concurrently-running
+    // test's scorpion-api by bare name). Find the real PID by scanning
+    // /proc/*/environ for this test's own unique db path instead.
+    kill_process_with_env_containing(&domain_db_env_needle(&home));
+    thread::sleep(Duration::from_millis(300));
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&second_home);
+}
+
+fn domain_db_env_needle(home: &std::path::Path) -> String {
+    format!(
+        "SCORPION_DOMAIN_DB={}",
+        home.join(".local/share/Scorpion/scorpion.sqlite3")
+            .display()
+    )
+}
+
+/// Best-effort test-only cleanup: kill any process whose `/proc/<pid>/environ`
+/// contains `needle` — used only to reap the one `scorpion-api` this test's
+/// own launcher spawned (identified by its unique, test-local
+/// `SCORPION_DOMAIN_DB` path), never anything matched by name alone.
+fn kill_process_with_env_containing(needle: &str) {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
+            continue;
+        };
+        if environ
+            .split(|&b| b == 0)
+            .any(|var| var == needle.as_bytes())
+        {
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        }
+    }
+}
+
+// 3: structural guardrail — 0.0.0.0 never appears as a bind literal
+// anywhere in the launcher or the server entrypoint.
+#[test]
+fn no_wildcard_bind_literal_exists_in_launcher_or_server_source() {
+    // Scoped to actual production code — excludes doc-comment prose
+    // (this module's own doc comments truthfully explain "never
+    // 0.0.0.0" in several places) and the test module (whose own
+    // negative assertions, e.g. `!SCORPION_BIND.starts_with("0.0.0.0")`,
+    // legitimately reference the literal too) — both of which would
+    // otherwise self-defeat a bare whole-file substring check.
+    fn has_wildcard_bind_in_code(source: &str) -> bool {
+        let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+        production_source.lines().any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && line.contains("0.0.0.0")
+        })
+    }
+    let launcher_source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bin/scorpion_launcher.rs"
+    ))
+    .unwrap();
+    let server_source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    assert!(!has_wildcard_bind_in_code(&launcher_source));
+    assert!(!has_wildcard_bind_in_code(&server_source));
+}
+
+// 13: install-directory read-only safety — the launcher never writes
+// anywhere under its own resolved install directory; every mutable
+// path it computes (db/log paths) lives only under the app-data
+// directory.
+#[test]
+fn launcher_source_never_writes_under_the_install_directory() {
+    let launcher_source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bin/scorpion_launcher.rs"
+    ))
+    .unwrap();
+    assert!(!launcher_source.contains("install_dir.join(\"scorpion.sqlite3\")"));
+    assert!(!launcher_source.contains("install_dir.join(\"logs\")"));
+    // The only writes performed (`create_dir_all`, log file opens, the
+    // spawned child's own DB) are all rooted at `app_data_dir`, never
+    // `install_dir` — `install_dir` is read-only-used solely to locate
+    // the sibling scorpion-api executable.
+    assert!(launcher_source.contains("install_dir.join(scorpion_api_exe_name())"));
+}

@@ -1,6 +1,7 @@
 [package]
 name = "scorpion_app"
 version = "2.53.4"
+authors = ["j-mendez <jeff@spider.cloud>"]
 edition = "2021"
 description = "Small server-side application boundary over Scorpion's canonical capabilities."
 license = "MIT"
@@ -21,3 +22,14 @@ tokio = { version = "1", features = ["macros", "net", "io-util", "rt-multi-threa
 [[bin]]
 name = "scorpion-api"
 path = "src/main.rs"
+
+# SCORPION_WINDOWS_INSTALLABLE_APPLICATION_001: the thin Windows startup
+# orchestrator packaged alongside scorpion-api.exe by scorpion_app/wix/main.wxs. Zero
+# new dependencies (see scorpion_launcher.rs's own module doc) — it
+# builds on every platform this workspace already targets, but its
+# meaningful behavior (hidden console window, %LOCALAPPDATA% resolution,
+# CREATE_NO_WINDOW child spawn) is Windows-only, matching this
+# frontier's Windows-first scope.
+[[bin]]
+name = "scorpion-launcher"
+path = "src/bin/scorpion_launcher.rs"

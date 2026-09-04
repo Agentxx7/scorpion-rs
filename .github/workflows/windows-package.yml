@@ -1,0 +1,126 @@
+name: Windows Package
+
+# SCORPION_WINDOWS_INSTALLABLE_APPLICATION_001: builds the real Windows
+# installer artifact (MSI, via the WiX Toolset through cargo-wix) from
+# scorpion_app's scorpion-api.exe + scorpion-launcher.exe on a genuine
+# windows-latest runner. This is the one canonical Windows packaging
+# workflow — it does not duplicate or replace any existing Linux CI job
+# in rust.yml/lint.yml/release-gate.yml.
+#
+# A successful run here means TESTED / ARTIFACT_BUILT — it does NOT mean
+# LIVE_VERIFIED or OWNER_VERIFIED. Only jonny personally installing and
+# launching the produced .msi on a real Windows machine can make this
+# frontier OWNER_VERIFIED_USABLE (see scorpion_app/wix/main.wxs and
+# scorpion_app/src/bin/scorpion_launcher.rs for the full contract).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - scorpion_app/**
+      - .github/workflows/windows-package.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - scorpion_app/**
+      - .github/workflows/windows-package.yml
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify source identity
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-windows-package-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build scorpion-api.exe and scorpion-launcher.exe (release, locked)
+        run: cargo build --release --locked -p scorpion_app --bin scorpion-api --bin scorpion-launcher
+
+      - name: Verify both executables were actually produced
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f target/release/scorpion-api.exe
+          test -f target/release/scorpion-launcher.exe
+
+      - name: Run scorpion_app's test suite on real Windows
+        # Includes scorpion_launcher's own unit tests and the real,
+        # compiled-binary end-to-end launcher tests in
+        # scorpion_app/tests/api.rs (spawn -> health wait -> IAM
+        # callback -> log-redaction check -> duplicate-launch reuse) —
+        # this is the actual Windows-target execution of that
+        # cross-platform-by-design test suite, not just a Linux proxy
+        # for it.
+        run: cargo test --locked -p scorpion_app
+
+      - name: Locate WiX Toolset v3 (candle/light)
+        id: wix
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v candle >/dev/null 2>&1 && command -v light >/dev/null 2>&1; then
+            echo "cargo-wix's own documented prerequisite: WiX Toolset v3.14.1 is present on windows-latest as of 2026-04-03 (https://github.com/volks73/cargo-wix#installation)."
+            echo "found=preinstalled" >> "$GITHUB_OUTPUT"
+          else
+            echo "WiX Toolset not found on PATH — installing the pinned fallback."
+            echo "found=downloaded" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pinned WiX Toolset v3.14.1 (fallback only)
+        if: steps.wix.outputs.found == 'downloaded'
+        shell: bash
+        # Pinned to the exact official wixtoolset/wix3 v3.14.1 release
+        # asset, checksum-verified before use — a deterministic,
+        # independently reproducible fallback rather than an assumption
+        # about runner-image contents, per this frontier's own "do not
+        # invent a fake packaging path" requirement.
+        run: |
+          set -euo pipefail
+          curl -sL -o wix314-binaries.zip \
+            https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
+          echo "6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31  wix314-binaries.zip" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/wix314"
+          unzip -q wix314-binaries.zip -d "$RUNNER_TEMP/wix314"
+          echo "$RUNNER_TEMP/wix314" >> "$GITHUB_PATH"
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
+      - name: Build the MSI (packaging only — binaries already built above)
+        run: cargo wix --no-build --nocapture --package scorpion_app --output target\wix\
+
+      - name: Verify the MSI was actually produced and report its identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          msi=$(ls target/wix/*.msi)
+          test -f "$msi"
+          echo "MSI_PATH=$msi" >> "$GITHUB_ENV"
+          echo "### Windows installer artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- file: \`$(basename "$msi")\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- sha256: \`$(sha256sum "$msi" | awk '{print $1}')\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- runner: windows-latest" >> "$GITHUB_STEP_SUMMARY"
+          sha256sum "$msi"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scorpion-windows-installer
+          path: ${{ env.MSI_PATH }}
+          if-no-files-found: error

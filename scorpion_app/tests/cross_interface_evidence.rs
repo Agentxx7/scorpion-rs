@@ -24,6 +24,18 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 
+/// Appends the platform's real executable extension (`.exe` on Windows,
+/// none elsewhere) — without this, the exact-path `is_file()` checks
+/// below fail on Windows even though the binary built successfully,
+/// since cargo always produces `<name>.exe` there.
+fn exe_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_string()
+    }
+}
+
 fn spider_mcp_binary() -> PathBuf {
     static BUILD: Once = Once::new();
     // CARGO_BIN_EXE_scorpion-api is `<workspace>/target/<profile>/scorpion-api`
@@ -33,7 +45,7 @@ fn spider_mcp_binary() -> PathBuf {
         .parent()
         .expect("scorpion-api binary must have a parent directory")
         .to_path_buf();
-    let binary = profile_dir.join("spider-mcp");
+    let binary = profile_dir.join(exe_name("spider-mcp"));
     BUILD.call_once(|| {
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "spider_mcp", "--bin", "spider-mcp"])
@@ -61,7 +73,7 @@ fn scorpion_cli_binary() -> PathBuf {
         .parent()
         .expect("scorpion-api binary must have a parent directory")
         .to_path_buf();
-    let binary = profile_dir.join("scorpion");
+    let binary = profile_dir.join(exe_name("scorpion"));
     BUILD.call_once(|| {
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "spider_cli", "--bin", "scorpion"])

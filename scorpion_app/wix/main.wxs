@@ -42,6 +42,17 @@
   future versions of this installer, or Windows Installer will treat
   upgrades as unrelated products and install side by side instead of
   upgrading in place).
+
+  Path note (found the hard way, on real Windows CI): `cargo wix`
+  itself locates this file relative to the target package's own
+  manifest directory (`scorpion_app\`), but `candle.exe`/`light.exe`
+  resolve every relative `Source`/`Value` *inside* this file relative
+  to whatever directory the `cargo wix` process itself was launched
+  from — the workspace root, in .github/workflows/windows-package.yml.
+  So every path below is written as `scorpion_app\wix\...`, not the
+  bare `wix\...` cargo-wix's own generated template uses by default
+  (correct only for a non-workspace, single-crate project where those
+  two directories are the same one).
 -->
 
 <!--
@@ -127,7 +138,7 @@
                     <Component Id='License' Guid='*'>
                         <File Id='LicenseFile'
                             DiskId='1'
-                            Source='wix\License.rtf'
+                            Source='scorpion_app\wix\License.rtf'
                             KeyPath='yes'/>
                     </Component>
 
@@ -237,7 +248,7 @@
           shortcuts use the executables' own default icon until an owner
           supplies a real one.
         -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
+        <!--<Icon Id='ProductICO' SourceFile='scorpion_app\wix\Product.ico'/>-->
         <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
 
         <Property Id='ARPHELPLINK' Value='https://github.com/Agentxx7/scorpion-rs'/>
@@ -250,7 +261,7 @@
           Disabling the EULA dialog in the installer requires commenting out
           or removing the following `WixVariable` tag
         -->
-        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
+        <WixVariable Id='WixUILicenseRtf' Value='scorpion_app\wix\License.rtf'/>
 
 
         <!--
@@ -261,7 +272,7 @@
 
           The banner BMP dimensions are 493 x 58 pixels.
         -->
-        <!--<WixVariable Id='WixUIBannerBmp' Value='wix\Banner.bmp'/>-->
+        <!--<WixVariable Id='WixUIBannerBmp' Value='scorpion_app\wix\Banner.bmp'/>-->
 
 
         <!--
@@ -272,7 +283,7 @@
 
           The dialog BMP dimensions are 493 x 312 pixels.
         -->
-        <!--<WixVariable Id='WixUIDialogBmp' Value='wix\Dialog.bmp'/>-->
+        <!--<WixVariable Id='WixUIDialogBmp' Value='scorpion_app\wix\Dialog.bmp'/>-->
 
     </Product>
 

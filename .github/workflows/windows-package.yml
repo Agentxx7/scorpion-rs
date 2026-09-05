@@ -50,9 +50,11 @@ jobs:
           key: ${{ runner.os }}-cargo-windows-package-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build scorpion-api.exe and scorpion-launcher.exe (release, locked)
+        id: build_binaries
         run: cargo build --release --locked -p scorpion_app --bin scorpion-api --bin scorpion-launcher
 
       - name: Verify both executables were actually produced
+        id: verify_binaries
         shell: bash
         run: |
           set -euo pipefail
@@ -66,11 +68,41 @@ jobs:
         # callback -> log-redaction check -> duplicate-launch reuse) —
         # this is the actual Windows-target execution of that
         # cross-platform-by-design test suite, not just a Linux proxy
-        # for it.
+        # for it. This step's own pass/fail is never hidden — a failure
+        # here still makes the whole job's conclusion "failure" (see the
+        # final summary step) — but it does not block the packaging
+        # steps below from running and reporting their own real result.
+        # This split exists because of a real, reproduced finding: a
+        # pre-existing, unrelated raw-socket test-fixture pattern used
+        # by several scorpion_app tests (spawn a `TcpListener` + a
+        # background non-blocking accept loop, then immediately issue a
+        # real fetch against it) is intermittently non-deterministic on
+        # this runner — a *different* such test failed on each of two
+        # separate real Windows runs of this exact commit, both times
+        # with the identical "locally listening fixture reported
+        # unreachable" symptom, never a failure in anything this
+        # frontier's own launcher/installer code does. Investigating and
+        # hardening that shared test-fixture pattern (e.g. real
+        # readiness synchronization instead of relying on OS-level TCP
+        # backlog buffering) is a real, separate, scoped follow-up —
+        # reported here, not silently patched piecemeal under an
+        # unrelated packaging frontier. Deliberately NOT using
+        # `continue-on-error` here: that would make the *job's own*
+        # conclusion "success" even when a real test failed, which would
+        # misreport this exact situation. Every packaging step below
+        # instead runs on `always() && steps.build_binaries.outcome ==
+        # 'success' && steps.verify_binaries.outcome == 'success'` — so
+        # packaging proceeds and reports its own real result regardless
+        # of *this* step's outcome, but never runs against binaries that
+        # were never actually built — while the job's overall conclusion
+        # still ends up "failure" whenever this test step fails (see the
+        # final reporting step), exactly matching reality.
+        id: scorpion_app_tests
         run: cargo test --locked -p scorpion_app
 
       - name: Locate WiX Toolset v3 (candle/light)
         id: wix
+        if: always() && steps.build_binaries.outcome == 'success' && steps.verify_binaries.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -83,7 +115,7 @@ jobs:
           fi
 
       - name: Install pinned WiX Toolset v3.14.1 (fallback only)
-        if: steps.wix.outputs.found == 'downloaded'
+        if: always() && steps.wix.outcome == 'success' && steps.wix.outputs.found == 'downloaded'
         shell: bash
         # Pinned to the exact official wixtoolset/wix3 v3.14.1 release
         # asset, checksum-verified before use — a deterministic,
@@ -100,12 +132,15 @@ jobs:
           echo "$RUNNER_TEMP/wix314" >> "$GITHUB_PATH"
 
       - name: Install cargo-wix
+        if: always() && steps.build_binaries.outcome == 'success' && steps.verify_binaries.outcome == 'success'
         run: cargo install cargo-wix --locked
 
       - name: Build the MSI (packaging only — binaries already built above)
+        if: always() && steps.build_binaries.outcome == 'success' && steps.verify_binaries.outcome == 'success'
         run: cargo wix --no-build --nocapture --package scorpion_app --output target\wix\
 
       - name: Verify the MSI was actually produced and report its identity
+        if: always() && steps.build_binaries.outcome == 'success' && steps.verify_binaries.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -120,7 +155,19 @@ jobs:
           sha256sum "$msi"
 
       - uses: actions/upload-artifact@v4
+        if: always() && steps.build_binaries.outcome == 'success' && steps.verify_binaries.outcome == 'success'
         with:
           name: scorpion-windows-installer
           path: ${{ env.MSI_PATH }}
           if-no-files-found: error
+
+      - name: Report test-suite outcome (never hidden by a successful package)
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.scorpion_app_tests.outcome }}" = "success" ]; then
+            echo "scorpion_app test suite on Windows: PASS" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "scorpion_app test suite on Windows: FAIL — see the earlier test step's own log for the real failing test. Packaging still ran independently above; a red job here means the test suite did not fully pass, even if an MSI was produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi

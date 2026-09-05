@@ -2393,6 +2393,28 @@ fn launcher_home_dir(name: &str) -> std::path::PathBuf {
     ))
 }
 
+/// The launcher's `resolve_app_data_dir` branches on `cfg!(windows)` at
+/// *runtime* — Windows reads `LOCALAPPDATA`, every other platform (this
+/// repository's own Linux dev/CI environment) reads `HOME`. Spawning the
+/// launcher with **both** env vars pointed at the same isolated `home`
+/// directory makes it deterministically test-isolated on whichever
+/// platform this test suite actually executes on — the real Windows
+/// run of this exact test (`SCORPION_WINDOWS_INSTALLABLE_APPLICATION_001`'s
+/// own CI) is what caught the very real bug of only setting `HOME`.
+fn set_launcher_home_env(command: &mut Command, home: &std::path::Path) {
+    command.env("HOME", home).env("LOCALAPPDATA", home);
+}
+
+/// Mirrors `resolve_app_data_dir`'s own path-joining exactly, for
+/// whichever platform this test is actually executing on.
+fn expected_app_data_dir(home: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        home.join("Scorpion")
+    } else {
+        home.join(".local/share/Scorpion")
+    }
+}
+
 fn probe_health(timeout: Duration) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&"127.0.0.1:8787".parse().unwrap(), timeout)
     else {
@@ -2442,8 +2464,9 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
     std::fs::create_dir_all(&home).unwrap();
     let _kill_guard = KillSpawnedApiOnDrop(home.clone());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_scorpion-launcher"))
-        .env("HOME", &home)
+    let mut launcher_command = Command::new(env!("CARGO_BIN_EXE_scorpion-launcher"));
+    set_launcher_home_env(&mut launcher_command, &home);
+    let mut child = launcher_command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -2461,14 +2484,14 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
 
     // Log files exist and the launcher's own log recorded a real
     // startup line (2/3: exact loopback bind, never 0.0.0.0).
-    let launcher_log =
-        std::fs::read_to_string(home.join(".local/share/Scorpion/logs/launcher.log"))
-            .expect("launcher.log must exist");
+    let app_data_dir = expected_app_data_dir(&home);
+    let launcher_log = std::fs::read_to_string(app_data_dir.join("logs/launcher.log"))
+        .expect("launcher.log must exist");
     assert!(launcher_log.contains("127.0.0.1:8787"));
     assert!(!launcher_log.contains("0.0.0.0"));
     assert!(launcher_log.contains("scorpion-api is healthy"));
 
-    let api_log_path = home.join(".local/share/Scorpion/logs/scorpion-api.log");
+    let api_log_path = app_data_dir.join("logs/scorpion-api.log");
     let api_log = std::fs::read_to_string(&api_log_path).expect("scorpion-api.log must exist");
     assert!(api_log.contains("scorpion-api listening on 127.0.0.1:8787"));
 
@@ -2495,7 +2518,7 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
     // itself never touches it), so the sqlite file's existence is
     // checked here, after the IAM trace/callback above actually used
     // it, not right after startup.
-    let db_path = home.join(".local/share/Scorpion/scorpion.sqlite3");
+    let db_path = app_data_dir.join("scorpion.sqlite3");
     assert!(
         db_path.is_file(),
         "expected canonical DB at {}",
@@ -2525,8 +2548,9 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
     let _ = std::fs::remove_dir_all(&second_home);
     std::fs::create_dir_all(&second_home).unwrap();
     let start = std::time::Instant::now();
-    let status = Command::new(env!("CARGO_BIN_EXE_scorpion-launcher"))
-        .env("HOME", &second_home)
+    let mut second_launcher_command = Command::new(env!("CARGO_BIN_EXE_scorpion-launcher"));
+    set_launcher_home_env(&mut second_launcher_command, &second_home);
+    let status = second_launcher_command
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -2540,10 +2564,11 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
         elapsed < Duration::from_secs(5),
         "duplicate launch must reuse the existing instance quickly, not re-spawn/re-wait: took {elapsed:?}"
     );
-    // The second launcher's own (isolated) HOME must never have gotten
-    // a scorpion.sqlite3 — proof no second server/config was created.
-    assert!(!second_home
-        .join(".local/share/Scorpion/scorpion.sqlite3")
+    // The second launcher's own (isolated) app-data dir must never have
+    // gotten a scorpion.sqlite3 — proof no second server/config was
+    // created.
+    assert!(!expected_app_data_dir(&second_home)
+        .join("scorpion.sqlite3")
         .is_file());
 
     // Clean up the one real scorpion-api this test spawned. It was
@@ -2553,7 +2578,10 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
     // its argv — `pkill -f` only searches argv, so it would silently
     // match nothing (or worse, match an unrelated concurrently-running
     // test's scorpion-api by bare name). Find the real PID by scanning
-    // /proc/*/environ for this test's own unique db path instead.
+    // /proc/*/environ for this test's own unique db path instead — this
+    // is a Linux-only cleanup mechanism (there is no /proc on Windows);
+    // `kill_process_with_env_containing` no-ops harmlessly there, since
+    // each CI run is a fresh, disposable VM anyway.
     kill_process_with_env_containing(&domain_db_env_needle(&home));
     thread::sleep(Duration::from_millis(300));
     let _ = std::fs::remove_dir_all(&home);
@@ -2563,7 +2591,8 @@ fn launcher_end_to_end_spawns_configures_and_becomes_healthy() {
 fn domain_db_env_needle(home: &std::path::Path) -> String {
     format!(
         "SCORPION_DOMAIN_DB={}",
-        home.join(".local/share/Scorpion/scorpion.sqlite3")
+        expected_app_data_dir(home)
+            .join("scorpion.sqlite3")
             .display()
     )
 }

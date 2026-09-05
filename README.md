@@ -34,6 +34,13 @@ release is an engine and operator-facing toolkit, not a hosted search website.
 There is currently no Google-like Scorpion search page. The engine exists; the
 operator experience above it is the next implementation phase.
 
+## Getting Started
+
+- **Windows:** [Installation and Runtime Guide](./docs/INSTALLATION_AND_RUNTIME_GUIDE.md) — download the MSI, verify it, install, and launch.
+- **Developer:** [Developer setup](./docs/INSTALLATION_AND_RUNTIME_GUIDE.md#13-developer-setup) — build from source, run tests.
+- **IAM:** [IAM Callback Inspector](./docs/INSTALLATION_AND_RUNTIME_GUIDE.md#10-iam-callback-inspector) — inspect real OAuth2/OIDC/SAML callbacks.
+- **Full local AI:** [Local LLM stack](./docs/INSTALLATION_AND_RUNTIME_GUIDE.md#4-local-llm-stack) + [Search / SearXNG](./docs/INSTALLATION_AND_RUNTIME_GUIDE.md#6-search--searxng) — configure durable Research end to end.
+
 ## Can I use Scorpion today?
 
 Build the exact released V1 artifacts from source:
@@ -257,6 +264,7 @@ No dates or uncommitted version promises are made.
 
 ## Documentation hierarchy
 
+- [docs/INSTALLATION_AND_RUNTIME_GUIDE.md](./docs/INSTALLATION_AND_RUNTIME_GUIDE.md) — install, configure, and troubleshoot Scorpion (start here)
 - [SCORPION.md](./SCORPION.md) — public product contract
 - [SCORPION_ARCHITECTURE.md](./SCORPION_ARCHITECTURE.md) — canonical ownership and architecture truth
 - [SCORPION_SDD.md](./SCORPION_SDD.md) — design specification

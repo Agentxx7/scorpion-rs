@@ -154,7 +154,7 @@ jobs:
           echo "- runner: windows-latest" >> "$GITHUB_STEP_SUMMARY"
           sha256sum "$msi"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always() && steps.build_binaries.outcome == 'success' && steps.verify_binaries.outcome == 'success'
         with:
           name: scorpion-windows-installer
